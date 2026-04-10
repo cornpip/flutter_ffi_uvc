@@ -1,0 +1,15 @@
+# Run with `dart run ffigen --config ffigen.yaml`.
+name: FlutterFfiUvcBindings
+description: |
+  Bindings for `src/flutter_ffi_uvc.h`.
+
+  Regenerate bindings with `dart run ffigen --config ffigen.yaml`.
+output: 'lib/src/flutter_ffi_uvc_bindings_generated.dart'
+headers:
+  entry-points:
+    - 'src/flutter_ffi_uvc.h'
+  include-directives:
+    - 'src/flutter_ffi_uvc.h'
+comments:
+  style: any
+  length: full
