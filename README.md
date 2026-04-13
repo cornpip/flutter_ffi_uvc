@@ -1,10 +1,12 @@
 # flutter_ffi_uvc
 
-This package is a Flutter plugin backed by native `libuvc`, `libusb`, and `libjpeg-turbo`.
+This package is a Flutter plugin backed by native `libuvc`.
 
-## Platform support
+## Android support
 
-- Android (`arm64-v8a`, `armeabi-v7a`, `x86_64`)
+- Android only
+- `minSdk 24`
+- Supported ABIs: `arm64-v8a`, `armeabi-v7a`, `x86_64`
 
 ## What this package does
 - Opens a UVC camera from an already acquired platform file descriptor
@@ -13,48 +15,21 @@ This package is a Flutter plugin backed by native `libuvc`, `libusb`, and `libjp
 - Copies the latest preview frame as RGBA bytes
 - Reads and writes supported UVC controls
 
-## What this package does not do
+## Android USB ownership and handoff
 
-This package does not enumerate USB devices or request Android USB permission
-for you. The app must do that on the platform side first, then pass the opened
-device file descriptor to `uvcCamera.openFd(...)`.
+This package expects the host Android app to pass an already acquired file
+descriptor into `uvcCamera.openFd(fd)`.
 
-In other words, this package handles the UVC/native camera session after the
-Android side has already:
+The Android host app typically:
 
-- found a USB camera device
-- obtained user permission to access it
-- opened the device and acquired a file descriptor
+1. enumerates devices with `UsbManager`
+2. requests user permission through the Android USB APIs
+3. opens the selected device with `UsbManager.openDevice(...)`
+4. obtains `UsbDeviceConnection.fileDescriptor`
 
-See the example app for one way to do that with a `MethodChannel`.
+The host app owns USB device access and `UsbDeviceConnection` lifetime.  
+This package only manages UVC streaming and control for that opened device.
 
-## Android FD-based design
-
-This package intentionally uses an Android file-descriptor handoff instead of
-asking `libuvc` to enumerate and open devices by itself.
-
-In a typical desktop `libuvc` flow, native code would:
-
-1. initialize `libuvc`
-2. enumerate or find a matching UVC device
-3. open that device directly in native code
-
-On Android, USB access is owned by the framework. Apps normally:
-
-1. enumerate devices with `UsbManager`
-2. request user permission through the Android USB APIs
-3. open the selected device with `UsbManager.openDevice(...)`
-4. obtain `UsbDeviceConnection.fileDescriptor`
-
-This package starts after that point. The app passes the already opened file
-descriptor into `uvcCamera.openFd(fd)`, and the native layer wraps that open
-device for `libuvc`-based UVC control and streaming.
-
-That separation is intentional:
-
-- Android app/platform code owns USB device discovery, selection, and permission
-- this package owns the shared native UVC camera session after the device is
-  already open
 
 ## Installation
 
@@ -64,6 +39,20 @@ flutter pub add flutter_ffi_uvc
 Or add `flutter_ffi_uvc` to the dependencies section of your `pubspec.yaml`.
 
 ## Usage
+
+### Typical lifecycle
+
+The intended usage flow is:
+
+1. Request Android camera and USB device permission in app/platform code.
+2. Open the USB device on the Android side and obtain a file descriptor.
+3. Optionally call `uvcCamera.setLogLevel(...)`.
+4. Call `uvcCamera.openFd(fd)`.
+5. Read `uvcCamera.supportedModes()`.
+6. Pick a mode and call `uvcCamera.startPreview(mode)`.
+7. Poll `uvcCamera.copyLatestFrame()` while preview is active.
+8. Call `uvcCamera.stopPreview()` when preview is no longer needed. 
+9. When finished, call `uvcCamera.closeDevice()` and close the Android `UsbDeviceConnection`.
 
 ### Single-camera model
 
@@ -82,44 +71,7 @@ class UvcPreviewPage extends StatefulWidget {
 }
 ```
 
-### Primary API
-
-Most users will interact with these primary API entry points:
-
-- uvcCamera
-- UvcCamera
-- UvcCameraMode
-- UvcPreviewFrame
-- UvcCameraControl
-- UvcControlId
-- UvcControlKind
-
-Debugging APIs are also available when needed:
-
-- UvcLogLevel
-- UvcBmControlInfo
-- debugBmControls()
-
-Do not depend on the generated bindings directly unless you are working on the
-package internals.
-
-### Typical lifecycle
-
-The intended usage flow is:
-
-1. Request Android camera and USB device permission in app/platform code.
-2. Open the USB device on the Android side and obtain a file descriptor.
-3. Optionally call `uvcCamera.setLogLevel(...)`.
-4. Call `uvcCamera.openFd(fd)`.
-5. Read `uvcCamera.supportedModes()`.
-6. Pick a mode and call `uvcCamera.startPreview(mode)`.
-7. Poll `uvcCamera.copyLatestFrame()` while preview is active.
-8. Call `uvcCamera.stopPreview()` when preview is no longer needed.
-9. Call `uvcCamera.closeDevice()` before releasing the device.
-
 ### Minimal usage example
-
-This package expects a valid file descriptor from platform code:
 
 ```dart
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
@@ -184,7 +136,6 @@ if (panTilt != null) {
   );
 }
 ```
-
 ### Logging
 
 You can change the log level for the underlying libuvc layer at runtime:
@@ -207,17 +158,33 @@ If you do not call `uvcCamera.setLogLevel(...)`, the package defaults to `UvcLog
 
 The bundled example app demonstrates:
 
-- Android permission flow
-- USB device enumeration
-- opening the USB device and passing its file descriptor into this package
+- Android USB permission and device setup
 - preview rendering
 - basic camera control interactions
 
-The example app defines its own Android-side USB enumeration model for UI
-selection. That model is not part of this package API, and package consumers
-can replace it with their own platform code as long as they pass a valid file
-descriptor to `uvcCamera.openFd(...)`.
+The example app uses its own `AndroidUsbDeviceEntry` model for USB device
+selection UI. That model is not part of this package API.
 
+## Primary API
+
+Most users will interact with these primary API entry points:
+
+- uvcCamera
+- UvcCamera
+- UvcCameraMode
+- UvcPreviewFrame
+- UvcCameraControl
+- UvcControlId
+- UvcControlKind
+
+Debugging APIs are also available when needed:
+
+- UvcLogLevel
+- UvcBmControlInfo
+- debugBmControls()
+
+Do not depend on the generated bindings directly unless you are working on the
+package internals.
 
 ## Licensing
 
