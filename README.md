@@ -221,6 +221,12 @@ The bundled example app demonstrates:
 - preview rendering
 - basic camera control interactions
 
+The example app defines its own Android-side USB enumeration model for UI
+selection. That model is not part of this package API, and package consumers
+can replace it with their own platform code as long as they pass a valid file
+descriptor to `uvcCamera.openFd(...)`.
+
+
 ## Licensing
 
 This package is licensed under the BSD 3-Clause License. 

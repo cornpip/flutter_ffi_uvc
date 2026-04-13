@@ -11,6 +11,10 @@ SECRET_AGENTS_RULE.md
 *.iml
 build/
 android/.cxx/
+android/gradlew
+android/gradlew.bat
+android/gradle/wrapper/gradle-wrapper.jar
+android/gradle/wrapper/gradle-wrapper.properties
 
 android/local.properties
 example/android/local.properties

@@ -16,8 +16,11 @@ void main() {
   runApp(const MyApp());
 }
 
-class UsbCameraDevice {
-  const UsbCameraDevice({
+/// Example-only DTO for Android USB enumeration results.
+///
+/// This is not part of the package public API.
+class AndroidUsbDeviceEntry {
+  const AndroidUsbDeviceEntry({
     required this.deviceId,
     required this.deviceName,
     required this.vendorId,
@@ -28,8 +31,8 @@ class UsbCameraDevice {
     required this.hasPermission,
   });
 
-  factory UsbCameraDevice.fromMap(Map<Object?, Object?> map) {
-    return UsbCameraDevice(
+  factory AndroidUsbDeviceEntry.fromMap(Map<Object?, Object?> map) {
+    return AndroidUsbDeviceEntry(
       deviceId: map['deviceId'] as int? ?? -1,
       deviceName: map['deviceName'] as String? ?? '',
       vendorId: map['vendorId'] as int? ?? 0,
@@ -122,10 +125,10 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
 
   UvcCamera get _camera => widget.camera;
 
-  List<UsbCameraDevice> _devices = const <UsbCameraDevice>[];
+  List<AndroidUsbDeviceEntry> _devices = const <AndroidUsbDeviceEntry>[];
   List<UvcCameraMode> _cameraModes = const <UvcCameraMode>[];
   List<UvcCameraControl> _cameraControls = const <UvcCameraControl>[];
-  UsbCameraDevice? _selectedDevice;
+  AndroidUsbDeviceEntry? _selectedDevice;
   UvcCameraMode? _selectedMode;
   ui.Image? _previewImage;
   Timer? _frameTimer;
@@ -197,20 +200,20 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     try {
       final List<Object?>? rawDevices = await _usbChannel
           .invokeListMethod<Object?>('listUsbDevices');
-      final List<UsbCameraDevice> devices = (rawDevices ?? <Object?>[])
+      final List<AndroidUsbDeviceEntry> devices = (rawDevices ?? <Object?>[])
           .whereType<Map<Object?, Object?>>()
-          .map(UsbCameraDevice.fromMap)
+          .map(AndroidUsbDeviceEntry.fromMap)
           .toList();
 
       setState(() {
         _devices = devices;
         _selectedDevice =
             devices.any(
-              (UsbCameraDevice device) =>
+              (AndroidUsbDeviceEntry device) =>
                   device.deviceId == _selectedDevice?.deviceId,
             )
             ? devices.firstWhere(
-                (UsbCameraDevice device) =>
+                (AndroidUsbDeviceEntry device) =>
                     device.deviceId == _selectedDevice?.deviceId,
               )
             : null;
@@ -229,7 +232,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     }
   }
 
-  Future<void> _openSelectedDevice(UsbCameraDevice device) async {
+  Future<void> _openSelectedDevice(AndroidUsbDeviceEntry device) async {
     _setStatus('Opening device...', openingDevice: true);
     _log('Open device requested: ${device.title}');
 
@@ -966,7 +969,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                     (BuildContext context, int index) =>
                                         const Divider(height: 1),
                                 itemBuilder: (BuildContext context, int index) {
-                                  final UsbCameraDevice device =
+                                  final AndroidUsbDeviceEntry device =
                                       _devices[index];
                                   final bool selected =
                                       _selectedDevice?.deviceId ==
