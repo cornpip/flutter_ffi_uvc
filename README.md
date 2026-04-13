@@ -4,12 +4,12 @@ This package is a Flutter plugin backed by native `libuvc`, `libusb`, and `libjp
 
 ## Platform support
 
-- Android only
+- Android (`arm64-v8a`, `armeabi-v7a`, `x86_64`)
 
 ## What this package does
 - Opens a UVC camera from an already acquired platform file descriptor
 - Lists camera modes reported by the native UVC layer
-- Starts and stops uvc preview
+- Starts and stops UVC preview
 - Copies the latest preview frame as RGBA bytes
 - Reads and writes supported UVC controls
 
@@ -58,26 +58,20 @@ That separation is intentional:
 
 ## Installation
 
-Add the dependency:
-
-```yaml
-dependencies:
-  flutter_ffi_uvc: ^0.0.1
+```sh
+flutter pub add flutter_ffi_uvc
 ```
+Or add `flutter_ffi_uvc` to the dependencies section of your `pubspec.yaml`.
 
-Import the package and use the shared `uvcCamera` service directly:
+## Usage
+
+### Single-camera model
+
+This plugin is designed around a single, shared global `uvcCamera` instance. It supports one connected camera at a time:
 
 ```dart
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 
-final List<UvcCameraMode> modes = uvcCamera.supportedModes();
-```
-
-Widgets or app-level state objects can optionally accept a `UvcCamera`
-parameter and default it to `uvcCamera`. That keeps normal package usage simple
-while making tests and previews easier to fake.
-
-```dart
 class UvcPreviewPage extends StatefulWidget {
   const UvcPreviewPage({
     super.key,
@@ -88,7 +82,7 @@ class UvcPreviewPage extends StatefulWidget {
 }
 ```
 
-## Primary API
+### Primary API
 
 Most users will interact with these primary API entry points:
 
@@ -109,7 +103,7 @@ Debugging APIs are also available when needed:
 Do not depend on the generated bindings directly unless you are working on the
 package internals.
 
-## Typical lifecycle
+### Typical lifecycle
 
 The intended usage flow is:
 
@@ -123,25 +117,7 @@ The intended usage flow is:
 8. Call `uvcCamera.stopPreview()` when preview is no longer needed.
 9. Call `uvcCamera.closeDevice()` before releasing the device.
 
-## Logging
-
-You can change the log level for the underlying libuvc layer at runtime:
-
-```dart
-uvcCamera.setLogLevel(UvcLogLevel.warn);
-```
-
-Available levels are:
-
-- `UvcLogLevel.error`
-- `UvcLogLevel.warn`
-- `UvcLogLevel.info`
-- `UvcLogLevel.debug`
-- `UvcLogLevel.trace`
-
-If you do not call `uvcCamera.setLogLevel(...)`, the package defaults to `UvcLogLevel.info`.
-
-## Minimal usage example
+### Minimal usage example
 
 This package expects a valid file descriptor from platform code:
 
@@ -176,7 +152,7 @@ Future<void> startUvcPreview(int fd) async {
 }
 ```
 
-## Controls
+### Controls
 
 `supportedControls()` returns the controls exposed by the currently opened
 device, including min/max/default/current values. `getControl(...)` and
@@ -185,8 +161,7 @@ For device debugging, `debugBmControls()` returns the controls advertised by
 descriptor `bmControls` without `GET_CUR` probing. This is useful when a device
 reports a control bit but rejects or mishandles `GET_CUR`.
 
-Control labels should be treated as UI display text, not as stable programmatic identifiers. 
-Use UvcControlId instead when identifying controls in code.
+Control labels are for display only. Use `UvcControlId` to identify controls in code:
 
 ```dart
 final int? autoFocus = uvcCamera.getControl(UvcControlId.focusAuto);
@@ -194,8 +169,7 @@ await Future<void>.delayed(const Duration(milliseconds: 100));
 uvcCamera.setControl(UvcControlId.focusAuto, autoFocus == 0 ? 1 : 0);
 ```
 
-Compound UVC controls that carry more than one value are exposed through typed
-APIs instead of being flattened into a single integer:
+Compound UVC controls are exposed as typed APIs instead of a single integer:
 
 ```dart
 final UvcPanTiltAbsoluteControl? panTilt =
@@ -210,6 +184,24 @@ if (panTilt != null) {
   );
 }
 ```
+
+### Logging
+
+You can change the log level for the underlying libuvc layer at runtime:
+
+```dart
+uvcCamera.setLogLevel(UvcLogLevel.warn);
+```
+
+Available levels are:
+
+- `UvcLogLevel.error`
+- `UvcLogLevel.warn`
+- `UvcLogLevel.info`
+- `UvcLogLevel.debug`
+- `UvcLogLevel.trace`
+
+If you do not call `uvcCamera.setLogLevel(...)`, the package defaults to `UvcLogLevel.info`.
 
 ## Example app
 
@@ -234,5 +226,3 @@ Bundled third-party components keep their own licenses.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled dependency
 license notices, including `libuvc`, `libusb`, and `libjpeg-turbo`.
-
-
