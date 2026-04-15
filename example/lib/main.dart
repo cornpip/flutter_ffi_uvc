@@ -42,8 +42,6 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   static const AndroidUsbBridge _usbBridge = AndroidUsbBridge();
   static const String _logPrefix = '@@@@UVC_EXAMPLE';
   static const Duration _startupProbeTimeout = Duration(seconds: 2);
-  static const Duration _minRenderInterval = Duration(milliseconds: 80);
-
   UvcCamera get _camera => widget.camera;
 
   List<AndroidUsbDeviceEntry> _devices = const <AndroidUsbDeviceEntry>[];
@@ -53,7 +51,6 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   UvcCameraMode? _selectedMode;
   ui.Image? _previewImage;
   Timer? _frameTimer;
-  Timer? _pendingRenderTimer;
   StreamSubscription<UvcPreviewFrame>? _previewFrameSubscription;
   Completer<void>? _firstPreviewFrameCompleter;
   Future<void>? _activeRenderFuture;
@@ -71,10 +68,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   Timer? _focusValueHideTimer;
   bool _focusValueVisible = false;
   String? _status;
-  bool _useFrameListener = true;
+  bool _useFrameListener = false;
   final List<DateTime> _previewFrameTimes = <DateTime>[];
   double _previewFps = 0;
-  DateTime? _lastRenderStartedAt;
 
   @override
   void initState() {
@@ -369,24 +365,11 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       return;
     }
 
-    final DateTime now = DateTime.now();
-    final DateTime? lastRenderStartedAt = _lastRenderStartedAt;
-    if (lastRenderStartedAt != null) {
-      final Duration sinceLastRender = now.difference(lastRenderStartedAt);
-      if (sinceLastRender < _minRenderInterval) {
-        _pendingPreviewFrame = frame;
-        final Duration delay = _minRenderInterval - sinceLastRender;
-        _schedulePendingRender(delay);
-        return;
-      }
-    }
-
     if (_firstPreviewFrameCompleter?.isCompleted == false) {
       _firstPreviewFrameCompleter?.complete();
     }
 
     _decodingFrame = true;
-    _lastRenderStartedAt = now;
     final int generation = _previewGeneration;
     final Completer<void> renderCompleter = Completer<void>();
     _activeRenderFuture = renderCompleter.future;
@@ -418,32 +401,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
           : null;
       if (pendingFrame != null) {
         _pendingPreviewFrame = null;
-        final Duration elapsedSinceRenderStart = DateTime.now().difference(
-          _lastRenderStartedAt!,
-        );
-        if (elapsedSinceRenderStart >= _minRenderInterval) {
-          unawaited(_renderPreviewFrame(pendingFrame));
-        } else {
-          _pendingPreviewFrame = pendingFrame;
-          _schedulePendingRender(_minRenderInterval - elapsedSinceRenderStart);
-        }
+        unawaited(_renderPreviewFrame(pendingFrame));
       }
     }
-  }
-
-  void _schedulePendingRender(Duration delay) {
-    if (_pendingRenderTimer?.isActive == true) {
-      return;
-    }
-    _pendingRenderTimer = Timer(delay, () {
-      _pendingRenderTimer = null;
-      final UvcPreviewFrame? pendingFrame = _pendingPreviewFrame;
-      if (pendingFrame == null || _decodingFrame || _previewFrozen) {
-        return;
-      }
-      _pendingPreviewFrame = null;
-      unawaited(_renderPreviewFrame(pendingFrame));
-    });
   }
 
   Future<String?> _beginPreviewConsumption(UvcCameraMode mode) async {
@@ -532,8 +492,6 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   }) async {
     _frameTimer?.cancel();
     _frameTimer = null;
-    _pendingRenderTimer?.cancel();
-    _pendingRenderTimer = null;
     await _previewFrameSubscription?.cancel();
     _previewFrameSubscription = null;
     _firstPreviewFrameCompleter = null;
@@ -542,7 +500,6 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     _pendingPreviewFrame = null;
     _decodingFrame = false;
     _resetPreviewFps();
-    _lastRenderStartedAt = null;
     if (activeRenderFuture != null) {
       await activeRenderFuture;
     }
