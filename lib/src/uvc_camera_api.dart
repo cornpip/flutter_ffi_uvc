@@ -263,14 +263,6 @@ class UvcCameraMode {
   }
 }
 
-extension UvcCameraModePollingTiming on UvcCameraMode {
-  Duration get recommendedPollingInterval {
-    final int effectiveFps = fps > 0 ? fps : 15;
-    final int intervalMs = (1000 / effectiveFps).round().clamp(16, 250);
-    return Duration(milliseconds: intervalMs);
-  }
-}
-
 /// Metadata and current value for a UVC control exposed by the device.
 class UvcCameraControl {
   const UvcCameraControl({
@@ -525,8 +517,10 @@ abstract interface class UvcCamera {
 
   /// Starts preview with the given [mode].
   ///
-  /// To consume frames via native notifications, call [latestFrameStream]
-  /// after starting preview. To poll manually, call [copyLatestFrame].
+  /// To consume frames in Dart, call [copyLatestFrame] after starting preview.
+  ///
+  /// If a preview texture has been attached with [attachPreviewTexture], the
+  /// same native stream also renders into that texture on Android.
   int startPreview(UvcCameraMode mode);
 
   /// Stops the active preview stream.
@@ -544,8 +538,27 @@ abstract interface class UvcCamera {
   /// Copies the latest RGBA frame from the shared native preview buffer.
   UvcPreviewFrame? copyLatestFrame();
 
-  /// Returns the active preview stream for stream-based preview modes.
-  Stream<UvcPreviewFrame> latestFrameStream();
+  /// Returns the latest delivered preview frame sequence.
+  ///
+  /// This is a lightweight metadata read intended for FPS counters or liveness
+  /// checks without copying full frame bytes into Dart.
+  int latestFrameSequence();
+
+  /// Creates a Flutter texture suitable for native preview rendering.
+  ///
+  /// The returned texture ID can be displayed with Flutter's [Texture] widget.
+  Future<int> createPreviewTexture();
+
+  /// Releases a texture created by [createPreviewTexture].
+  Future<void> disposePreviewTexture(int textureId);
+
+  /// Attaches the shared native preview stream to an existing texture.
+  ///
+  /// A subsequent [startPreview] call renders into the attached texture.
+  Future<void> attachPreviewTexture(int textureId, {int? width, int? height});
+
+  /// Detaches any currently attached preview texture.
+  Future<void> detachPreviewTexture();
 
   /// Returns all controls supported by the currently opened device.
   List<UvcCameraControl> supportedControls();

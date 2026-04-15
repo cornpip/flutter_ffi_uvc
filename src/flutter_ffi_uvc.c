@@ -4,6 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(__ANDROID__)
+#include <android/native_window.h>
+#include <android/native_window_jni.h>
+#include <jni.h>
+#endif
+
 #include "libuvc/libuvc.h"
 #include "libuvc/uvc_log.h"
 
@@ -30,6 +36,9 @@ typedef struct {
   uint32_t callback_count;
   uint32_t mjpeg_warmup_drop_remaining;
   char last_error[256];
+#if defined(__ANDROID__)
+  ANativeWindow *preview_window;
+#endif
 } ffi_uvc_state_t;
 
 static ffi_uvc_state_t g_uvc_state = {
@@ -155,6 +164,54 @@ static void reset_frame_buffer_locked(void) {
   g_uvc_state.callback_count = 0;
 }
 
+#if defined(__ANDROID__)
+static void release_preview_window_locked(void) {
+  if (g_uvc_state.preview_window == NULL) {
+    return;
+  }
+
+  ANativeWindow_release(g_uvc_state.preview_window);
+  g_uvc_state.preview_window = NULL;
+}
+
+static int render_latest_rgba_to_preview_surface_locked(void) {
+  if (g_uvc_state.preview_window == NULL ||
+      g_uvc_state.latest_rgba == NULL ||
+      g_uvc_state.frame_width <= 0 ||
+      g_uvc_state.frame_height <= 0) {
+    return 1;
+  }
+
+  const int width = g_uvc_state.frame_width;
+  const int height = g_uvc_state.frame_height;
+  if (ANativeWindow_setBuffersGeometry(
+          g_uvc_state.preview_window,
+          width,
+          height,
+          WINDOW_FORMAT_RGBA_8888) != 0) {
+    set_last_error("Failed to configure preview surface geometry");
+    return 0;
+  }
+
+  ANativeWindow_Buffer window_buffer;
+  if (ANativeWindow_lock(g_uvc_state.preview_window, &window_buffer, NULL) != 0) {
+    set_last_error("Failed to lock preview surface");
+    return 0;
+  }
+
+  const uint8_t *src = g_uvc_state.latest_rgba;
+  uint8_t *dst = (uint8_t *)window_buffer.bits;
+  const size_t src_stride = (size_t)width * 4u;
+  const size_t dst_stride = (size_t)window_buffer.stride * 4u;
+  for (int row = 0; row < height; ++row) {
+    memcpy(dst + (size_t)row * dst_stride, src + (size_t)row * src_stride, src_stride);
+  }
+
+  ANativeWindow_unlockAndPost(g_uvc_state.preview_window);
+  return 1;
+}
+#endif
+
 static void finish_callback_locked(void) {
   if (g_uvc_state.callbacks_inflight == 0) {
     return;
@@ -192,6 +249,9 @@ static void finish_stop_preview_locked(void) {
 }
 
 static void close_device_resources_locked(void) {
+#if defined(__ANDROID__)
+  release_preview_window_locked();
+#endif
 
   if (g_uvc_state.rgb_frame != NULL) {
     UVC_LOGD("UVC_NATIVE", "close_device_resources_locked freeing rgb_frame=%p", (void *)g_uvc_state.rgb_frame);
@@ -328,7 +388,12 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
     return;
   }
 
-  pthread_mutex_lock(&g_uvc_state.mutex);
+  if (pthread_mutex_trylock(&g_uvc_state.mutex) != 0) {
+    UVC_LOGT(
+        "UVC_NATIVE",
+        "dropping frame callback because previous callback is still processing");
+    return;
+  }
   if (!g_uvc_state.previewing || g_uvc_state.stopping_preview || g_uvc_state.rgb_frame == NULL) {
     pthread_mutex_unlock(&g_uvc_state.mutex);
     UVC_LOGW("UVC_NATIVE", "frame callback skipped because preview is stopping or rgb_frame is null");
@@ -450,6 +515,9 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
     pthread_mutex_unlock(&g_uvc_state.mutex);
     return;
   }
+#if defined(__ANDROID__)
+  render_latest_rgba_to_preview_surface_locked();
+#endif
   delivered_sequence = g_uvc_state.latest_sequence;
   frame_listener = g_uvc_state.frame_listener;
   clear_last_error();
@@ -752,6 +820,13 @@ FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uint8_t *buffer, int buffer_l
   return (int)offset;
 }
 
+FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(void) {
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  const int64_t latest_sequence = g_uvc_state.latest_sequence;
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+  return latest_sequence;
+}
+
 FFI_PLUGIN_EXPORT void uvc_stop_preview(void) {
   uvc_device_handle_t *devh_to_stop = NULL;
   int should_stop_streaming = 0;
@@ -812,6 +887,45 @@ FFI_PLUGIN_EXPORT int uvc_is_previewing(void) {
   pthread_mutex_unlock(&g_uvc_state.mutex);
   return previewing;
 }
+
+#if defined(__ANDROID__)
+JNIEXPORT jint JNICALL
+Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeAttachSurface(
+    JNIEnv *env,
+    jobject thiz,
+    jobject surface) {
+  (void)thiz;
+
+  if (surface == NULL) {
+    return UVC_ERROR_INVALID_PARAM;
+  }
+
+  ANativeWindow *window = ANativeWindow_fromSurface(env, surface);
+  if (window == NULL) {
+    set_last_error("Failed to acquire ANativeWindow from Surface");
+    return UVC_ERROR_IO;
+  }
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  release_preview_window_locked();
+  g_uvc_state.preview_window = window;
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+  clear_last_error();
+  return UVC_SUCCESS;
+}
+
+JNIEXPORT void JNICALL
+Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeDetachSurface(
+    JNIEnv *env,
+    jobject thiz) {
+  (void)env;
+  (void)thiz;
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  release_preview_window_locked();
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+}
+#endif
 
 FFI_PLUGIN_EXPORT int uvc_frame_width(void) {
   pthread_mutex_lock(&g_uvc_state.mutex);

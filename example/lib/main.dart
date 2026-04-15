@@ -42,6 +42,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   static const AndroidUsbBridge _usbBridge = AndroidUsbBridge();
   static const String _logPrefix = '@@@@UVC_EXAMPLE';
   static const Duration _startupProbeTimeout = Duration(seconds: 2);
+  static const Duration _previewStatsInterval = Duration(milliseconds: 400);
   UvcCamera get _camera => widget.camera;
 
   List<AndroidUsbDeviceEntry> _devices = const <AndroidUsbDeviceEntry>[];
@@ -49,16 +50,11 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   List<UvcCameraControl> _cameraControls = const <UvcCameraControl>[];
   AndroidUsbDeviceEntry? _selectedDevice;
   UvcCameraMode? _selectedMode;
+  int? _previewTextureId;
   ui.Image? _previewImage;
-  Timer? _frameTimer;
-  StreamSubscription<UvcPreviewFrame>? _previewFrameSubscription;
-  Completer<void>? _firstPreviewFrameCompleter;
-  Future<void>? _activeRenderFuture;
-  UvcPreviewFrame? _pendingPreviewFrame;
+  Timer? _previewStatsTimer;
   bool _loadingDevices = true;
   bool _openingDevice = false;
-  bool _decodingFrame = false;
-  int _previewGeneration = 0;
   bool _afTriggering = false;
   bool _previewFrozen = false;
   bool _savingPhoto = false;
@@ -68,15 +64,16 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   Timer? _focusValueHideTimer;
   bool _focusValueVisible = false;
   String? _status;
-  bool _useFrameListener = false;
-  final List<DateTime> _previewFrameTimes = <DateTime>[];
   double _previewFps = 0;
+  int _lastPreviewSequence = 0;
+  DateTime? _lastPreviewSequenceSampleAt;
 
   @override
   void initState() {
     super.initState();
-    _camera.setLogLevel(UvcLogLevel.debug);
+    _camera.setLogLevel(UvcLogLevel.trace);
     WidgetsBinding.instance.addObserver(this);
+    unawaited(_ensurePreviewTexture());
     unawaited(_initializePermissionsAndDevices());
   }
 
@@ -90,12 +87,12 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _frameTimer?.cancel();
-    unawaited(_previewFrameSubscription?.cancel());
+    _previewStatsTimer?.cancel();
     _focusRepeatTimer?.cancel();
     _focusValueHideTimer?.cancel();
     _previewImage?.dispose();
     unawaited(_stopCurrentPreview(closeDevice: true));
+    unawaited(_disposePreviewTexture());
     unawaited(_usbBridge.closeUsbDevice());
     super.dispose();
   }
@@ -159,11 +156,11 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     _setStatus('Opening device...', openingDevice: true);
     _log('Open device requested: ${device.title}');
 
-    _frameTimer?.cancel();
     _previewImage?.dispose();
     _previewImage = null;
 
     try {
+      await _ensurePreviewTexture();
       await _stopCurrentPreview(closeDevice: true);
       await _usbBridge.closeUsbDevice();
       final int fd = await _usbBridge.openUsbDevice(device.deviceId);
@@ -224,11 +221,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         _openingDevice = false;
         _previewFrozen = false;
         _manualFocusControlsVisible = false;
-        _status = 'Preview running: ${startedMode!.label} / $_consumptionLabel';
+        _status = 'Preview running: ${startedMode!.label} / Texture';
       });
-      _log(
-        'Preview running: ${device.title} / ${startedMode.label} / $_consumptionLabel',
-      );
+      _log('Preview running: ${device.title} / ${startedMode.label} / Texture');
     } on PlatformException catch (error) {
       _setStatus(
         'Failed to open device: ${error.message ?? error.code}',
@@ -263,7 +258,6 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         _status = 'Device disconnected.';
         _previewFps = 0;
       });
-      _previewFrameTimes.clear();
       _log('Device disconnected: $deviceTitle');
     } on PlatformException catch (error) {
       _setStatus(
@@ -299,9 +293,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       _openingDevice = false;
       _previewFrozen = false;
       _manualFocusControlsVisible = false;
-      _status = 'Preview running: ${mode.label} / $_consumptionLabel';
+      _status = 'Preview running: ${mode.label} / Texture';
     });
-    _log('Preview mode changed: ${mode.label} / $_consumptionLabel');
+    _log('Preview mode changed: ${mode.label} / Texture');
   }
 
   List<UvcCameraMode> _sortModesByPreference(List<UvcCameraMode> modes) {
@@ -325,127 +319,125 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     return sorted;
   }
 
-  String get _consumptionLabel => _useFrameListener ? 'Notified' : 'Polling';
-
   void _resetPreviewFps() {
-    _previewFrameTimes.clear();
     _previewFps = 0;
+    _lastPreviewSequence = 0;
+    _lastPreviewSequenceSampleAt = null;
   }
 
-  void _recordRenderedFrame() {
+  bool get _hasLivePreview => _previewTextureId != null && _camera.isPreviewing;
+
+  double? get _previewAspectRatio {
+    final UvcCameraMode? mode = _selectedMode;
+    if (mode == null || mode.width <= 0 || mode.height <= 0) {
+      return null;
+    }
+    return mode.width / mode.height;
+  }
+
+  void _samplePreviewFps() {
     final DateTime now = DateTime.now();
-    _previewFrameTimes.add(now);
-    final DateTime cutoff = now.subtract(const Duration(seconds: 1));
-    while (_previewFrameTimes.isNotEmpty &&
-        _previewFrameTimes.first.isBefore(cutoff)) {
-      _previewFrameTimes.removeAt(0);
+    final DateTime? previousAt = _lastPreviewSequenceSampleAt;
+    final int latestSequence = _camera.latestFrameSequence();
+    if (previousAt == null) {
+      _lastPreviewSequence = latestSequence;
+      _lastPreviewSequenceSampleAt = now;
+      return;
     }
-    _previewFps = _previewFrameTimes.length.toDouble();
+
+    final double seconds =
+        now.difference(previousAt).inMicroseconds /
+        Duration.microsecondsPerSecond;
+    if (seconds <= 0) {
+      return;
+    }
+
+    final int frameDelta = latestSequence - _lastPreviewSequence;
+    _lastPreviewSequence = latestSequence;
+    _lastPreviewSequenceSampleAt = now;
+    if (!mounted) {
+      _previewFps = frameDelta <= 0 ? 0 : frameDelta / seconds;
+      return;
+    }
+    setState(() {
+      _previewFps = frameDelta <= 0 ? 0 : frameDelta / seconds;
+    });
   }
 
-  Future<void> _pollLatestFrame() async {
-    if (_previewFrozen) {
+  Future<void> _ensurePreviewTexture() async {
+    if (_previewTextureId != null) {
       return;
     }
 
-    final UvcPreviewFrame? frame = _camera.copyLatestFrame();
-    if (frame == null) {
+    final int textureId = await _camera.createPreviewTexture();
+    if (!mounted) {
+      _previewTextureId = textureId;
       return;
     }
-    await _renderPreviewFrame(frame);
+    setState(() {
+      _previewTextureId = textureId;
+    });
   }
 
-  Future<void> _renderPreviewFrame(UvcPreviewFrame frame) async {
-    if (_decodingFrame || _previewFrozen) {
-      if (!_previewFrozen &&
-          (_pendingPreviewFrame == null ||
-              frame.sequence >= _pendingPreviewFrame!.sequence)) {
-        _pendingPreviewFrame = frame;
-      }
+  Future<void> _disposePreviewTexture() async {
+    final int? textureId = _previewTextureId;
+    if (textureId == null) {
       return;
     }
 
-    if (_firstPreviewFrameCompleter?.isCompleted == false) {
-      _firstPreviewFrameCompleter?.complete();
-    }
-
-    _decodingFrame = true;
-    final int generation = _previewGeneration;
-    final Completer<void> renderCompleter = Completer<void>();
-    _activeRenderFuture = renderCompleter.future;
+    _previewTextureId = null;
     try {
-      final ui.Image image = await _decodeRgbaFrame(frame);
-      if (!mounted || _previewGeneration != generation) {
-        image.dispose();
-        return;
-      }
-
-      final ui.Image? previousImage = _previewImage;
-      _recordRenderedFrame();
-      setState(() {
-        _previewImage = image;
-      });
-      previousImage?.dispose();
+      await _camera.detachPreviewTexture();
     } finally {
-      if (identical(_activeRenderFuture, renderCompleter.future)) {
-        _activeRenderFuture = null;
-      }
-      if (_previewGeneration == generation) {
-        _decodingFrame = false;
-      }
-      if (!renderCompleter.isCompleted) {
-        renderCompleter.complete();
-      }
-      final UvcPreviewFrame? pendingFrame = _previewGeneration == generation
-          ? _pendingPreviewFrame
-          : null;
-      if (pendingFrame != null) {
-        _pendingPreviewFrame = null;
-        unawaited(_renderPreviewFrame(pendingFrame));
-      }
+      await _camera.disposePreviewTexture(textureId);
     }
   }
 
   Future<String?> _beginPreviewConsumption(UvcCameraMode mode) async {
-    _frameTimer?.cancel();
-    _frameTimer = null;
-    await _previewFrameSubscription?.cancel();
-    _previewFrameSubscription = null;
+    _previewStatsTimer?.cancel();
     _resetPreviewFps();
-
-    final Completer<void> firstFrameCompleter = Completer<void>();
-    _firstPreviewFrameCompleter = firstFrameCompleter;
-
-    if (!_useFrameListener) {
-      _frameTimer = Timer.periodic(
-        mode.recommendedPollingInterval + const Duration(milliseconds: 16),
-        (_) => unawaited(_pollLatestFrame()),
-      );
-      unawaited(_pollLatestFrame());
-    } else {
-      _previewFrameSubscription = _camera.latestFrameStream().listen(
-        (UvcPreviewFrame frame) => unawaited(_renderPreviewFrame(frame)),
-      );
-    }
+    _lastPreviewSequence = 0;
+    _lastPreviewSequenceSampleAt = DateTime.now();
 
     try {
-      await firstFrameCompleter.future.timeout(_startupProbeTimeout);
-      return null;
-    } on TimeoutException {
+      final DateTime deadline = DateTime.now().add(_startupProbeTimeout);
+      while (DateTime.now().isBefore(deadline)) {
+        final int latestSequence = _camera.latestFrameSequence();
+        if (latestSequence > 0) {
+          _lastPreviewSequence = latestSequence;
+          _lastPreviewSequenceSampleAt = DateTime.now();
+          _previewStatsTimer = Timer.periodic(
+            _previewStatsInterval,
+            (_) => _samplePreviewFps(),
+          );
+          return null;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      _samplePreviewFps();
       final String error = _camera.lastError;
       if (error.isNotEmpty) {
         return error;
       }
-      return 'libuvc startup probe timed out for ${mode.label} ($_consumptionLabel)';
+      return 'libuvc startup probe timed out for ${mode.label} (Texture)';
     } finally {
-      if (identical(_firstPreviewFrameCompleter, firstFrameCompleter)) {
-        _firstPreviewFrameCompleter = null;
+      if (_camera.latestFrameSequence() <= 0) {
+        _previewStatsTimer?.cancel();
+        _previewStatsTimer = null;
       }
     }
   }
 
   Future<String?> _startModeWithProbe(UvcCameraMode mode) async {
-    _log('libuvc preview start attempt: ${mode.label} / $_consumptionLabel');
+    _log('libuvc preview start attempt: ${mode.label} / Texture');
+    final int? textureId = _previewTextureId;
+    if (textureId != null) {
+      await _camera.attachPreviewTexture(
+        textureId,
+        width: mode.width,
+        height: mode.height,
+      );
+    }
     final int startResult = _camera.startPreview(mode);
     if (startResult != 0) {
       return _camera.lastError;
@@ -490,19 +482,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     required bool closeDevice,
     bool clearPreviewImage = false,
   }) async {
-    _frameTimer?.cancel();
-    _frameTimer = null;
-    await _previewFrameSubscription?.cancel();
-    _previewFrameSubscription = null;
-    _firstPreviewFrameCompleter = null;
-    _previewGeneration++;
-    final Future<void>? activeRenderFuture = _activeRenderFuture;
-    _pendingPreviewFrame = null;
-    _decodingFrame = false;
+    _previewStatsTimer?.cancel();
+    _previewStatsTimer = null;
     _resetPreviewFps();
-    if (activeRenderFuture != null) {
-      await activeRenderFuture;
-    }
 
     if (clearPreviewImage) {
       final ui.Image? previousImage = _previewImage;
@@ -632,14 +614,19 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   }
 
   Future<void> _capturePhoto() async {
-    final ui.Image? image = _previewImage;
-    if (image == null || _savingPhoto || _previewFrozen) {
+    if (_savingPhoto || _previewFrozen) {
       return;
     }
 
     setState(() => _savingPhoto = true);
+    ui.Image? capturedImage;
     try {
-      final ByteData? pngData = await image.toByteData(
+      final UvcPreviewFrame? frame = _camera.copyLatestFrame();
+      if (frame == null) {
+        throw Exception('No preview frame available to capture.');
+      }
+      capturedImage = await _decodeRgbaFrame(frame);
+      final ByteData? pngData = await capturedImage.toByteData(
         format: ui.ImageByteFormat.png,
       );
       if (pngData == null) {
@@ -663,11 +650,18 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         );
       }
       await _stopCurrentPreview(closeDevice: false, clearPreviewImage: false);
+      final ui.Image? previousImage = _previewImage;
       if (mounted) {
-        setState(() => _previewFrozen = true);
+        setState(() {
+          _previewImage = capturedImage;
+          _previewFrozen = true;
+        });
       } else {
+        _previewImage = capturedImage;
         _previewFrozen = true;
       }
+      previousImage?.dispose();
+      capturedImage = null;
       _setStatus('Preview paused on captured frame.');
     } on PlatformException catch (error) {
       _setStatus(
@@ -677,6 +671,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     } catch (error) {
       _setStatus('Failed to save capture.', error: error);
     } finally {
+      capturedImage?.dispose();
       if (mounted) {
         setState(() => _savingPhoto = false);
       } else {
@@ -693,23 +688,27 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
 
     _previewFrozen = false;
     _setStatus('Resuming preview...', openingDevice: true);
+    final ui.Image? previousImage = _previewImage;
+    _previewImage = null;
     final String? startError = await _startModeWithProbe(mode);
     if (startError != null) {
+      _previewImage = previousImage;
       _setStatus('Failed to resume preview: $startError', openingDevice: false);
       return;
     }
+    previousImage?.dispose();
 
     if (!mounted) {
       _previewFrozen = false;
       _openingDevice = false;
-      _status = 'Preview running: ${mode.label} / $_consumptionLabel';
+      _status = 'Preview running: ${mode.label} / Texture';
       return;
     }
 
     setState(() {
       _previewFrozen = false;
       _openingDevice = false;
-      _status = 'Preview running: ${mode.label} / $_consumptionLabel';
+      _status = 'Preview running: ${mode.label} / Texture';
     });
   }
 
@@ -807,7 +806,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                       width: double.infinity,
                       color: Colors.black,
                       alignment: Alignment.center,
-                      child: _previewImage == null
+                      child: _previewFrozen && _previewImage != null
+                          ? RawImage(image: _previewImage, fit: BoxFit.contain)
+                          : _previewTextureId == null
                           ? const Text(
                               'No preview',
                               style: TextStyle(
@@ -815,7 +816,20 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                 fontSize: 18,
                               ),
                             )
-                          : RawImage(image: _previewImage, fit: BoxFit.contain),
+                          : _previewAspectRatio == null
+                          ? Texture(
+                              textureId: _previewTextureId!,
+                              filterQuality: FilterQuality.none,
+                            )
+                          : Center(
+                              child: AspectRatio(
+                                aspectRatio: _previewAspectRatio!,
+                                child: Texture(
+                                  textureId: _previewTextureId!,
+                                  filterQuality: FilterQuality.none,
+                                ),
+                              ),
+                            ),
                     ),
                     if (_focusValueVisible && _focusAbsControl != null)
                       Positioned(
@@ -846,7 +860,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                           ),
                         ),
                       ),
-                    if (_previewImage != null)
+                    if (_hasLivePreview || _previewFrozen)
                       Positioned(
                         top: 16,
                         right: 16,
@@ -879,7 +893,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                               ? null
                               : _previewFrozen
                               ? () => unawaited(_resumePreview())
-                              : _previewImage == null
+                              : !_hasLivePreview
                               ? null
                               : () => unawaited(_capturePhoto()),
                           style: FilledButton.styleFrom(

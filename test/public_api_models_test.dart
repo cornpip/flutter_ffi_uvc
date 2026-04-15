@@ -33,21 +33,6 @@ void main() {
       });
     });
 
-    test('camera mode exposes recommended polling interval', () {
-      const UvcCameraMode mode = UvcCameraMode(
-        frameFormat: 7,
-        formatName: 'MJPEG',
-        width: 1280,
-        height: 720,
-        fps: 30,
-      );
-
-      expect(
-        mode.recommendedPollingInterval,
-        const Duration(milliseconds: 33),
-      );
-    });
-
     test('UvcCameraControl.fromJson keeps ID and UI metadata stable', () {
       final UvcCameraControl control =
           UvcCameraControl.fromJson(<String, dynamic>{

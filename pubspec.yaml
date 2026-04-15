@@ -28,4 +28,6 @@ flutter:
   plugin:
     platforms:
       android:
+        package: com.cornpip.flutter_ffi_uvc
+        pluginClass: FlutterFfiUvcPlugin
         ffiPlugin: true

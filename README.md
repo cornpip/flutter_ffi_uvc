@@ -13,6 +13,7 @@ This package is a Flutter plugin backed by native `libuvc`.
 - Lists camera modes reported by the native UVC layer
 - Starts and stops UVC preview
 - Copies the latest preview frame as RGBA bytes
+- Renders preview directly into a Flutter `Texture` on Android
 - Reads and writes supported UVC controls
 
 ## Android USB ownership and handoff
@@ -44,13 +45,13 @@ Or add `flutter_ffi_uvc` to the dependencies section of your `pubspec.yaml`.
 
 The intended usage flow is:
 
-1. Request Android camera and USB device permission in app/platform code.
+1. Request Android camera and USB device permission in android native.
 2. Open the USB device on the Android side and obtain a file descriptor.
-3. Optionally call `uvcCamera.setLogLevel(...)`.
-4. Call `uvcCamera.openFd(fd)`.
-5. Read `uvcCamera.supportedModes()`.
-6. Pick a mode and call `uvcCamera.startPreview(mode)`.
-7. Consume frames via `copyLatestFrame()` (polling) or `latestFrameStream()` (notified).
+3. Call `uvcCamera.openFd(fd)`.
+4. Read `uvcCamera.supportedModes()`.
+5. Pick a mode and call `uvcCamera.startPreview(mode)`.
+6. For live preview on Android, prefer attaching a Flutter `Texture`.
+7. Use `copyLatestFrame()` only when you need frame bytes in Dart, such as capture or inspection.
 8. Call `uvcCamera.stopPreview()` when preview is no longer needed.
 9. When finished, call `uvcCamera.closeDevice()` and close the Android `UsbDeviceConnection`.
 
@@ -71,87 +72,63 @@ class UvcPreviewPage extends StatefulWidget {
 }
 ```
 
-### Consuming frames
+### Preview & Capture
 
-After `startPreview`, there are two ways to consume frames. Both always
-deliver the latest available frame at the time of consumption — intermediate
-frames are not buffered and will be skipped if Dart cannot keep up with the
-camera's output rate.
+#### Live preview with Texture
 
-#### Option 1 — `latestFrameStream`: native-notification-driven
-
-Use this when you want to react as closely as possible to each frame the
-device produces. The native layer notifies Dart on each frame arrival, which
-triggers a pull of the latest frame. The native listener is registered on
-`.listen()` and released when `stopPreview()` or `closeDevice()` is called.
-The stream subscription ends automatically at that point.
+Attach a Flutter `Texture` before starting the stream:
 
 ```dart
-final int result = uvcCamera.startPreview(mode);
-if (result != 0) {
-  throw Exception('Failed to start preview: ${uvcCamera.lastError}');
-}
-
-uvcCamera.latestFrameStream().listen(
-  (UvcPreviewFrame frame) {
-    // frame.rgbaBytes, frame.width, frame.height
-  },
+final int textureId = await uvcCamera.createPreviewTexture();
+await uvcCamera.attachPreviewTexture(
+  textureId,
+  width: mode.width,
+  height: mode.height,
 );
-
-// Releases the native listener and closes the stream.
-// The subscription ends automatically.
-uvcCamera.stopPreview();
+uvcCamera.startPreview(mode);
 ```
 
-#### Option 2 — `copyLatestFrame`: timer-based polling
-
-Use this when you want to control how often the display updates, e.g. to cap
-rendering at a specific rate or decouple preview rendering from the camera's
-output rate.
+Display it with Flutter's `Texture` widget:
 
 ```dart
-final int result = uvcCamera.startPreview(mode);
-if (result != 0) {
-  throw Exception('Failed to start preview: ${uvcCamera.lastError}');
-}
-
-final Timer timer = Timer.periodic(
-  mode.recommendedPollingInterval + const Duration(milliseconds: 16),
-  (_) {
-    final UvcPreviewFrame? frame = uvcCamera.copyLatestFrame();
-    if (frame != null) {
-      // frame.rgbaBytes, frame.width, frame.height
-    }
-  },
-);
-
-// Cancel when preview is no longer needed.
-timer.cancel();
-uvcCamera.stopPreview();
+AspectRatio(
+  aspectRatio: mode.width / mode.height,
+  child: Texture(textureId: textureId),
+)
 ```
 
-`mode.recommendedPollingInterval` is derived from the selected mode's fps:
+On teardown:
 
-- `60fps` -> about `16ms`
-- `30fps` -> about `33ms`
-- `24fps` -> about `42ms`
-- `15fps` -> about `67ms`
-- `10fps` -> about `100ms`
-- `5fps` -> about `200ms`
+```dart
+uvcCamera.stopPreview();
+await uvcCamera.detachPreviewTexture();
+await uvcCamera.disposePreviewTexture(textureId);
+```
 
-A longer interval reduces the polling rate. For example, adding
-`const Duration(milliseconds: 16)` gives roughly:
+#### Capture
 
-- `60fps` mode: `16ms + 16ms = 32ms` -> about `31fps`
-- `30fps` mode: `33ms + 16ms = 49ms` -> about `20fps`
-- `24fps` mode: `42ms + 16ms = 58ms` -> about `17fps`
-- `15fps` mode: `67ms + 16ms = 83ms` -> about `12fps`
-- `10fps` mode: `100ms + 16ms = 116ms` -> about `8.6fps`
-- `5fps` mode: `200ms + 16ms = 216ms` -> about `4.6fps`
+To get frame bytes in Dart — for snapshot, processing, or inspection — call
+`copyLatestFrame()` while preview is running:
 
-Calculation formula:
-- `polling interval in ms ~= 1000 / fps`
-- `polling rate in fps ~= 1000 / polling interval in ms`
+```dart
+final UvcPreviewFrame? frame = uvcCamera.copyLatestFrame();
+if (frame != null) {
+  // frame.rgbaBytes: RGBA pixel data (width * height * 4 bytes)
+  // frame.width, frame.height: frame dimensions
+}
+```
+
+#### Frame drop behavior
+
+When the native callback is already processing a frame, incoming callbacks are
+dropped rather than queued. This bounds preview latency and prevents backlog
+under high load, at the cost of a lower effective FPS.
+
+Dropped callbacks are visible at `UvcLogLevel.trace`:
+
+```text
+dropping frame callback because previous callback is still processing
+```
 
 ### Controls
 

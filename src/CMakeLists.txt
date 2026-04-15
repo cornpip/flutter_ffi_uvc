@@ -90,5 +90,5 @@ target_include_directories(flutter_ffi_uvc PRIVATE
 if (ANDROID)
   # Support Android 15 16k page size
   target_link_options(flutter_ffi_uvc PRIVATE "-Wl,-z,max-page-size=16384")
-  target_link_libraries(flutter_ffi_uvc PRIVATE log)
+  target_link_libraries(flutter_ffi_uvc PRIVATE android log)
 endif()

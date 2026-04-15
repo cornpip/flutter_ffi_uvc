@@ -169,6 +169,17 @@ class FlutterFfiUvcBindings {
             )
           >();
 
+  int uvc_latest_frame_sequence() {
+    return _uvc_latest_frame_sequence();
+  }
+
+  late final _uvc_latest_frame_sequencePtr =
+      _lookup<ffi.NativeFunction<ffi.Int64 Function()>>(
+        'uvc_latest_frame_sequence',
+      );
+  late final _uvc_latest_frame_sequence = _uvc_latest_frame_sequencePtr
+      .asFunction<int Function()>();
+
   void uvc_set_frame_listener(uvc_frame_listener_t listener) {
     return _uvc_set_frame_listener(listener);
   }

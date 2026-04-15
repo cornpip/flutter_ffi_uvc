@@ -2,113 +2,20 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/services.dart';
 
 import 'flutter_ffi_uvc_bindings_generated.dart';
 import 'uvc_camera_api.dart';
 
 class _FlutterFfiUvcCamera implements UvcCamera {
-  _FlutterFfiUvcCamera() {
-    _singleton = this;
-    _frameListener = NativeCallable<Void Function(Int64)>.listener(
-      _handleFrameNotification,
-    );
-    _previewStreamController = StreamController<UvcPreviewFrame>.broadcast(
-      onListen: _handleStreamListen,
-      onCancel: _handleStreamCancel,
-    );
-  }
+  _FlutterFfiUvcCamera();
+  static const MethodChannel _textureChannel = MethodChannel(
+    'flutter_ffi_uvc/texture',
+  );
 
-  static _FlutterFfiUvcCamera? _singleton;
-
-  late final NativeCallable<Void Function(Int64)> _frameListener;
-  late final StreamController<UvcPreviewFrame> _previewStreamController;
-  bool _notifiedModeActive = false;
-  int _lastDeliveredSequence = 0;
-  int _pendingNotificationSequence = 0;
-  bool _drainScheduled = false;
-  int _previewEpoch = 0;
-
-  static void _handleFrameNotification(int sequence) {
-    _singleton?._onFrameNotification(sequence);
-  }
-
-  void _onFrameNotification(int sequence) {
-    if (!_isNotifiedModeActive) {
-      return;
-    }
-
-    if (sequence > _pendingNotificationSequence) {
-      _pendingNotificationSequence = sequence;
-    }
-    if (_drainScheduled) {
-      return;
-    }
-
-    _drainScheduled = true;
-    _scheduleDrain(_previewEpoch);
-  }
-
-  bool get _isNotifiedModeActive => _notifiedModeActive;
-
-  void _resetPreviewState() {
-    _previewEpoch++;
-    _notifiedModeActive = false;
-    _lastDeliveredSequence = 0;
-    _pendingNotificationSequence = 0;
-    _drainScheduled = false;
-    _bindings.uvc_set_frame_listener(nullptr);
-  }
-
-  void _handleStreamListen() {
-    _notifiedModeActive = true;
-    _bindings.uvc_set_frame_listener(_frameListener.nativeFunction);
-    if (_pendingNotificationSequence > _lastDeliveredSequence &&
-        !_drainScheduled) {
-      _drainScheduled = true;
-      _scheduleDrain(_previewEpoch);
-    }
-  }
-
-  void _handleStreamCancel() {
-    _notifiedModeActive = false;
-    _bindings.uvc_set_frame_listener(nullptr);
-  }
-
-  void _scheduleDrain(int epoch) {
-    scheduleMicrotask(() => _drainStreamFrames(epoch));
-  }
-
-  void _drainStreamFrames(int epoch) {
-    if (epoch != _previewEpoch) {
-      return;
-    }
-    if (!_isNotifiedModeActive || _previewStreamController.isClosed) {
-      _drainScheduled = false;
-      return;
-    }
-    if (!_previewStreamController.hasListener) {
-      _drainScheduled = false;
-      return;
-    }
-
-    final UvcPreviewFrame? frame = _copyLatestFrameInternal();
-    if (frame != null && frame.sequence > _lastDeliveredSequence) {
-      _lastDeliveredSequence = frame.sequence;
-      _previewStreamController.add(frame);
-    }
-    final bool shouldDrainAgain =
-        _pendingNotificationSequence > _lastDeliveredSequence;
-
-    if (shouldDrainAgain) {
-      _scheduleDrain(epoch);
-      return;
-    }
-
-    _drainScheduled = false;
-  }
+  void _resetPreviewState() {}
 
   UvcPreviewFrame? _copyFrameWithMetadata(
     int Function(
@@ -231,8 +138,54 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   UvcPreviewFrame? copyLatestFrame() => _copyLatestFrameInternal();
 
   @override
-  Stream<UvcPreviewFrame> latestFrameStream() =>
-      _previewStreamController.stream;
+  int latestFrameSequence() => _bindings.uvc_latest_frame_sequence();
+
+  @override
+  Future<int> createPreviewTexture() async {
+    _ensureAndroid();
+    final int? textureId = await _textureChannel.invokeMethod<int>(
+      'createPreviewTexture',
+    );
+    if (textureId == null) {
+      throw PlatformException(
+        code: 'texture_create_failed',
+        message: 'Texture creation returned null.',
+      );
+    }
+    return textureId;
+  }
+
+  @override
+  Future<void> disposePreviewTexture(int textureId) async {
+    _ensureAndroid();
+    await _textureChannel.invokeMethod<void>(
+      'disposePreviewTexture',
+      <String, Object?>{'textureId': textureId},
+    );
+  }
+
+  @override
+  Future<void> attachPreviewTexture(
+    int textureId, {
+    int? width,
+    int? height,
+  }) async {
+    _ensureAndroid();
+    await _textureChannel.invokeMethod<void>(
+      'attachPreviewTexture',
+      <String, Object?>{
+        'textureId': textureId,
+        ...?width == null ? null : <String, Object?>{'width': width},
+        ...?height == null ? null : <String, Object?>{'height': height},
+      },
+    );
+  }
+
+  @override
+  Future<void> detachPreviewTexture() async {
+    _ensureAndroid();
+    await _textureChannel.invokeMethod<void>('detachPreviewTexture');
+  }
 
   /// Returns all controls the connected device supports, including current
   /// value and range info. Returns an empty list if no device is open or
@@ -441,10 +394,14 @@ DynamicLibrary? _cachedDylib;
 FlutterFfiUvcBindings? _cachedBindings;
 
 DynamicLibrary get _dylib {
+  _ensureAndroid();
+  return _cachedDylib ??= DynamicLibrary.open('lib$_libName.so');
+}
+
+void _ensureAndroid() {
   if (!Platform.isAndroid) {
     throw UnsupportedError('flutter_ffi_uvc is supported only on Android.');
   }
-  return _cachedDylib ??= DynamicLibrary.open('lib$_libName.so');
 }
 
 FlutterFfiUvcBindings get _bindings =>
