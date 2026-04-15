@@ -4,10 +4,9 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
+import 'package:flutter_ffi_uvc_example/android_bridge.dart';
 
 import 'app_theme.dart';
-import 'usb/android_usb_bridge.dart';
-import 'usb/android_usb_device_entry.dart';
 import 'widgets/controls_panel.dart';
 
 void main() {
@@ -39,16 +38,16 @@ class UvcPreviewPage extends StatefulWidget {
 
 class _UvcPreviewPageState extends State<UvcPreviewPage>
     with WidgetsBindingObserver {
-  static const AndroidUsbBridge _usbBridge = AndroidUsbBridge();
+  static const AndroidBridge _androidBridge = AndroidBridge();
   static const String _logPrefix = '@@@@UVC_EXAMPLE';
   static const Duration _startupProbeTimeout = Duration(seconds: 2);
-  static const Duration _previewStatsInterval = Duration(milliseconds: 400);
+  static const Duration _fpsSampleInterval = Duration(milliseconds: 400);
   UvcCamera get _camera => widget.camera;
 
-  List<AndroidUsbDeviceEntry> _devices = const <AndroidUsbDeviceEntry>[];
+  List<UvcUsbDevice> _devices = const <UvcUsbDevice>[];
   List<UvcCameraMode> _cameraModes = const <UvcCameraMode>[];
   List<UvcCameraControl> _cameraControls = const <UvcCameraControl>[];
-  AndroidUsbDeviceEntry? _selectedDevice;
+  UvcUsbDevice? _selectedDevice;
   UvcCameraMode? _selectedMode;
   int? _previewTextureId;
   ui.Image? _previewImage;
@@ -73,7 +72,6 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     super.initState();
     _camera.setLogLevel(UvcLogLevel.trace);
     WidgetsBinding.instance.addObserver(this);
-    unawaited(_ensurePreviewTexture());
     unawaited(_initializePermissionsAndDevices());
   }
 
@@ -91,15 +89,15 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     _focusRepeatTimer?.cancel();
     _focusValueHideTimer?.cancel();
     _previewImage?.dispose();
-    unawaited(_stopCurrentPreview(closeDevice: true));
+    unawaited(_stopCurrentPreview());
     unawaited(_disposePreviewTexture());
-    unawaited(_usbBridge.closeUsbDevice());
+    unawaited(_camera.closeUsbDevice());
     super.dispose();
   }
 
   Future<void> _initializePermissionsAndDevices() async {
     try {
-      final bool granted = await _usbBridge.ensureCameraPermission();
+      final bool granted = await _camera.ensureCameraPermission();
       if (!granted) {
         _setStatus('Camera permission is required.', loadingDevices: false);
         return;
@@ -122,18 +120,17 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     });
 
     try {
-      final List<AndroidUsbDeviceEntry> devices = await _usbBridge
-          .listUsbDevices();
+      final List<UvcUsbDevice> devices = await _camera.listUsbDevices();
 
       setState(() {
         _devices = devices;
         _selectedDevice =
             devices.any(
-              (AndroidUsbDeviceEntry device) =>
+              (UvcUsbDevice device) =>
                   device.deviceId == _selectedDevice?.deviceId,
             )
             ? devices.firstWhere(
-                (AndroidUsbDeviceEntry device) =>
+                (UvcUsbDevice device) =>
                     device.deviceId == _selectedDevice?.deviceId,
               )
             : null;
@@ -152,19 +149,18 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     }
   }
 
-  Future<void> _openSelectedDevice(AndroidUsbDeviceEntry device) async {
+  Future<void> _openSelectedDevice(UvcUsbDevice device) async {
     _setStatus('Opening device...', openingDevice: true);
-    _log('Open device requested: ${device.title}');
+    _log('Open device requested: ${device.displayName}');
 
     _previewImage?.dispose();
     _previewImage = null;
 
     try {
       await _ensurePreviewTexture();
-      await _stopCurrentPreview(closeDevice: true);
-      await _usbBridge.closeUsbDevice();
-      final int fd = await _usbBridge.openUsbDevice(device.deviceId);
-      final int openResult = _camera.openFd(fd);
+      await _stopCurrentPreview();
+      await _camera.closeUsbDevice();
+      final int openResult = await _camera.openUsbDevice(device.deviceId);
       if (openResult != 0) {
         throw Exception('uvc_open_fd failed: ${_camera.lastError}');
       }
@@ -223,7 +219,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         _manualFocusControlsVisible = false;
         _status = 'Preview running: ${startedMode!.label} / Texture';
       });
-      _log('Preview running: ${device.title} / ${startedMode.label} / Texture');
+      _log('Preview running: ${device.displayName} / ${startedMode.label} / Texture');
     } on PlatformException catch (error) {
       _setStatus(
         'Failed to open device: ${error.message ?? error.code}',
@@ -240,13 +236,14 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       return;
     }
 
-    final String deviceTitle = _selectedDevice?.title ?? 'Connected device';
+    final String deviceTitle = _selectedDevice?.displayName ?? 'Connected device';
     _setStatus('Disconnecting device...', openingDevice: true);
     _log('Disconnect requested: $deviceTitle');
 
     try {
-      await _stopCurrentPreview(closeDevice: true, clearPreviewImage: true);
-      await _usbBridge.closeUsbDevice();
+      await _stopCurrentPreview(clearPreviewImage: true);
+      await _camera.closeUsbDevice();
+      await _disposePreviewTexture();
       setState(() {
         _selectedDevice = null;
         _selectedMode = null;
@@ -280,7 +277,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     }
     _previewFrozen = false;
     _setStatus('Switching mode: ${mode.label}', openingDevice: true);
-    await _stopCurrentPreview(closeDevice: false, clearPreviewImage: true);
+    await _stopCurrentPreview(clearPreviewImage: true);
 
     final String? startError = await _startModeWithProbe(mode);
     if (startError != null) {
@@ -386,11 +383,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     }
 
     _previewTextureId = null;
-    try {
-      await _camera.detachPreviewTexture();
-    } finally {
-      await _camera.disposePreviewTexture(textureId);
-    }
+    await _camera.disposePreviewTexture(textureId);
   }
 
   Future<String?> _beginPreviewConsumption(UvcCameraMode mode) async {
@@ -407,7 +400,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
           _lastPreviewSequence = latestSequence;
           _lastPreviewSequenceSampleAt = DateTime.now();
           _previewStatsTimer = Timer.periodic(
-            _previewStatsInterval,
+            _fpsSampleInterval,
             (_) => _samplePreviewFps(),
           );
           return null;
@@ -448,7 +441,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       return null;
     }
 
-    await _stopCurrentPreview(closeDevice: false, clearPreviewImage: true);
+    await _stopCurrentPreview(clearPreviewImage: true);
     return probeError;
   }
 
@@ -478,10 +471,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     }
   }
 
-  Future<void> _stopCurrentPreview({
-    required bool closeDevice,
-    bool clearPreviewImage = false,
-  }) async {
+  Future<void> _stopCurrentPreview({bool clearPreviewImage = false}) async {
     _previewStatsTimer?.cancel();
     _previewStatsTimer = null;
     _resetPreviewFps();
@@ -499,9 +489,6 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     }
 
     _camera.stopPreview();
-    if (closeDevice) {
-      _camera.closeDevice();
-    }
   }
 
   void _setStatus(
@@ -639,7 +626,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
             .toIso8601String()
             .replaceAll(':', '-')
             .replaceAll('.', '-');
-        final String? savedUri = await _usbBridge.saveImageToGallery(
+        final String? savedUri = await _androidBridge.saveImageToGallery(
           pngBytes,
           displayName: 'uvc_capture_$timestamp.png',
         );
@@ -649,7 +636,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
               : 'Saved capture to gallery: $savedUri',
         );
       }
-      await _stopCurrentPreview(closeDevice: false, clearPreviewImage: false);
+      await _stopCurrentPreview();
       final ui.Image? previousImage = _previewImage;
       if (mounted) {
         setState(() {
@@ -808,7 +795,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                       alignment: Alignment.center,
                       child: _previewFrozen && _previewImage != null
                           ? RawImage(image: _previewImage, fit: BoxFit.contain)
-                          : _previewTextureId == null
+                          : !_hasLivePreview
                           ? const Text(
                               'No preview',
                               style: TextStyle(
@@ -1084,7 +1071,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                     (BuildContext context, int index) =>
                                         const Divider(height: 1),
                                 itemBuilder: (BuildContext context, int index) {
-                                  final AndroidUsbDeviceEntry device =
+                                  final UvcUsbDevice device =
                                       _devices[index];
                                   final bool selected =
                                       _selectedDevice?.deviceId ==
@@ -1114,14 +1101,14 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                           CrossAxisAlignment.start,
                                       children: <Widget>[
                                         Text(
-                                          device.title,
+                                          device.displayName,
                                           style: Theme.of(
                                             context,
                                           ).textTheme.titleMedium,
                                         ),
                                         const SizedBox(height: 4),
                                         Text(
-                                          device.subtitle,
+                                          device.details,
                                           style: Theme.of(
                                             context,
                                           ).textTheme.bodyMedium,

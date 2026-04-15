@@ -500,6 +500,58 @@ class UvcRegionOfInterestControl {
   final int autoControls;
 }
 
+/// Information about a UVC-capable USB device discovered on Android.
+class UvcUsbDevice {
+  const UvcUsbDevice({
+    required this.deviceId,
+    required this.deviceName,
+    required this.vendorId,
+    required this.productId,
+    required this.productName,
+    required this.manufacturerName,
+    required this.serialNumber,
+    required this.hasPermission,
+  });
+
+  factory UvcUsbDevice.fromMap(Map<Object?, Object?> map) {
+    return UvcUsbDevice(
+      deviceId: map['deviceId'] as int? ?? -1,
+      deviceName: map['deviceName'] as String? ?? '',
+      vendorId: map['vendorId'] as int? ?? 0,
+      productId: map['productId'] as int? ?? 0,
+      productName: map['productName'] as String? ?? '',
+      manufacturerName: map['manufacturerName'] as String? ?? '',
+      serialNumber: map['serialNumber'] as String? ?? '',
+      hasPermission: map['hasPermission'] as bool? ?? false,
+    );
+  }
+
+  final int deviceId;
+  final String deviceName;
+  final int vendorId;
+  final int productId;
+  final String productName;
+  final String manufacturerName;
+  final String serialNumber;
+  final bool hasPermission;
+
+  /// Human-readable label combining product name and USB ID.
+  String get displayName {
+    final String label = productName.isNotEmpty ? productName : deviceName;
+    return '$label (${vendorId.toRadixString(16)}:${productId.toRadixString(16)})';
+  }
+
+  /// Secondary detail line: manufacturer, serial number, permission state.
+  String get details {
+    final List<String> parts = <String>[
+      if (manufacturerName.isNotEmpty) manufacturerName,
+      if (serialNumber.isNotEmpty) 'S/N $serialNumber',
+      hasPermission ? 'permission granted' : 'permission required',
+    ];
+    return parts.join(' • ');
+  }
+}
+
 /// High-level camera API for the shared native UVC session.
 ///
 /// This package exposes a single shared camera service through [uvcCamera].
@@ -511,6 +563,25 @@ abstract interface class UvcCamera {
   /// This may be called before opening a device or while a device is already
   /// active. The setting applies to the shared native camera session.
   void setLogLevel(UvcLogLevel level);
+
+  /// Requests the CAMERA permission. Android only.
+  ///
+  /// Returns true if the permission is already granted or the user grants it.
+  Future<bool> ensureCameraPermission();
+
+  /// Lists USB devices that expose a UVC video interface. Android only.
+  Future<List<UvcUsbDevice>> listUsbDevices();
+
+  /// Opens a USB device by [deviceId], acquiring USB permission if needed,
+  /// then passes the resulting file descriptor to the native UVC layer.
+  ///
+  /// Returns 0 on success, or a negative native error code.
+  /// Throws [PlatformException] if the USB layer fails (e.g. permission denied,
+  /// device not found).
+  Future<int> openUsbDevice(int deviceId);
+
+  /// Closes the active USB device connection. Android only.
+  Future<void> closeUsbDevice();
 
   /// Opens a UVC device using an already acquired platform file descriptor.
   int openFd(int fd);
@@ -556,9 +627,6 @@ abstract interface class UvcCamera {
   ///
   /// A subsequent [startPreview] call renders into the attached texture.
   Future<void> attachPreviewTexture(int textureId, {int? width, int? height});
-
-  /// Detaches any currently attached preview texture.
-  Future<void> detachPreviewTexture();
 
   /// Returns all controls supported by the currently opened device.
   List<UvcCameraControl> supportedControls();

@@ -14,6 +14,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   static const MethodChannel _textureChannel = MethodChannel(
     'flutter_ffi_uvc/texture',
   );
+  static const MethodChannel _usbChannel = MethodChannel('flutter_ffi_uvc/usb');
 
   void _resetPreviewState() {}
 
@@ -90,6 +91,43 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     } finally {
       calloc.free(nativeBuffer);
     }
+  }
+
+  @override
+  Future<bool> ensureCameraPermission() async {
+    _ensureAndroid();
+    return await _usbChannel.invokeMethod<bool>('ensureCameraPermission') ??
+        false;
+  }
+
+  @override
+  Future<List<UvcUsbDevice>> listUsbDevices() async {
+    _ensureAndroid();
+    final List<Object?>? raw =
+        await _usbChannel.invokeListMethod<Object?>('listUsbDevices');
+    return (raw ?? <Object?>[])
+        .whereType<Map<Object?, Object?>>()
+        .map(UvcUsbDevice.fromMap)
+        .toList();
+  }
+
+  @override
+  Future<int> openUsbDevice(int deviceId) async {
+    _ensureAndroid();
+    final Map<Object?, Object?>? result = await _usbChannel
+        .invokeMapMethod<Object?, Object?>(
+      'openUsbDevice',
+      <String, Object?>{'deviceId': deviceId},
+    );
+    final int fd = result?['fileDescriptor'] as int? ?? -1;
+    return openFd(fd);
+  }
+
+  @override
+  Future<void> closeUsbDevice() async {
+    _ensureAndroid();
+    _bindings.uvc_close_device();
+    await _usbChannel.invokeMethod<void>('closeUsbDevice');
   }
 
   @override
@@ -179,12 +217,6 @@ class _FlutterFfiUvcCamera implements UvcCamera {
         ...?height == null ? null : <String, Object?>{'height': height},
       },
     );
-  }
-
-  @override
-  Future<void> detachPreviewTexture() async {
-    _ensureAndroid();
-    await _textureChannel.invokeMethod<void>('detachPreviewTexture');
   }
 
   /// Returns all controls the connected device supports, including current
