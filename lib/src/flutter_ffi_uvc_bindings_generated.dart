@@ -129,6 +129,57 @@ class FlutterFfiUvcBindings {
   late final _uvc_copy_latest_frame_rgba = _uvc_copy_latest_frame_rgbaPtr
       .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
 
+  int uvc_copy_latest_frame_rgba_with_metadata(
+    ffi.Pointer<ffi.Uint8> buffer,
+    int buffer_length,
+    ffi.Pointer<ffi.Int> out_width,
+    ffi.Pointer<ffi.Int> out_height,
+    ffi.Pointer<ffi.Int64> out_sequence,
+  ) {
+    return _uvc_copy_latest_frame_rgba_with_metadata(
+      buffer,
+      buffer_length,
+      out_width,
+      out_height,
+      out_sequence,
+    );
+  }
+
+  late final _uvc_copy_latest_frame_rgba_with_metadataPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+            ffi.Pointer<ffi.Int>,
+            ffi.Pointer<ffi.Int>,
+            ffi.Pointer<ffi.Int64>,
+          )
+        >
+      >('uvc_copy_latest_frame_rgba_with_metadata');
+  late final _uvc_copy_latest_frame_rgba_with_metadata =
+      _uvc_copy_latest_frame_rgba_with_metadataPtr
+          .asFunction<
+            int Function(
+              ffi.Pointer<ffi.Uint8>,
+              int,
+              ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Int64>,
+            )
+          >();
+
+  void uvc_set_frame_listener(uvc_frame_listener_t listener) {
+    return _uvc_set_frame_listener(listener);
+  }
+
+  late final _uvc_set_frame_listenerPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(uvc_frame_listener_t)>>(
+        'uvc_set_frame_listener',
+      );
+  late final _uvc_set_frame_listener = _uvc_set_frame_listenerPtr
+      .asFunction<void Function(uvc_frame_listener_t)>();
+
   int uvc_get_supported_modes_json(
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
@@ -466,6 +517,11 @@ class FlutterFfiUvcBindings {
       _uvc_set_region_of_interest_valuesPtr
           .asFunction<int Function(int, int, int, int, int)>();
 }
+
+typedef uvc_frame_listener_tFunction = ffi.Void Function(ffi.Int64 sequence);
+typedef Dartuvc_frame_listener_tFunction = void Function(int sequence);
+typedef uvc_frame_listener_t =
+    ffi.Pointer<ffi.NativeFunction<uvc_frame_listener_tFunction>>;
 
 const int UVC_CTRL_ID_BRIGHTNESS = 1;
 

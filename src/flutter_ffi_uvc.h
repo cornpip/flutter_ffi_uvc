@@ -31,13 +31,26 @@ FFI_PLUGIN_EXPORT int sum(int a, int b);
 FFI_PLUGIN_EXPORT int sum_long_running(int a, int b);
 
 FFI_PLUGIN_EXPORT int uvc_open_fd(int fd);
-FFI_PLUGIN_EXPORT int uvc_start_preview(int frame_format, int width, int height, int fps);
+typedef void (*uvc_frame_listener_t)(int64_t sequence);
+
+FFI_PLUGIN_EXPORT int uvc_start_preview(
+    int frame_format,
+    int width,
+    int height,
+    int fps);
 FFI_PLUGIN_EXPORT void uvc_stop_preview(void);
 FFI_PLUGIN_EXPORT void uvc_close_device(void);
 FFI_PLUGIN_EXPORT int uvc_is_previewing(void);
 FFI_PLUGIN_EXPORT int uvc_frame_width(void);
 FFI_PLUGIN_EXPORT int uvc_frame_height(void);
 FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba(uint8_t *buffer, int buffer_length);
+FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_with_metadata(
+    uint8_t *buffer,
+    int buffer_length,
+    int *out_width,
+    int *out_height,
+    int64_t *out_sequence);
+FFI_PLUGIN_EXPORT void uvc_set_frame_listener(uvc_frame_listener_t listener);
 FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uint8_t *buffer, int buffer_length);
 FFI_PLUGIN_EXPORT const char *uvc_last_error(void);
 FFI_PLUGIN_EXPORT void uvc_set_log_level(int level);

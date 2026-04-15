@@ -14,6 +14,7 @@ uvc_error_t uvc_wrap(int sys_dev, uvc_context_t *context, uvc_device_handle_t **
 
 typedef struct {
   pthread_mutex_t mutex;
+  pthread_cond_t callback_cond;
   uvc_context_t *ctx;
   uvc_device_handle_t *devh;
   uvc_frame_t *rgb_frame;
@@ -22,6 +23,10 @@ typedef struct {
   int frame_width;
   int frame_height;
   int previewing;
+  int stopping_preview;
+  uint32_t callbacks_inflight;
+  int64_t latest_sequence;
+  uvc_frame_listener_t frame_listener;
   uint32_t callback_count;
   uint32_t mjpeg_warmup_drop_remaining;
   char last_error[256];
@@ -29,6 +34,7 @@ typedef struct {
 
 static ffi_uvc_state_t g_uvc_state = {
     .mutex = PTHREAD_MUTEX_INITIALIZER,
+    .callback_cond = PTHREAD_COND_INITIALIZER,
 };
 
 FFI_PLUGIN_EXPORT void uvc_set_log_level(int level) {
@@ -138,42 +144,78 @@ static void clear_last_error(void) {
   g_uvc_state.last_error[0] = '\0';
 }
 
+
 static void reset_frame_buffer_locked(void) {
   free(g_uvc_state.latest_rgba);
   g_uvc_state.latest_rgba = NULL;
   g_uvc_state.latest_rgba_bytes = 0;
   g_uvc_state.frame_width = 0;
   g_uvc_state.frame_height = 0;
+  g_uvc_state.latest_sequence = 0;
   g_uvc_state.callback_count = 0;
 }
 
-static void close_device_locked(void) {
-  if (g_uvc_state.previewing && g_uvc_state.devh != NULL) {
-    UVC_LOGD("UVC_NATIVE", "close_device_locked stopping active stream devh=%p", (void *)g_uvc_state.devh);
-    uvc_stop_streaming(g_uvc_state.devh);
-    g_uvc_state.previewing = 0;
+static void finish_callback_locked(void) {
+  if (g_uvc_state.callbacks_inflight == 0) {
+    return;
   }
 
+  g_uvc_state.callbacks_inflight -= 1;
+  if (g_uvc_state.callbacks_inflight == 0) {
+    pthread_cond_broadcast(&g_uvc_state.callback_cond);
+  }
+}
+
+static void wait_for_callbacks_locked(void) {
+  while (g_uvc_state.callbacks_inflight > 0) {
+    pthread_cond_wait(&g_uvc_state.callback_cond, &g_uvc_state.mutex);
+  }
+}
+
+static int begin_stop_preview_locked(uvc_device_handle_t **devh_to_stop) {
+  if (g_uvc_state.previewing && g_uvc_state.devh != NULL) {
+    *devh_to_stop = g_uvc_state.devh;
+    g_uvc_state.previewing = 0;
+    g_uvc_state.stopping_preview = 1;
+    g_uvc_state.frame_listener = NULL;
+    return 1;
+  }
+
+  g_uvc_state.frame_listener = NULL;
+  return 0;
+}
+
+static void finish_stop_preview_locked(void) {
+  wait_for_callbacks_locked();
+  reset_frame_buffer_locked();
+  g_uvc_state.stopping_preview = 0;
+}
+
+static void close_device_resources_locked(void) {
+
   if (g_uvc_state.rgb_frame != NULL) {
-    UVC_LOGD("UVC_NATIVE", "close_device_locked freeing rgb_frame=%p", (void *)g_uvc_state.rgb_frame);
+    UVC_LOGD("UVC_NATIVE", "close_device_resources_locked freeing rgb_frame=%p", (void *)g_uvc_state.rgb_frame);
     uvc_free_frame(g_uvc_state.rgb_frame);
     g_uvc_state.rgb_frame = NULL;
   }
 
   if (g_uvc_state.devh != NULL) {
-    UVC_LOGD("UVC_NATIVE", "close_device_locked closing device handle devh=%p", (void *)g_uvc_state.devh);
+    UVC_LOGD("UVC_NATIVE", "close_device_resources_locked closing device handle devh=%p", (void *)g_uvc_state.devh);
     uvc_close(g_uvc_state.devh);
     g_uvc_state.devh = NULL;
   }
 
   if (g_uvc_state.ctx != NULL) {
-    UVC_LOGD("UVC_NATIVE", "close_device_locked exiting uvc context ctx=%p", (void *)g_uvc_state.ctx);
+    UVC_LOGD("UVC_NATIVE", "close_device_resources_locked exiting uvc context ctx=%p", (void *)g_uvc_state.ctx);
     uvc_exit(g_uvc_state.ctx);
     g_uvc_state.ctx = NULL;
   }
 
-  UVC_LOGD("UVC_NATIVE", "close_device_locked resetting frame buffers");
+  UVC_LOGD("UVC_NATIVE", "close_device_resources_locked resetting frame buffers");
   reset_frame_buffer_locked();
+  g_uvc_state.previewing = 0;
+  g_uvc_state.stopping_preview = 0;
+  g_uvc_state.frame_listener = NULL;
 }
 
 static int ensure_rgb_frame_locked(size_t required_bytes) {
@@ -201,6 +243,37 @@ static int ensure_rgb_frame_locked(size_t required_bytes) {
     g_uvc_state.rgb_frame->data_bytes = required_bytes;
   }
 
+  return 1;
+}
+
+static int update_latest_rgba_locked(void) {
+  const size_t rgba_bytes = (size_t)g_uvc_state.rgb_frame->width * (size_t)g_uvc_state.rgb_frame->height * 4;
+
+  if (g_uvc_state.latest_rgba_bytes != rgba_bytes) {
+    uint8_t *new_buffer = realloc(g_uvc_state.latest_rgba, rgba_bytes);
+    if (new_buffer == NULL) {
+      set_last_error("Failed to allocate %zu bytes for preview frame", rgba_bytes);
+      return 0;
+    }
+    g_uvc_state.latest_rgba = new_buffer;
+    g_uvc_state.latest_rgba_bytes = rgba_bytes;
+  }
+
+  uint8_t *src = (uint8_t *)g_uvc_state.rgb_frame->data;
+  uint8_t *dst = g_uvc_state.latest_rgba;
+  const size_t pixel_count =
+      (size_t)g_uvc_state.rgb_frame->width * (size_t)g_uvc_state.rgb_frame->height;
+
+  for (size_t i = 0; i < pixel_count; ++i) {
+    dst[i * 4 + 0] = src[i * 3 + 0];
+    dst[i * 4 + 1] = src[i * 3 + 1];
+    dst[i * 4 + 2] = src[i * 3 + 2];
+    dst[i * 4 + 3] = 0xFF;
+  }
+
+  g_uvc_state.frame_width = g_uvc_state.rgb_frame->width;
+  g_uvc_state.frame_height = g_uvc_state.rgb_frame->height;
+  g_uvc_state.latest_sequence += 1;
   return 1;
 }
 
@@ -255,15 +328,15 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
     return;
   }
 
-  if (g_uvc_state.rgb_frame == NULL) {
-    UVC_LOGW("UVC_NATIVE", "frame callback skipped because rgb_frame is null");
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  if (!g_uvc_state.previewing || g_uvc_state.stopping_preview || g_uvc_state.rgb_frame == NULL) {
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    UVC_LOGW("UVC_NATIVE", "frame callback skipped because preview is stopping or rgb_frame is null");
     return;
   }
-
-  pthread_mutex_lock(&g_uvc_state.mutex);
+  g_uvc_state.callbacks_inflight += 1;
   g_uvc_state.callback_count += 1;
   uint32_t callback_count = g_uvc_state.callback_count;
-  pthread_mutex_unlock(&g_uvc_state.mutex);
 
   if (callback_count <= 5 || callback_count % 30 == 0) {
     UVC_LOGT(
@@ -279,7 +352,6 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
 
   const size_t expected_input_bytes = expected_frame_bytes_for_format(frame);
   if (expected_input_bytes > 0 && frame->data_bytes < expected_input_bytes) {
-    pthread_mutex_lock(&g_uvc_state.mutex);
     set_last_error(
         "Frame too small for format=%s width=%u height=%u expected>=%zu actual=%zu",
         frame_format_name(frame->frame_format),
@@ -287,7 +359,6 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         frame->height,
         expected_input_bytes,
         frame->data_bytes);
-    pthread_mutex_unlock(&g_uvc_state.mutex);
     UVC_LOGW(
         "UVC_NATIVE",
         "rejecting undersized frame callback=%u format=%d width=%u height=%u expected>=%zu actual=%zu",
@@ -297,16 +368,16 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         frame->height,
         expected_input_bytes,
         frame->data_bytes);
+    finish_callback_locked();
+    pthread_mutex_unlock(&g_uvc_state.mutex);
     return;
   }
 
   if (frame->frame_format == UVC_FRAME_FORMAT_MJPEG) {
-    pthread_mutex_lock(&g_uvc_state.mutex);
     uint32_t warmup_drop_remaining = g_uvc_state.mjpeg_warmup_drop_remaining;
     if (warmup_drop_remaining > 0) {
       g_uvc_state.mjpeg_warmup_drop_remaining -= 1;
     }
-    pthread_mutex_unlock(&g_uvc_state.mutex);
 
     if (warmup_drop_remaining > 0) {
       UVC_LOGT(
@@ -315,17 +386,17 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
           callback_count,
           warmup_drop_remaining - 1,
           frame->data_bytes);
+      finish_callback_locked();
+      pthread_mutex_unlock(&g_uvc_state.mutex);
       return;
     }
 
     if (!is_valid_mjpeg_frame(frame)) {
-      pthread_mutex_lock(&g_uvc_state.mutex);
       set_last_error(
           "Invalid MJPEG frame width=%u height=%u bytes=%zu",
           frame->width,
           frame->height,
           frame->data_bytes);
-      pthread_mutex_unlock(&g_uvc_state.mutex);
       UVC_LOGW(
           "UVC_NATIVE",
           "rejecting invalid MJPEG frame callback=%u width=%u height=%u bytes=%zu",
@@ -333,15 +404,15 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
           frame->width,
           frame->height,
           frame->data_bytes);
+      finish_callback_locked();
+      pthread_mutex_unlock(&g_uvc_state.mutex);
       return;
     }
   }
 
   const size_t required_rgb_bytes = (size_t)frame->width * (size_t)frame->height * 3;
 
-  pthread_mutex_lock(&g_uvc_state.mutex);
   if (!ensure_rgb_frame_locked(required_rgb_bytes)) {
-    pthread_mutex_unlock(&g_uvc_state.mutex);
     UVC_LOGE(
         "UVC_NATIVE",
         "frame callback failed to prepare rgb buffer callback=%u width=%u height=%u bytes=%zu",
@@ -349,15 +420,14 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         frame->width,
         frame->height,
         required_rgb_bytes);
+    finish_callback_locked();
+    pthread_mutex_unlock(&g_uvc_state.mutex);
     return;
   }
-  pthread_mutex_unlock(&g_uvc_state.mutex);
 
   uvc_error_t convert_result = uvc_any2rgb(frame, g_uvc_state.rgb_frame);
   if (convert_result != UVC_SUCCESS) {
-    pthread_mutex_lock(&g_uvc_state.mutex);
     set_last_error("uvc_any2rgb failed: %s", uvc_strerror(convert_result));
-    pthread_mutex_unlock(&g_uvc_state.mutex);
     UVC_LOGE(
         "UVC_NATIVE",
         "uvc_any2rgb failed callback=%u format=%d width=%u height=%u err=%s",
@@ -366,38 +436,24 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         frame->width,
         frame->height,
         uvc_strerror(convert_result));
+    finish_callback_locked();
+    pthread_mutex_unlock(&g_uvc_state.mutex);
     return;
   }
 
   const size_t rgba_bytes = (size_t)g_uvc_state.rgb_frame->width * (size_t)g_uvc_state.rgb_frame->height * 4;
+  int64_t delivered_sequence = 0;
+  uvc_frame_listener_t frame_listener = NULL;
 
-  pthread_mutex_lock(&g_uvc_state.mutex);
-
-  if (g_uvc_state.latest_rgba_bytes != rgba_bytes) {
-    uint8_t *new_buffer = realloc(g_uvc_state.latest_rgba, rgba_bytes);
-    if (new_buffer == NULL) {
-      set_last_error("Failed to allocate %zu bytes for preview frame", rgba_bytes);
-      pthread_mutex_unlock(&g_uvc_state.mutex);
-      return;
-    }
-    g_uvc_state.latest_rgba = new_buffer;
-    g_uvc_state.latest_rgba_bytes = rgba_bytes;
+  if (!update_latest_rgba_locked()) {
+    finish_callback_locked();
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return;
   }
-
-  uint8_t *src = (uint8_t *)g_uvc_state.rgb_frame->data;
-  uint8_t *dst = g_uvc_state.latest_rgba;
-  const size_t pixel_count = (size_t)g_uvc_state.rgb_frame->width * (size_t)g_uvc_state.rgb_frame->height;
-
-  for (size_t i = 0; i < pixel_count; ++i) {
-    dst[i * 4 + 0] = src[i * 3 + 0];
-    dst[i * 4 + 1] = src[i * 3 + 1];
-    dst[i * 4 + 2] = src[i * 3 + 2];
-    dst[i * 4 + 3] = 0xFF;
-  }
-
-  g_uvc_state.frame_width = g_uvc_state.rgb_frame->width;
-  g_uvc_state.frame_height = g_uvc_state.rgb_frame->height;
+  delivered_sequence = g_uvc_state.latest_sequence;
+  frame_listener = g_uvc_state.frame_listener;
   clear_last_error();
+  finish_callback_locked();
   pthread_mutex_unlock(&g_uvc_state.mutex);
 
   if (callback_count <= 5 || callback_count % 30 == 0) {
@@ -407,7 +463,11 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         callback_count,
         g_uvc_state.frame_width,
         g_uvc_state.frame_height,
-        g_uvc_state.latest_rgba_bytes);
+        rgba_bytes);
+  }
+
+  if (frame_listener != NULL) {
+    frame_listener(delivered_sequence);
   }
 }
 
@@ -428,14 +488,28 @@ FFI_PLUGIN_EXPORT int uvc_open_fd(int fd) {
     return UVC_ERROR_INVALID_PARAM;
   }
 
+  uvc_device_handle_t *devh_to_stop = NULL;
+  int should_stop_streaming = 0;
+
   pthread_mutex_lock(&g_uvc_state.mutex);
-  close_device_locked();
+  should_stop_streaming = begin_stop_preview_locked(&devh_to_stop);
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+
+  if (should_stop_streaming) {
+    uvc_stop_streaming(devh_to_stop);
+  }
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  if (should_stop_streaming) {
+    finish_stop_preview_locked();
+  }
+  close_device_resources_locked();
   clear_last_error();
 
   uvc_error_t result = uvc_init(&g_uvc_state.ctx, NULL);
   if (result != UVC_SUCCESS) {
     set_last_error("uvc_init failed: %s", uvc_strerror(result));
-    close_device_locked();
+    close_device_resources_locked();
     pthread_mutex_unlock(&g_uvc_state.mutex);
     return result;
   }
@@ -443,7 +517,7 @@ FFI_PLUGIN_EXPORT int uvc_open_fd(int fd) {
   result = uvc_wrap(fd, g_uvc_state.ctx, &g_uvc_state.devh);
   if (result != UVC_SUCCESS) {
     set_last_error("uvc_wrap failed: %s", uvc_strerror(result));
-    close_device_locked();
+    close_device_resources_locked();
     pthread_mutex_unlock(&g_uvc_state.mutex);
     return result;
   }
@@ -481,7 +555,7 @@ FFI_PLUGIN_EXPORT int uvc_open_fd(int fd) {
   g_uvc_state.rgb_frame = uvc_allocate_frame(1);
   if (g_uvc_state.rgb_frame == NULL) {
     set_last_error("Failed to allocate RGB frame buffer");
-    close_device_locked();
+    close_device_resources_locked();
     pthread_mutex_unlock(&g_uvc_state.mutex);
     return UVC_ERROR_NO_MEM;
   }
@@ -490,7 +564,14 @@ FFI_PLUGIN_EXPORT int uvc_open_fd(int fd) {
   return UVC_SUCCESS;
 }
 
-FFI_PLUGIN_EXPORT int uvc_start_preview(int frame_format, int width, int height, int fps) {
+FFI_PLUGIN_EXPORT int uvc_start_preview(
+    int frame_format,
+    int width,
+    int height,
+    int fps) {
+  uvc_device_handle_t *devh_to_stop = NULL;
+  int should_stop_streaming = 0;
+
   pthread_mutex_lock(&g_uvc_state.mutex);
 
   if (g_uvc_state.devh == NULL) {
@@ -499,10 +580,16 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(int frame_format, int width, int height,
     return UVC_ERROR_NO_DEVICE;
   }
 
-  if (g_uvc_state.previewing) {
-    uvc_stop_streaming(g_uvc_state.devh);
-    g_uvc_state.previewing = 0;
-    reset_frame_buffer_locked();
+  should_stop_streaming = begin_stop_preview_locked(&devh_to_stop);
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+
+  if (should_stop_streaming) {
+    uvc_stop_streaming(devh_to_stop);
+  }
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  if (should_stop_streaming) {
+    finish_stop_preview_locked();
   }
 
   uvc_stream_ctrl_t ctrl;
@@ -546,10 +633,17 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(int frame_format, int width, int height,
 
   g_uvc_state.previewing = 1;
   g_uvc_state.callback_count = 0;
+  g_uvc_state.latest_sequence = 0;
   g_uvc_state.mjpeg_warmup_drop_remaining =
       frame_format == UVC_FRAME_FORMAT_MJPEG ? 3 : 0;
   clear_last_error();
-  UVC_LOGI("UVC_NATIVE", "uvc_start_preview success format=%d width=%d height=%d fps=%d", frame_format, width, height, fps);
+  UVC_LOGI(
+      "UVC_NATIVE",
+      "uvc_start_preview success format=%d width=%d height=%d fps=%d",
+      frame_format,
+      width,
+      height,
+      fps);
   pthread_mutex_unlock(&g_uvc_state.mutex);
   return UVC_SUCCESS;
 }
@@ -669,11 +763,7 @@ FFI_PLUGIN_EXPORT void uvc_stop_preview(void) {
       "uvc_stop_preview locked previewing=%d devh=%p",
       g_uvc_state.previewing,
       (void *)g_uvc_state.devh);
-  if (g_uvc_state.previewing && g_uvc_state.devh != NULL) {
-    devh_to_stop = g_uvc_state.devh;
-    should_stop_streaming = 1;
-    g_uvc_state.previewing = 0;
-  }
+  should_stop_streaming = begin_stop_preview_locked(&devh_to_stop);
   pthread_mutex_unlock(&g_uvc_state.mutex);
 
   if (should_stop_streaming) {
@@ -683,14 +773,15 @@ FFI_PLUGIN_EXPORT void uvc_stop_preview(void) {
   }
 
   pthread_mutex_lock(&g_uvc_state.mutex);
-  UVC_LOGD("UVC_NATIVE", "uvc_stop_preview before reset_frame_buffer_locked");
-  reset_frame_buffer_locked();
-  UVC_LOGD("UVC_NATIVE", "uvc_stop_preview after reset_frame_buffer_locked");
+  finish_stop_preview_locked();
   pthread_mutex_unlock(&g_uvc_state.mutex);
   UVC_LOGD("UVC_NATIVE", "uvc_stop_preview end");
 }
 
 FFI_PLUGIN_EXPORT void uvc_close_device(void) {
+  uvc_device_handle_t *devh_to_stop = NULL;
+  int should_stop_streaming = 0;
+
   pthread_mutex_lock(&g_uvc_state.mutex);
   UVC_LOGD(
       "UVC_NATIVE",
@@ -698,7 +789,18 @@ FFI_PLUGIN_EXPORT void uvc_close_device(void) {
       g_uvc_state.previewing,
       (void *)g_uvc_state.devh,
       (void *)g_uvc_state.ctx);
-  close_device_locked();
+  should_stop_streaming = begin_stop_preview_locked(&devh_to_stop);
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+
+  if (should_stop_streaming) {
+    uvc_stop_streaming(devh_to_stop);
+  }
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  if (should_stop_streaming) {
+    finish_stop_preview_locked();
+  }
+  close_device_resources_locked();
   UVC_LOGI("UVC_NATIVE", "uvc_close_device success");
   UVC_LOGD("UVC_NATIVE", "uvc_close_device end");
   pthread_mutex_unlock(&g_uvc_state.mutex);
@@ -726,6 +828,15 @@ FFI_PLUGIN_EXPORT int uvc_frame_height(void) {
 }
 
 FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba(uint8_t *buffer, int buffer_length) {
+  return uvc_copy_latest_frame_rgba_with_metadata(buffer, buffer_length, NULL, NULL, NULL);
+}
+
+FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_with_metadata(
+    uint8_t *buffer,
+    int buffer_length,
+    int *out_width,
+    int *out_height,
+    int64_t *out_sequence) {
   if (buffer == NULL || buffer_length <= 0) {
     return 0;
   }
@@ -740,8 +851,23 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba(uint8_t *buffer, int buffer_len
       ? (int)g_uvc_state.latest_rgba_bytes
       : buffer_length;
   memcpy(buffer, g_uvc_state.latest_rgba, bytes_to_copy);
+  if (out_width != NULL) {
+    *out_width = g_uvc_state.frame_width;
+  }
+  if (out_height != NULL) {
+    *out_height = g_uvc_state.frame_height;
+  }
+  if (out_sequence != NULL) {
+    *out_sequence = g_uvc_state.latest_sequence;
+  }
   pthread_mutex_unlock(&g_uvc_state.mutex);
   return bytes_to_copy;
+}
+
+FFI_PLUGIN_EXPORT void uvc_set_frame_listener(uvc_frame_listener_t listener) {
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  g_uvc_state.frame_listener = listener;
+  pthread_mutex_unlock(&g_uvc_state.mutex);
 }
 
 FFI_PLUGIN_EXPORT const char *uvc_last_error(void) {

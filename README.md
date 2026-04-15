@@ -50,8 +50,8 @@ The intended usage flow is:
 4. Call `uvcCamera.openFd(fd)`.
 5. Read `uvcCamera.supportedModes()`.
 6. Pick a mode and call `uvcCamera.startPreview(mode)`.
-7. Poll `uvcCamera.copyLatestFrame()` while preview is active.
-8. Call `uvcCamera.stopPreview()` when preview is no longer needed. 
+7. Consume frames via `copyLatestFrame()` (polling) or `latestFrameStream()` (notified).
+8. Call `uvcCamera.stopPreview()` when preview is no longer needed.
 9. When finished, call `uvcCamera.closeDevice()` and close the Android `UsbDeviceConnection`.
 
 ### Single-camera model
@@ -62,47 +62,96 @@ This plugin is designed around a single, shared global `uvcCamera` instance. It 
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 
 class UvcPreviewPage extends StatefulWidget {
-  const UvcPreviewPage({
+  UvcPreviewPage({
     super.key,
-    this.camera = uvcCamera,
-  });
+    UvcCamera? camera,
+  }) : camera = camera ?? uvcCamera;
 
   final UvcCamera camera;
 }
 ```
 
-### Minimal usage example
+### Consuming frames
+
+After `startPreview`, there are two ways to consume frames. Both always
+deliver the latest available frame at the time of consumption — intermediate
+frames are not buffered and will be skipped if Dart cannot keep up with the
+camera's output rate.
+
+#### Option 1 — `latestFrameStream`: native-notification-driven
+
+Use this when you want to react as closely as possible to each frame the
+device produces. The native layer notifies Dart on each frame arrival, which
+triggers a pull of the latest frame. The native listener is registered on
+`.listen()` and released when `stopPreview()` or `closeDevice()` is called.
+The stream subscription ends automatically at that point.
 
 ```dart
-import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
-
-Future<void> startUvcPreview(int fd) async {
-  uvcCamera.setLogLevel(UvcLogLevel.warn);
-
-  final int openResult = uvcCamera.openFd(fd);
-  if (openResult != 0) {
-    throw Exception('Failed to open UVC device: ${uvcCamera.lastError}');
-  }
-
-  final List<UvcCameraMode> modes = uvcCamera.supportedModes();
-  if (modes.isEmpty) {
-    uvcCamera.closeDevice();
-    throw Exception('No supported UVC modes were reported.');
-  }
-
-  final UvcCameraMode mode = modes.first;
-  final int previewResult = uvcCamera.startPreview(mode);
-  if (previewResult != 0) {
-    uvcCamera.closeDevice();
-    throw Exception('Failed to start preview: ${uvcCamera.lastError}');
-  }
-
-  final UvcPreviewFrame? frame = uvcCamera.copyLatestFrame();
-  if (frame != null) {
-    print('Received ${frame.width}x${frame.height} RGBA frame');
-  }
+final int result = uvcCamera.startPreview(mode);
+if (result != 0) {
+  throw Exception('Failed to start preview: ${uvcCamera.lastError}');
 }
+
+uvcCamera.latestFrameStream().listen(
+  (UvcPreviewFrame frame) {
+    // frame.rgbaBytes, frame.width, frame.height
+  },
+);
+
+// Releases the native listener and closes the stream.
+// The subscription ends automatically.
+uvcCamera.stopPreview();
 ```
+
+#### Option 2 — `copyLatestFrame`: timer-based polling
+
+Use this when you want to control how often the display updates, e.g. to cap
+rendering at a specific rate or decouple preview rendering from the camera's
+output rate.
+
+```dart
+final int result = uvcCamera.startPreview(mode);
+if (result != 0) {
+  throw Exception('Failed to start preview: ${uvcCamera.lastError}');
+}
+
+final Timer timer = Timer.periodic(
+  mode.recommendedPollingInterval + const Duration(milliseconds: 16),
+  (_) {
+    final UvcPreviewFrame? frame = uvcCamera.copyLatestFrame();
+    if (frame != null) {
+      // frame.rgbaBytes, frame.width, frame.height
+    }
+  },
+);
+
+// Cancel when preview is no longer needed.
+timer.cancel();
+uvcCamera.stopPreview();
+```
+
+`mode.recommendedPollingInterval` is derived from the selected mode's fps:
+
+- `60fps` -> about `16ms`
+- `30fps` -> about `33ms`
+- `24fps` -> about `42ms`
+- `15fps` -> about `67ms`
+- `10fps` -> about `100ms`
+- `5fps` -> about `200ms`
+
+A longer interval reduces the polling rate. For example, adding
+`const Duration(milliseconds: 16)` gives roughly:
+
+- `60fps` mode: `16ms + 16ms = 32ms` -> about `31fps`
+- `30fps` mode: `33ms + 16ms = 49ms` -> about `20fps`
+- `24fps` mode: `42ms + 16ms = 58ms` -> about `17fps`
+- `15fps` mode: `67ms + 16ms = 83ms` -> about `12fps`
+- `10fps` mode: `100ms + 16ms = 116ms` -> about `8.6fps`
+- `5fps` mode: `200ms + 16ms = 216ms` -> about `4.6fps`
+
+Calculation formula:
+- `polling interval in ms ~= 1000 / fps`
+- `polling rate in fps ~= 1000 / polling interval in ms`
 
 ### Controls
 
@@ -169,22 +218,25 @@ selection UI. That model is not part of this package API.
 
 Most users will interact with these primary API entry points:
 
-- uvcCamera
-- UvcCamera
-- UvcCameraMode
-- UvcPreviewFrame
-- UvcCameraControl
-- UvcControlId
-- UvcControlKind
+- `UvcCamera`
+- `UvcCameraMode`
+- `UvcPreviewFrame`
+- `UvcCameraControl`
+- `UvcControlId`
+- `UvcControlKind`
 
 Debugging APIs are also available when needed:
 
-- UvcLogLevel
-- UvcBmControlInfo
-- debugBmControls()
+- `UvcLogLevel`
+- `UvcBmControlInfo`
+- `debugBmControls()`
 
 Do not depend on the generated bindings directly unless you are working on the
 package internals.
+
+## RoadMap
+
+For upcoming work areas and current planning direction, see [ROADMAP.md](ROADMAP.md).
 
 ## Licensing
 
