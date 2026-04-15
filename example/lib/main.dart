@@ -4,68 +4,14 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
+import 'package:flutter_ffi_uvc_example/android_bridge.dart';
 
-const Color _brandGreen = Color(0xFF2F6B3F);
-const Color _brandGreenLight = Color(0xFFE4F0E7);
-const Color _brandGreenBorder = Color(0xFF9EBDA6);
-const Color _surfaceNeutral = Color(0xFFF8FAF8);
-const Color _surfaceNeutralBorder = Color(0xFFD7E1D7);
+import 'app_theme.dart';
+import 'widgets/controls_panel.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const MyApp());
-}
-
-/// Example-only DTO for Android USB enumeration results.
-///
-/// This is not part of the package public API.
-class AndroidUsbDeviceEntry {
-  const AndroidUsbDeviceEntry({
-    required this.deviceId,
-    required this.deviceName,
-    required this.vendorId,
-    required this.productId,
-    required this.productName,
-    required this.manufacturerName,
-    required this.serialNumber,
-    required this.hasPermission,
-  });
-
-  factory AndroidUsbDeviceEntry.fromMap(Map<Object?, Object?> map) {
-    return AndroidUsbDeviceEntry(
-      deviceId: map['deviceId'] as int? ?? -1,
-      deviceName: map['deviceName'] as String? ?? '',
-      vendorId: map['vendorId'] as int? ?? 0,
-      productId: map['productId'] as int? ?? 0,
-      productName: map['productName'] as String? ?? '',
-      manufacturerName: map['manufacturerName'] as String? ?? '',
-      serialNumber: map['serialNumber'] as String? ?? '',
-      hasPermission: map['hasPermission'] as bool? ?? false,
-    );
-  }
-
-  final int deviceId;
-  final String deviceName;
-  final int vendorId;
-  final int productId;
-  final String productName;
-  final String manufacturerName;
-  final String serialNumber;
-  final bool hasPermission;
-
-  String get title {
-    final String label = productName.isNotEmpty ? productName : deviceName;
-    return '$label (${vendorId.toRadixString(16)}:${productId.toRadixString(16)})';
-  }
-
-  String get subtitle {
-    final List<String> parts = <String>[
-      if (manufacturerName.isNotEmpty) manufacturerName,
-      if (serialNumber.isNotEmpty) 'S/N $serialNumber',
-      hasPermission ? 'permission granted' : 'permission required',
-    ];
-    return parts.join(' • ');
-  }
 }
 
 class MyApp extends StatelessWidget {
@@ -75,38 +21,14 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'UVC Preview Demo',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: _brandGreen,
-          surface: _surfaceNeutral,
-        ),
-        scaffoldBackgroundColor: _surfaceNeutral,
-        elevatedButtonTheme: ElevatedButtonThemeData(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: _brandGreen,
-            foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(10),
-            ),
-          ),
-        ),
-        filledButtonTheme: FilledButtonThemeData(
-          style: FilledButton.styleFrom(
-            backgroundColor: _brandGreen,
-            foregroundColor: Colors.white,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(14),
-            ),
-          ),
-        ),
-      ),
-      home: const UvcPreviewPage(),
+      theme: buildExampleTheme(),
+      home: UvcPreviewPage(),
     );
   }
 }
 
 class UvcPreviewPage extends StatefulWidget {
-  const UvcPreviewPage({super.key, this.camera = uvcCamera});
+  UvcPreviewPage({super.key, UvcCamera? camera}) : camera = camera ?? uvcCamera;
 
   final UvcCamera camera;
 
@@ -116,38 +38,39 @@ class UvcPreviewPage extends StatefulWidget {
 
 class _UvcPreviewPageState extends State<UvcPreviewPage>
     with WidgetsBindingObserver {
-  static const MethodChannel _usbChannel = MethodChannel(
-    'flutter_ffi_uvc_example/usb',
-  );
+  static const AndroidBridge _androidBridge = AndroidBridge();
   static const String _logPrefix = '@@@@UVC_EXAMPLE';
   static const Duration _startupProbeTimeout = Duration(seconds: 2);
-  static const Duration _startupProbeInterval = Duration(milliseconds: 120);
-
+  static const Duration _fpsSampleInterval = Duration(milliseconds: 400);
   UvcCamera get _camera => widget.camera;
 
-  List<AndroidUsbDeviceEntry> _devices = const <AndroidUsbDeviceEntry>[];
+  List<UvcUsbDevice> _devices = const <UvcUsbDevice>[];
   List<UvcCameraMode> _cameraModes = const <UvcCameraMode>[];
   List<UvcCameraControl> _cameraControls = const <UvcCameraControl>[];
-  AndroidUsbDeviceEntry? _selectedDevice;
+  UvcUsbDevice? _selectedDevice;
   UvcCameraMode? _selectedMode;
+  int? _previewTextureId;
   ui.Image? _previewImage;
-  Timer? _frameTimer;
+  Timer? _previewStatsTimer;
   bool _loadingDevices = true;
   bool _openingDevice = false;
-  bool _decodingFrame = false;
   bool _afTriggering = false;
   bool _previewFrozen = false;
   bool _savingPhoto = false;
+  bool _saveToGallery = false;
   bool _manualFocusControlsVisible = false;
   Timer? _focusRepeatTimer;
   Timer? _focusValueHideTimer;
   bool _focusValueVisible = false;
   String? _status;
+  double _previewFps = 0;
+  int _lastPreviewSequence = 0;
+  DateTime? _lastPreviewSequenceSampleAt;
 
   @override
   void initState() {
     super.initState();
-    _camera.setLogLevel(UvcLogLevel.debug);
+    _camera.setLogLevel(UvcLogLevel.trace);
     WidgetsBinding.instance.addObserver(this);
     unawaited(_initializePermissionsAndDevices());
   }
@@ -162,20 +85,19 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _frameTimer?.cancel();
+    _previewStatsTimer?.cancel();
     _focusRepeatTimer?.cancel();
     _focusValueHideTimer?.cancel();
     _previewImage?.dispose();
-    unawaited(_stopCurrentPreview(closeDevice: true));
-    unawaited(_usbChannel.invokeMethod<void>('closeUsbDevice'));
+    unawaited(_stopCurrentPreview());
+    unawaited(_disposePreviewTexture());
+    unawaited(_camera.closeUsbDevice());
     super.dispose();
   }
 
   Future<void> _initializePermissionsAndDevices() async {
     try {
-      final bool granted =
-          await _usbChannel.invokeMethod<bool>('ensureCameraPermission') ??
-          false;
+      final bool granted = await _camera.ensureCameraPermission();
       if (!granted) {
         _setStatus('Camera permission is required.', loadingDevices: false);
         return;
@@ -198,22 +120,17 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     });
 
     try {
-      final List<Object?>? rawDevices = await _usbChannel
-          .invokeListMethod<Object?>('listUsbDevices');
-      final List<AndroidUsbDeviceEntry> devices = (rawDevices ?? <Object?>[])
-          .whereType<Map<Object?, Object?>>()
-          .map(AndroidUsbDeviceEntry.fromMap)
-          .toList();
+      final List<UvcUsbDevice> devices = await _camera.listUsbDevices();
 
       setState(() {
         _devices = devices;
         _selectedDevice =
             devices.any(
-              (AndroidUsbDeviceEntry device) =>
+              (UvcUsbDevice device) =>
                   device.deviceId == _selectedDevice?.deviceId,
             )
             ? devices.firstWhere(
-                (AndroidUsbDeviceEntry device) =>
+                (UvcUsbDevice device) =>
                     device.deviceId == _selectedDevice?.deviceId,
               )
             : null;
@@ -232,31 +149,27 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     }
   }
 
-  Future<void> _openSelectedDevice(AndroidUsbDeviceEntry device) async {
+  Future<void> _openSelectedDevice(UvcUsbDevice device) async {
     _setStatus('Opening device...', openingDevice: true);
-    _log('Open device requested: ${device.title}');
+    _log('Open device requested: ${device.displayName}');
 
-    _frameTimer?.cancel();
     _previewImage?.dispose();
     _previewImage = null;
 
     try {
-      await _stopCurrentPreview(closeDevice: true);
-      await _usbChannel.invokeMethod<void>('closeUsbDevice');
-      final Map<Object?, Object?>? result = await _usbChannel
-          .invokeMapMethod<Object?, Object?>('openUsbDevice', <String, Object?>{
-            'deviceId': device.deviceId,
-          });
-
-      final int fd = result?['fileDescriptor'] as int? ?? -1;
-      final int openResult = _camera.openFd(fd);
+      await _ensurePreviewTexture();
+      await _stopCurrentPreview();
+      await _camera.closeUsbDevice();
+      final int openResult = await _camera.openUsbDevice(device.deviceId);
       if (openResult != 0) {
         throw Exception('uvc_open_fd failed: ${_camera.lastError}');
       }
 
       final List<UvcCameraMode> libuvcModes = _camera.supportedModes();
       final List<UvcCameraControl> controls = _camera.supportedControls();
-      _log('Controls: ${controls.map((UvcCameraControl c) => '${c.name}(id=${c.id.nativeValue},cur=${c.cur})').join(', ')}');
+      _log(
+        'Controls: ${controls.map((UvcCameraControl c) => '${c.name}(id=${c.id.nativeValue},cur=${c.cur})').join(', ')}',
+      );
 
       // Debug-only: logs controls that are advertised in bmControls but fail GET_CUR probing.
       final List<UvcBmControlInfo> bmControls = _camera.debugBmControls();
@@ -296,11 +209,6 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         );
       }
 
-      _frameTimer = Timer.periodic(
-        const Duration(milliseconds: 66),
-        (_) => unawaited(_pollLatestFrame()),
-      );
-
       setState(() {
         _selectedDevice = device;
         _cameraModes = libuvcModes;
@@ -309,9 +217,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         _openingDevice = false;
         _previewFrozen = false;
         _manualFocusControlsVisible = false;
-        _status = 'Preview running: ${startedMode!.label}';
+        _status = 'Preview running: ${startedMode!.label} / Texture';
       });
-      _log('Preview running: ${device.title} / ${startedMode.label}');
+      _log('Preview running: ${device.displayName} / ${startedMode.label} / Texture');
     } on PlatformException catch (error) {
       _setStatus(
         'Failed to open device: ${error.message ?? error.code}',
@@ -328,13 +236,14 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       return;
     }
 
-    final String deviceTitle = _selectedDevice?.title ?? 'Connected device';
+    final String deviceTitle = _selectedDevice?.displayName ?? 'Connected device';
     _setStatus('Disconnecting device...', openingDevice: true);
     _log('Disconnect requested: $deviceTitle');
 
     try {
-      await _stopCurrentPreview(closeDevice: true, clearPreviewImage: true);
-      await _usbChannel.invokeMethod<void>('closeUsbDevice');
+      await _stopCurrentPreview(clearPreviewImage: true);
+      await _camera.closeUsbDevice();
+      await _disposePreviewTexture();
       setState(() {
         _selectedDevice = null;
         _selectedMode = null;
@@ -344,6 +253,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         _manualFocusControlsVisible = false;
         _openingDevice = false;
         _status = 'Device disconnected.';
+        _previewFps = 0;
       });
       _log('Device disconnected: $deviceTitle');
     } on PlatformException catch (error) {
@@ -362,8 +272,12 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   }
 
   Future<void> _switchMode(UvcCameraMode mode) async {
+    if (_openingDevice) {
+      return;
+    }
+    _previewFrozen = false;
     _setStatus('Switching mode: ${mode.label}', openingDevice: true);
-    await _stopCurrentPreview(closeDevice: false, clearPreviewImage: true);
+    await _stopCurrentPreview(clearPreviewImage: true);
 
     final String? startError = await _startModeWithProbe(mode);
     if (startError != null) {
@@ -371,19 +285,14 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       return;
     }
 
-    _frameTimer = Timer.periodic(
-      const Duration(milliseconds: 66),
-      (_) => unawaited(_pollLatestFrame()),
-    );
-
     setState(() {
       _selectedMode = mode;
       _openingDevice = false;
       _previewFrozen = false;
       _manualFocusControlsVisible = false;
-      _status = 'Preview running: ${mode.label}';
+      _status = 'Preview running: ${mode.label} / Texture';
     });
-    _log('Preview mode changed: ${mode.label}');
+    _log('Preview mode changed: ${mode.label} / Texture');
   }
 
   List<UvcCameraMode> _sortModesByPreference(List<UvcCameraMode> modes) {
@@ -407,99 +316,165 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     return sorted;
   }
 
-  Future<void> _pollLatestFrame() async {
-    if (_decodingFrame || _previewFrozen) {
+  void _resetPreviewFps() {
+    _previewFps = 0;
+    _lastPreviewSequence = 0;
+    _lastPreviewSequenceSampleAt = null;
+  }
+
+  bool get _hasLivePreview => _previewTextureId != null && _camera.isPreviewing;
+
+  double? get _previewAspectRatio {
+    final UvcCameraMode? mode = _selectedMode;
+    if (mode == null || mode.width <= 0 || mode.height <= 0) {
+      return null;
+    }
+    return mode.width / mode.height;
+  }
+
+  void _samplePreviewFps() {
+    final DateTime now = DateTime.now();
+    final DateTime? previousAt = _lastPreviewSequenceSampleAt;
+    final int latestSequence = _camera.latestFrameSequence();
+    if (previousAt == null) {
+      _lastPreviewSequence = latestSequence;
+      _lastPreviewSequenceSampleAt = now;
       return;
     }
 
-    _decodingFrame = true;
-    try {
-      final ui.Image? image = await _decodeLibuvcFrame();
-      if (image == null) {
-        return;
-      }
-      if (!mounted) {
-        image.dispose();
-        return;
-      }
-
-      final ui.Image? previousImage = _previewImage;
-      setState(() {
-        _previewImage = image;
-      });
-      previousImage?.dispose();
-    } finally {
-      _decodingFrame = false;
+    final double seconds =
+        now.difference(previousAt).inMicroseconds /
+        Duration.microsecondsPerSecond;
+    if (seconds <= 0) {
+      return;
     }
+
+    final int frameDelta = latestSequence - _lastPreviewSequence;
+    _lastPreviewSequence = latestSequence;
+    _lastPreviewSequenceSampleAt = now;
+    if (!mounted) {
+      _previewFps = frameDelta <= 0 ? 0 : frameDelta / seconds;
+      return;
+    }
+    setState(() {
+      _previewFps = frameDelta <= 0 ? 0 : frameDelta / seconds;
+    });
   }
 
-  Future<ui.Image?> _decodeLibuvcFrame() async {
-    if (!_camera.isPreviewing) {
-      return null;
+  Future<void> _ensurePreviewTexture() async {
+    if (_previewTextureId != null) {
+      return;
     }
 
-    final UvcPreviewFrame? frame = _camera.copyLatestFrame();
-    if (frame == null) {
-      return null;
+    final int textureId = await _camera.createPreviewTexture();
+    if (!mounted) {
+      _previewTextureId = textureId;
+      return;
     }
-    return _decodeRgbaFrame(frame);
+    setState(() {
+      _previewTextureId = textureId;
+    });
+  }
+
+  Future<void> _disposePreviewTexture() async {
+    final int? textureId = _previewTextureId;
+    if (textureId == null) {
+      return;
+    }
+
+    _previewTextureId = null;
+    await _camera.disposePreviewTexture(textureId);
+  }
+
+  Future<String?> _beginPreviewConsumption(UvcCameraMode mode) async {
+    _previewStatsTimer?.cancel();
+    _resetPreviewFps();
+    _lastPreviewSequence = 0;
+    _lastPreviewSequenceSampleAt = DateTime.now();
+
+    try {
+      final DateTime deadline = DateTime.now().add(_startupProbeTimeout);
+      while (DateTime.now().isBefore(deadline)) {
+        final int latestSequence = _camera.latestFrameSequence();
+        if (latestSequence > 0) {
+          _lastPreviewSequence = latestSequence;
+          _lastPreviewSequenceSampleAt = DateTime.now();
+          _previewStatsTimer = Timer.periodic(
+            _fpsSampleInterval,
+            (_) => _samplePreviewFps(),
+          );
+          return null;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      _samplePreviewFps();
+      final String error = _camera.lastError;
+      if (error.isNotEmpty) {
+        return error;
+      }
+      return 'libuvc startup probe timed out for ${mode.label} (Texture)';
+    } finally {
+      if (_camera.latestFrameSequence() <= 0) {
+        _previewStatsTimer?.cancel();
+        _previewStatsTimer = null;
+      }
+    }
   }
 
   Future<String?> _startModeWithProbe(UvcCameraMode mode) async {
-    _log('libuvc preview start attempt: ${mode.label}');
+    _log('libuvc preview start attempt: ${mode.label} / Texture');
+    final int? textureId = _previewTextureId;
+    if (textureId != null) {
+      await _camera.attachPreviewTexture(
+        textureId,
+        width: mode.width,
+        height: mode.height,
+      );
+    }
     final int startResult = _camera.startPreview(mode);
     if (startResult != 0) {
       return _camera.lastError;
     }
 
-    final String? probeError = await _probeActivePreview(mode);
+    final String? probeError = await _beginPreviewConsumption(mode);
     if (probeError == null) {
       return null;
     }
 
-    await _stopCurrentPreview(closeDevice: false, clearPreviewImage: true);
+    await _stopCurrentPreview(clearPreviewImage: true);
     return probeError;
   }
 
-  Future<String?> _probeActivePreview(UvcCameraMode mode) async {
-    final DateTime deadline = DateTime.now().add(_startupProbeTimeout);
-    while (DateTime.now().isBefore(deadline)) {
-      final String error = _camera.lastError;
-      if (error.isNotEmpty) {
-        return error;
-      }
-      final UvcPreviewFrame? frame = _camera.copyLatestFrame();
-      if (frame != null) {
-        return null;
-      }
-      await Future<void>.delayed(_startupProbeInterval);
-    }
-
-    final String error = _camera.lastError;
-    if (error.isNotEmpty) {
-      return error;
-    }
-    return 'libuvc startup probe timed out for ${mode.label}';
-  }
-
   Future<ui.Image> _decodeRgbaFrame(UvcPreviewFrame frame) {
-    final Completer<ui.Image> completer = Completer<ui.Image>();
-    ui.decodeImageFromPixels(
-      frame.rgbaBytes,
-      frame.width,
-      frame.height,
-      ui.PixelFormat.rgba8888,
-      completer.complete,
-    );
-    return completer.future;
+    return _decodeRgbaFrameWithDescriptor(frame);
   }
 
-  Future<void> _stopCurrentPreview({
-    required bool closeDevice,
-    bool clearPreviewImage = false,
-  }) async {
-    _frameTimer?.cancel();
-    _frameTimer = null;
+  Future<ui.Image> _decodeRgbaFrameWithDescriptor(UvcPreviewFrame frame) async {
+    final ui.ImmutableBuffer buffer = await ui.ImmutableBuffer.fromUint8List(
+      frame.rgbaBytes,
+    );
+    final ui.ImageDescriptor descriptor = ui.ImageDescriptor.raw(
+      buffer,
+      width: frame.width,
+      height: frame.height,
+      pixelFormat: ui.PixelFormat.rgba8888,
+      rowBytes: frame.width * 4,
+    );
+    final ui.Codec codec = await descriptor.instantiateCodec();
+    try {
+      final ui.FrameInfo frameInfo = await codec.getNextFrame();
+      return frameInfo.image;
+    } finally {
+      codec.dispose();
+      descriptor.dispose();
+      buffer.dispose();
+    }
+  }
+
+  Future<void> _stopCurrentPreview({bool clearPreviewImage = false}) async {
+    _previewStatsTimer?.cancel();
+    _previewStatsTimer = null;
+    _resetPreviewFps();
 
     if (clearPreviewImage) {
       final ui.Image? previousImage = _previewImage;
@@ -514,9 +489,6 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     }
 
     _camera.stopPreview();
-    if (closeDevice) {
-      _camera.closeDevice();
-    }
   }
 
   void _setStatus(
@@ -629,14 +601,19 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   }
 
   Future<void> _capturePhoto() async {
-    final ui.Image? image = _previewImage;
-    if (image == null || _savingPhoto || _previewFrozen) {
+    if (_savingPhoto || _previewFrozen) {
       return;
     }
 
     setState(() => _savingPhoto = true);
+    ui.Image? capturedImage;
     try {
-      final ByteData? pngData = await image.toByteData(
+      final UvcPreviewFrame? frame = _camera.copyLatestFrame();
+      if (frame == null) {
+        throw Exception('No preview frame available to capture.');
+      }
+      capturedImage = await _decodeRgbaFrame(frame);
+      final ByteData? pngData = await capturedImage.toByteData(
         format: ui.ImageByteFormat.png,
       );
       if (pngData == null) {
@@ -644,28 +621,34 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       }
 
       final Uint8List pngBytes = pngData.buffer.asUint8List();
-      final String timestamp = DateTime.now()
-          .toIso8601String()
-          .replaceAll(':', '-')
-          .replaceAll('.', '-');
-      final String? savedUri = await _usbChannel
-          .invokeMethod<String>('saveImageToGallery', <String, Object?>{
-            'bytes': pngBytes,
-            'displayName': 'uvc_capture_$timestamp.png',
-            'mimeType': 'image/png',
-          });
-
-      _setStatus(
-        savedUri == null || savedUri.isEmpty
-            ? 'Saved capture to gallery.'
-            : 'Saved capture to gallery: $savedUri',
-      );
-      await _stopCurrentPreview(closeDevice: false, clearPreviewImage: false);
+      if (_saveToGallery) {
+        final String timestamp = DateTime.now()
+            .toIso8601String()
+            .replaceAll(':', '-')
+            .replaceAll('.', '-');
+        final String? savedUri = await _androidBridge.saveImageToGallery(
+          pngBytes,
+          displayName: 'uvc_capture_$timestamp.png',
+        );
+        _setStatus(
+          savedUri == null || savedUri.isEmpty
+              ? 'Saved capture to gallery.'
+              : 'Saved capture to gallery: $savedUri',
+        );
+      }
+      await _stopCurrentPreview();
+      final ui.Image? previousImage = _previewImage;
       if (mounted) {
-        setState(() => _previewFrozen = true);
+        setState(() {
+          _previewImage = capturedImage;
+          _previewFrozen = true;
+        });
       } else {
+        _previewImage = capturedImage;
         _previewFrozen = true;
       }
+      previousImage?.dispose();
+      capturedImage = null;
       _setStatus('Preview paused on captured frame.');
     } on PlatformException catch (error) {
       _setStatus(
@@ -675,6 +658,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     } catch (error) {
       _setStatus('Failed to save capture.', error: error);
     } finally {
+      capturedImage?.dispose();
       if (mounted) {
         setState(() => _savingPhoto = false);
       } else {
@@ -689,29 +673,29 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       return;
     }
 
+    _previewFrozen = false;
     _setStatus('Resuming preview...', openingDevice: true);
+    final ui.Image? previousImage = _previewImage;
+    _previewImage = null;
     final String? startError = await _startModeWithProbe(mode);
     if (startError != null) {
+      _previewImage = previousImage;
       _setStatus('Failed to resume preview: $startError', openingDevice: false);
       return;
     }
-
-    _frameTimer = Timer.periodic(
-      const Duration(milliseconds: 66),
-      (_) => unawaited(_pollLatestFrame()),
-    );
+    previousImage?.dispose();
 
     if (!mounted) {
       _previewFrozen = false;
       _openingDevice = false;
-      _status = 'Preview running: ${mode.label}';
+      _status = 'Preview running: ${mode.label} / Texture';
       return;
     }
 
     setState(() {
       _previewFrozen = false;
       _openingDevice = false;
-      _status = 'Preview running: ${mode.label}';
+      _status = 'Preview running: ${mode.label} / Texture';
     });
   }
 
@@ -725,7 +709,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (BuildContext context) {
-        return _ControlsPanel(
+        return CameraControlsPanel(
           controls: _cameraControls,
           onChanged: (UvcControlId id, int value) {
             final int result = _camera.setControl(id, value);
@@ -809,7 +793,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                       width: double.infinity,
                       color: Colors.black,
                       alignment: Alignment.center,
-                      child: _previewImage == null
+                      child: _previewFrozen && _previewImage != null
+                          ? RawImage(image: _previewImage, fit: BoxFit.contain)
+                          : !_hasLivePreview
                           ? const Text(
                               'No preview',
                               style: TextStyle(
@@ -817,7 +803,20 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                 fontSize: 18,
                               ),
                             )
-                          : RawImage(image: _previewImage, fit: BoxFit.contain),
+                          : _previewAspectRatio == null
+                          ? Texture(
+                              textureId: _previewTextureId!,
+                              filterQuality: FilterQuality.none,
+                            )
+                          : Center(
+                              child: AspectRatio(
+                                aspectRatio: _previewAspectRatio!,
+                                child: Texture(
+                                  textureId: _previewTextureId!,
+                                  filterQuality: FilterQuality.none,
+                                ),
+                              ),
+                            ),
                     ),
                     if (_focusValueVisible && _focusAbsControl != null)
                       Positioned(
@@ -848,12 +847,82 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                           ),
                         ),
                       ),
+                    if (_hasLivePreview || _previewFrozen)
+                      Positioned(
+                        top: 16,
+                        right: 16,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.black54,
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Text(
+                            '${_previewFps.toStringAsFixed(0)} fps',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                    Positioned(
+                      left: 0,
+                      right: 0,
+                      bottom: 16,
+                      child: Center(
+                        child: FilledButton(
+                          onPressed: _savingPhoto
+                              ? null
+                              : _previewFrozen
+                              ? () => unawaited(_resumePreview())
+                              : !_hasLivePreview
+                              ? null
+                              : () => unawaited(_capturePhoto()),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: Colors.white.withValues(
+                              alpha: 0.85,
+                            ),
+                            foregroundColor: Colors.black87,
+                            minimumSize: const Size(44, 44),
+                            padding: const EdgeInsets.all(10),
+                            shape: const CircleBorder(),
+                          ),
+                          child: Tooltip(
+                            message: _savingPhoto
+                                ? 'Saving'
+                                : _previewFrozen
+                                ? 'Resume preview'
+                                : 'Capture',
+                            child: _savingPhoto
+                                ? const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : Icon(
+                                    _previewFrozen
+                                        ? Icons.play_arrow
+                                        : Icons.camera_alt,
+                                    size: 24,
+                                  ),
+                          ),
+                        ),
+                      ),
+                    ),
                     if (_focusAbsControl != null)
                       Positioned(
                         right: 12,
-                        bottom: 12,
+                        bottom: 16,
                         child: Column(
                           mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.end,
                           children: <Widget>[
                             if (_hasFocusAuto)
                               Padding(
@@ -900,19 +969,23 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                 ),
                               ),
                             ),
-                            if (_manualFocusControlsVisible) ...<Widget>[
-                              _FocusButton(
-                                icon: Icons.add,
-                                onPressStart: () => _startFocusRepeat(1),
-                                onPressEnd: _stopFocusRepeat,
+                            if (_manualFocusControlsVisible)
+                              Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: <Widget>[
+                                  FocusButton(
+                                    icon: Icons.remove,
+                                    onPressStart: () => _startFocusRepeat(-1),
+                                    onPressEnd: _stopFocusRepeat,
+                                  ),
+                                  const SizedBox(width: 8),
+                                  FocusButton(
+                                    icon: Icons.add,
+                                    onPressStart: () => _startFocusRepeat(1),
+                                    onPressEnd: _stopFocusRepeat,
+                                  ),
+                                ],
                               ),
-                              const SizedBox(height: 8),
-                              _FocusButton(
-                                icon: Icons.remove,
-                                onPressStart: () => _startFocusRepeat(-1),
-                                onPressEnd: _stopFocusRepeat,
-                              ),
-                            ],
                           ],
                         ),
                       ),
@@ -921,55 +994,84 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
               ),
               Expanded(
                 flex: 2,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    if (_status != null)
-                      Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: Text(
-                          _status!,
-                          style: const TextStyle(fontSize: 14),
+                child: LayoutBuilder(
+                  builder: (BuildContext context, BoxConstraints constraints) {
+                    return SingleChildScrollView(
+                      padding: const EdgeInsets.only(bottom: 96),
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(
+                          minHeight: constraints.maxHeight,
                         ),
-                      ),
-                    if (_cameraModes.isNotEmpty)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 12),
-                        child: DropdownButton<UvcCameraMode>(
-                          isExpanded: true,
-                          value: _selectedMode,
-                          hint: const Text('Select preview mode'),
-                          items: _cameraModes
-                              .map(
-                                (UvcCameraMode mode) =>
-                                    DropdownMenuItem<UvcCameraMode>(
-                                      value: mode,
-                                      child: Text(mode.label),
-                                    ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            if (_status != null)
+                              Padding(
+                                padding: const EdgeInsets.all(12),
+                                child: Text(
+                                  _status!,
+                                  style: const TextStyle(fontSize: 14),
+                                ),
+                              ),
+                            if (_cameraModes.isNotEmpty)
+                              SwitchListTile(
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                ),
+                                title: const Text('Save capture to gallery'),
+                                value: _saveToGallery,
+                                onChanged: (bool value) =>
+                                    setState(() => _saveToGallery = value),
+                              ),
+                            if (_cameraModes.isNotEmpty)
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  12,
+                                  8,
+                                  12,
+                                  0,
+                                ),
+                                child: DropdownButton<UvcCameraMode>(
+                                  isExpanded: true,
+                                  value: _selectedMode,
+                                  hint: const Text('Select preview mode'),
+                                  items: _cameraModes
+                                      .map(
+                                        (UvcCameraMode mode) =>
+                                            DropdownMenuItem<UvcCameraMode>(
+                                              value: mode,
+                                              child: Text(mode.label),
+                                            ),
+                                      )
+                                      .toList(),
+                                  onChanged: _openingDevice
+                                      ? null
+                                      : (UvcCameraMode? mode) {
+                                          if (mode == null ||
+                                              mode == _selectedMode) {
+                                            return;
+                                          }
+                                          unawaited(_switchMode(mode));
+                                        },
+                                ),
+                              ),
+                            if (_loadingDevices)
+                              const Padding(
+                                padding: EdgeInsets.all(24),
+                                child: Center(
+                                  child: CircularProgressIndicator(),
+                                ),
                               )
-                              .toList(),
-                          onChanged: _openingDevice
-                              ? null
-                              : (UvcCameraMode? mode) {
-                                  if (mode == null || mode == _selectedMode) {
-                                    return;
-                                  }
-                                  unawaited(_switchMode(mode));
-                                },
-                        ),
-                      ),
-                    Expanded(
-                      child: Padding(
-                        padding: const EdgeInsets.only(bottom: 96),
-                        child: _loadingDevices
-                            ? const Center(child: CircularProgressIndicator())
-                            : ListView.separated(
+                            else
+                              ListView.separated(
+                                shrinkWrap: true,
+                                physics: const NeverScrollableScrollPhysics(),
                                 itemCount: _devices.length,
                                 separatorBuilder:
                                     (BuildContext context, int index) =>
                                         const Divider(height: 1),
                                 itemBuilder: (BuildContext context, int index) {
-                                  final AndroidUsbDeviceEntry device =
+                                  final UvcUsbDevice device =
                                       _devices[index];
                                   final bool selected =
                                       _selectedDevice?.deviceId ==
@@ -977,12 +1079,12 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                   return Container(
                                     decoration: BoxDecoration(
                                       color: selected
-                                          ? _brandGreenLight
+                                          ? brandGreenLight
                                           : Colors.white,
                                       border: Border.all(
                                         color: selected
-                                            ? _brandGreenBorder
-                                            : _surfaceNeutralBorder,
+                                            ? brandGreenBorder
+                                            : surfaceNeutralBorder,
                                       ),
                                       borderRadius: BorderRadius.circular(12),
                                     ),
@@ -999,14 +1101,14 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                           CrossAxisAlignment.start,
                                       children: <Widget>[
                                         Text(
-                                          device.title,
+                                          device.displayName,
                                           style: Theme.of(
                                             context,
                                           ).textTheme.titleMedium,
                                         ),
                                         const SizedBox(height: 4),
                                         Text(
-                                          device.subtitle,
+                                          device.details,
                                           style: Theme.of(
                                             context,
                                           ).textTheme.bodyMedium,
@@ -1058,373 +1160,16 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                   );
                                 },
                               ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: MediaQuery.paddingOf(context).bottom + 16,
-            child: Center(
-              child: FilledButton.icon(
-                onPressed: _savingPhoto
-                    ? null
-                    : _previewFrozen
-                    ? () => unawaited(_resumePreview())
-                    : _previewImage == null
-                    ? null
-                    : () => unawaited(_capturePhoto()),
-                style: FilledButton.styleFrom(
-                  backgroundColor: _previewFrozen ? Colors.white : _brandGreen,
-                  foregroundColor: _previewFrozen ? _brandGreen : Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 20,
-                    vertical: 14,
-                  ),
-                  side: _previewFrozen
-                      ? const BorderSide(color: _brandGreenBorder)
-                      : BorderSide.none,
-                ),
-                icon: _savingPhoto
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : Icon(
-                        _previewFrozen ? Icons.play_arrow : Icons.camera_alt,
-                      ),
-                label: Text(
-                  _savingPhoto
-                      ? 'Saving...'
-                      : _previewFrozen
-                      ? 'Resume preview'
-                      : 'Capture',
-                ),
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Camera controls bottom sheet
-// ---------------------------------------------------------------------------
-
-class _ControlsPanel extends StatefulWidget {
-  const _ControlsPanel({
-    required this.controls,
-    required this.onChanged,
-    required this.onReset,
-  });
-
-  final List<UvcCameraControl> controls;
-  final void Function(UvcControlId id, int value) onChanged;
-  final VoidCallback onReset;
-
-  @override
-  State<_ControlsPanel> createState() => _ControlsPanelState();
-}
-
-class _ControlsPanelState extends State<_ControlsPanel> {
-  late List<UvcCameraControl> _controls;
-  UvcControlId? _draggingId;
-
-  @override
-  void initState() {
-    super.initState();
-    _controls = List<UvcCameraControl>.from(widget.controls);
-  }
-
-  void _update(UvcControlId id, int value) {
-    setState(() {
-      _controls = _controls
-          .map((UvcCameraControl c) => c.id == id ? c.copyWithCur(value) : c)
-          .toList();
-    });
-    widget.onChanged(id, value);
-  }
-
-  void _onDragStart(UvcControlId id) => setState(() => _draggingId = id);
-  void _onDragEnd() => setState(() => _draggingId = null);
-
-  @override
-  Widget build(BuildContext context) {
-    final double maxHeight = MediaQuery.of(context).size.height * 0.75;
-    return ConstrainedBox(
-      constraints: BoxConstraints(maxHeight: maxHeight),
-      child: ClipRRect(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
-        child: AnimatedContainer(
-          duration: const Duration(milliseconds: 150),
-          color: _draggingId != null
-              ? Colors.transparent
-              : Theme.of(context).colorScheme.surface,
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              AnimatedOpacity(
-                duration: const Duration(milliseconds: 150),
-                opacity: _draggingId != null ? 0 : 1,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    // Handle bar
-                    Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 10),
-                      child: Container(
-                        width: 40,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: Colors.grey[400],
-                          borderRadius: BorderRadius.circular(2),
+                          ],
                         ),
                       ),
-                    ),
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Row(
-                        children: <Widget>[
-                          const Text(
-                            'Camera controls',
-                            style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const Spacer(),
-                          TextButton.icon(
-                            onPressed: widget.onReset,
-                            icon: const Icon(Icons.restart_alt, size: 18),
-                            label: const Text('Restore defaults'),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const Divider(height: 1),
-                  ],
-                ),
-              ),
-              Flexible(
-                child: ListView.builder(
-                  padding: const EdgeInsets.only(bottom: 24),
-                  itemCount: _controls.length,
-                  itemBuilder: (BuildContext context, int index) {
-                    final UvcCameraControl ctrl = _controls[index];
-                    final bool isActive = _draggingId == ctrl.id;
-                    final bool hide = _draggingId != null && !isActive;
-                    return AnimatedOpacity(
-                      duration: const Duration(milliseconds: 150),
-                      opacity: hide ? 0 : 1,
-                      child: switch (ctrl.kind) {
-                        UvcControlKind.boolean => _BoolControlTile(
-                          ctrl: ctrl,
-                          onChanged: (int v) => _update(ctrl.id, v),
-                        ),
-                        UvcControlKind.enumLike => _EnumControlTile(
-                          ctrl: ctrl,
-                          onChanged: (int v) => _update(ctrl.id, v),
-                        ),
-                        _ => _SliderControlTile(
-                          ctrl: ctrl,
-                          onChanged: (int v) => _update(ctrl.id, v),
-                          onDragStart: _onDragStart,
-                          onDragEnd: _onDragEnd,
-                        ),
-                      },
                     );
                   },
                 ),
               ),
             ],
           ),
-        ),
-      ),
-    );
-  }
-}
-
-class _SliderControlTile extends StatelessWidget {
-  const _SliderControlTile({
-    required this.ctrl,
-    required this.onChanged,
-    required this.onDragStart,
-    required this.onDragEnd,
-  });
-
-  final UvcCameraControl ctrl;
-  final ValueChanged<int> onChanged;
-  final ValueChanged<UvcControlId> onDragStart;
-  final VoidCallback onDragEnd;
-
-  @override
-  Widget build(BuildContext context) {
-    final double range = (ctrl.max - ctrl.min).toDouble();
-    final int divisions = range > 0 && ctrl.res > 0
-        ? (range / ctrl.res).round().clamp(1, 500)
-        : null as int? ?? 100;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Row(
-            children: <Widget>[
-              Text(
-                ctrl.label,
-                style: const TextStyle(fontWeight: FontWeight.w500),
-              ),
-              const Spacer(),
-              Text(
-                '${ctrl.cur}',
-                style: TextStyle(color: Colors.grey[600], fontSize: 13),
-              ),
-            ],
-          ),
-          Row(
-            children: <Widget>[
-              Text(
-                '${ctrl.min}',
-                style: TextStyle(color: Colors.grey[500], fontSize: 11),
-              ),
-              Expanded(
-                child: Slider(
-                  value: ctrl.cur.toDouble().clamp(
-                    ctrl.min.toDouble(),
-                    ctrl.max.toDouble(),
-                  ),
-                  min: ctrl.min.toDouble(),
-                  max: ctrl.max.toDouble(),
-                  divisions: divisions,
-                  onChangeStart: (_) => onDragStart(ctrl.id),
-                  onChangeEnd: (_) => onDragEnd(),
-                  onChanged: (double v) => onChanged(v.round()),
-                ),
-              ),
-              Text(
-                '${ctrl.max}',
-                style: TextStyle(color: Colors.grey[500], fontSize: 11),
-              ),
-            ],
-          ),
         ],
-      ),
-    );
-  }
-}
-
-class _BoolControlTile extends StatelessWidget {
-  const _BoolControlTile({required this.ctrl, required this.onChanged});
-
-  final UvcCameraControl ctrl;
-  final ValueChanged<int> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return SwitchListTile(
-      title: Text(ctrl.label),
-      value: ctrl.cur != 0,
-      onChanged: (bool v) => onChanged(v ? 1 : 0),
-    );
-  }
-}
-
-// Power line frequency and AE mode use named options where known.
-class _EnumControlTile extends StatelessWidget {
-  const _EnumControlTile({required this.ctrl, required this.onChanged});
-
-  final UvcCameraControl ctrl;
-  final ValueChanged<int> onChanged;
-
-  static const Map<String, Map<int, String>> _enumLabels =
-      <String, Map<int, String>>{
-        'power_line_frequency': <int, String>{
-          0: 'Disabled',
-          1: '50 Hz',
-          2: '60 Hz',
-        },
-        'ae_mode': <int, String>{
-          1: 'Manual',
-          2: 'Auto',
-          4: 'Shutter priority',
-          8: 'Aperture priority',
-        },
-      };
-
-  @override
-  Widget build(BuildContext context) {
-    final Map<int, String>? labels = _enumLabels[ctrl.name];
-    // Build list of valid values from min..max by res steps
-    final List<int> values = <int>[];
-    if (labels != null) {
-      values.addAll(labels.keys);
-    } else {
-      for (int v = ctrl.min; v <= ctrl.max; v += ctrl.res > 0 ? ctrl.res : 1) {
-        values.add(v);
-      }
-    }
-
-    final int currentValue = values.contains(ctrl.cur)
-        ? ctrl.cur
-        : values.first;
-
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: Row(
-        children: <Widget>[
-          Text(ctrl.label, style: const TextStyle(fontWeight: FontWeight.w500)),
-          const Spacer(),
-          DropdownButton<int>(
-            value: currentValue,
-            items: values
-                .map(
-                  (int v) => DropdownMenuItem<int>(
-                    value: v,
-                    child: Text(labels?[v] ?? '$v'),
-                  ),
-                )
-                .toList(),
-            onChanged: (int? v) {
-              if (v != null) onChanged(v);
-            },
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _FocusButton extends StatelessWidget {
-  const _FocusButton({
-    required this.icon,
-    required this.onPressStart,
-    required this.onPressEnd,
-  });
-
-  final IconData icon;
-  final VoidCallback onPressStart;
-  final VoidCallback onPressEnd;
-
-  @override
-  Widget build(BuildContext context) {
-    return Listener(
-      onPointerDown: (_) => onPressStart(),
-      onPointerUp: (_) => onPressEnd(),
-      onPointerCancel: (_) => onPressEnd(),
-      child: Material(
-        color: Colors.black54,
-        shape: const CircleBorder(),
-        child: Padding(
-          padding: const EdgeInsets.all(10),
-          child: Icon(icon, color: Colors.white, size: 24),
-        ),
       ),
     );
   }

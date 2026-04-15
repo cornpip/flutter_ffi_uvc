@@ -1,58 +1,44 @@
 # flutter_ffi_uvc
 
-This package is a Flutter plugin backed by native `libuvc`.
+**This package is based on `libuvc`.**
 
-## Android support
+## Support
 
 - Android only
 - `minSdk 24`
 - Supported ABIs: `arm64-v8a`, `armeabi-v7a`, `x86_64`
 
-## What this package does
-- Opens a UVC camera from an already acquired platform file descriptor
-- Lists camera modes reported by the native UVC layer
+## Features
+
+- Lists UVC-capable USB devices and manages USB permission
+- Opens a UVC camera device
+- Lists camera modes reported
 - Starts and stops UVC preview
 - Copies the latest preview frame as RGBA bytes
+- Renders preview directly into a Flutter `Texture` on Android
 - Reads and writes supported UVC controls
-
-## Android USB ownership and handoff
-
-This package expects the host Android app to pass an already acquired file
-descriptor into `uvcCamera.openFd(fd)`.
-
-The Android host app typically:
-
-1. enumerates devices with `UsbManager`
-2. requests user permission through the Android USB APIs
-3. opens the selected device with `UsbManager.openDevice(...)`
-4. obtains `UsbDeviceConnection.fileDescriptor`
-
-The host app owns USB device access and `UsbDeviceConnection` lifetime.  
-This package only manages UVC streaming and control for that opened device.
-
 
 ## Installation
 
 ```sh
 flutter pub add flutter_ffi_uvc
 ```
+
 Or add `flutter_ffi_uvc` to the dependencies section of your `pubspec.yaml`.
 
 ## Usage
 
 ### Typical lifecycle
 
-The intended usage flow is:
-
-1. Request Android camera and USB device permission in app/platform code.
-2. Open the USB device on the Android side and obtain a file descriptor.
-3. Optionally call `uvcCamera.setLogLevel(...)`.
-4. Call `uvcCamera.openFd(fd)`.
-5. Read `uvcCamera.supportedModes()`.
-6. Pick a mode and call `uvcCamera.startPreview(mode)`.
-7. Poll `uvcCamera.copyLatestFrame()` while preview is active.
-8. Call `uvcCamera.stopPreview()` when preview is no longer needed. 
-9. When finished, call `uvcCamera.closeDevice()` and close the Android `UsbDeviceConnection`.
+1. Call `uvcCamera.ensureCameraPermission()` if your app requires the `CAMERA` permission.
+2. Call `uvcCamera.listUsbDevices()` to discover attached UVC cameras.
+3. Call `uvcCamera.openUsbDevice(deviceId)` to request USB permission and open the device.
+4. Read `uvcCamera.supportedModes()`.
+5. Pick a mode and call `uvcCamera.startPreview(mode)`.
+6. For live preview on Android, prefer attaching a Flutter `Texture`.
+7. Use `copyLatestFrame()` when you need frame bytes in Dart, such as for capture or inspection.
+8. Call `uvcCamera.stopPreview()` when preview is no longer needed.
+9. When finished, call `uvcCamera.closeUsbDevice()`.
 
 ### Single-camera model
 
@@ -62,46 +48,108 @@ This plugin is designed around a single, shared global `uvcCamera` instance. It 
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 
 class UvcPreviewPage extends StatefulWidget {
-  const UvcPreviewPage({
+  UvcPreviewPage({
     super.key,
-    this.camera = uvcCamera,
-  });
+    UvcCamera? camera,
+  }) : camera = camera ?? uvcCamera;
 
   final UvcCamera camera;
 }
 ```
 
-### Minimal usage example
+### USB Device discovery and opening
 
 ```dart
-import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
+// List attached UVC cameras
+final List<UvcUsbDevice> devices = await uvcCamera.listUsbDevices();
 
-Future<void> startUvcPreview(int fd) async {
-  uvcCamera.setLogLevel(UvcLogLevel.warn);
-
-  final int openResult = uvcCamera.openFd(fd);
-  if (openResult != 0) {
-    throw Exception('Failed to open UVC device: ${uvcCamera.lastError}');
-  }
-
-  final List<UvcCameraMode> modes = uvcCamera.supportedModes();
-  if (modes.isEmpty) {
-    uvcCamera.closeDevice();
-    throw Exception('No supported UVC modes were reported.');
-  }
-
-  final UvcCameraMode mode = modes.first;
-  final int previewResult = uvcCamera.startPreview(mode);
-  if (previewResult != 0) {
-    uvcCamera.closeDevice();
-    throw Exception('Failed to start preview: ${uvcCamera.lastError}');
-  }
-
-  final UvcPreviewFrame? frame = uvcCamera.copyLatestFrame();
-  if (frame != null) {
-    print('Received ${frame.width}x${frame.height} RGBA frame');
-  }
+// Open a device — requests USB permission if not already granted
+final int result = await uvcCamera.openUsbDevice(devices.first.deviceId);
+if (result != 0) {
+  print('Open failed: ${uvcCamera.lastError}');
 }
+```
+
+`openUsbDevice` requests USB permission from the user if needed before opening the device. 
+It throws a `PlatformException` if the USB layer fails (e.g. permission denied, device not found) 
+and returns a negative native error code if the UVC layer fails to initialize.
+
+To close and release the USB connection:
+
+```dart
+await uvcCamera.closeUsbDevice();
+```
+
+#### Advanced: opening by file descriptor
+
+If your app manages USB device access independently, pass an already-acquired file descriptor directly:
+
+```dart
+// fd: int from UsbDeviceConnection.fileDescriptor
+uvcCamera.openFd(fd);
+```
+
+### Preview & Capture
+
+#### Live preview with Texture
+
+Attach a Flutter `Texture` before starting the stream:
+
+```dart
+final int textureId = await uvcCamera.createPreviewTexture();
+await uvcCamera.attachPreviewTexture(
+  textureId,
+  width: mode.width,
+  height: mode.height,
+);
+uvcCamera.startPreview(mode);
+```
+
+Display it with Flutter's `Texture` widget:
+
+```dart
+AspectRatio(
+  aspectRatio: mode.width / mode.height,
+  child: Texture(textureId: textureId),
+)
+```
+
+On teardown:
+
+```dart
+uvcCamera.stopPreview();
+await uvcCamera.disposePreviewTexture(textureId);
+```
+
+#### Capture
+
+To get frame bytes in Dart — for snapshot, processing, or inspection — call
+`copyLatestFrame()` while preview is running:
+
+```dart
+final UvcPreviewFrame? frame = uvcCamera.copyLatestFrame();
+if (frame != null) {
+  // frame.rgbaBytes: RGBA pixel data (width * height * 4 bytes)
+  // frame.width, frame.height: frame dimensions
+}
+```
+
+#### Preview state
+
+`uvcCamera.isPreviewing` returns `true` while the native stream callback is
+active — that is, after a successful `startPreview()` and before `stopPreview()`
+or device close. Use it to guard UI state or skip work when preview is not
+running.
+
+#### Frame drop behavior
+
+When the native callback is already processing a frame, incoming callbacks are
+dropped rather than queued.
+
+Dropped callbacks are visible at `UvcLogLevel.trace`:
+
+```text
+dropping frame callback because previous callback is still processing
 ```
 
 ### Controls
@@ -136,6 +184,7 @@ if (panTilt != null) {
   );
 }
 ```
+
 ### Logging
 
 You can change the log level for the underlying libuvc layer at runtime:
@@ -158,33 +207,34 @@ If you do not call `uvcCamera.setLogLevel(...)`, the package defaults to `UvcLog
 
 The bundled example app demonstrates:
 
-- Android USB permission and device setup
-- preview rendering
-- basic camera control interactions
-
-The example app uses its own `AndroidUsbDeviceEntry` model for USB device
-selection UI. That model is not part of this package API.
+- USB device discovery and permission handling
+- Preview rendering via Flutter `Texture`
+- Basic camera control interactions
 
 ## Primary API
 
 Most users will interact with these primary API entry points:
 
-- uvcCamera
-- UvcCamera
-- UvcCameraMode
-- UvcPreviewFrame
-- UvcCameraControl
-- UvcControlId
-- UvcControlKind
+- `UvcCamera`
+- `UvcUsbDevice`
+- `UvcCameraMode`
+- `UvcPreviewFrame`
+- `UvcCameraControl`
+- `UvcControlId`
+- `UvcControlKind`
 
 Debugging APIs are also available when needed:
 
-- UvcLogLevel
-- UvcBmControlInfo
-- debugBmControls()
+- `UvcLogLevel`
+- `UvcBmControlInfo`
+- `debugBmControls()`
 
 Do not depend on the generated bindings directly unless you are working on the
 package internals.
+
+## RoadMap
+
+For upcoming work areas and current planning direction, see [ROADMAP.md](ROADMAP.md).
 
 ## Licensing
 

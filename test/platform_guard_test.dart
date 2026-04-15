@@ -19,13 +19,5 @@ void main() {
         throwsA(isA<UnsupportedError>()),
       );
     });
-
-    test('print host platform', () {
-      print('operatingSystem=${Platform.operatingSystem}');
-      print('isAndroid=${Platform.isAndroid}');
-      print('isWindows=${Platform.isWindows}');
-      print('isLinux=${Platform.isLinux}');
-      print('isMacOS=${Platform.isMacOS}');
-    });
   });
 }

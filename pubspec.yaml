@@ -1,6 +1,6 @@
 name: flutter_ffi_uvc
 description: Flutter FFI plugin for Android UVC cameras built on vendored libuvc.
-version: 0.0.2
+version: 0.1.0
 repository: https://github.com/cornpip/flutter_ffi_uvc
 
 environment:
@@ -28,4 +28,6 @@ flutter:
   plugin:
     platforms:
       android:
+        package: com.cornpip.flutter_ffi_uvc
+        pluginClass: FlutterFfiUvcPlugin
         ffiPlugin: true
