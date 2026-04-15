@@ -36,7 +36,7 @@ Or add `flutter_ffi_uvc` to the dependencies section of your `pubspec.yaml`.
 4. Read `uvcCamera.supportedModes()`.
 5. Pick a mode and call `uvcCamera.startPreview(mode)`.
 6. For live preview on Android, prefer attaching a Flutter `Texture`.
-7. Use `copyLatestFrame()` only when you need frame bytes in Dart, such as for capture or inspection.
+7. Use `copyLatestFrame()` when you need frame bytes in Dart, such as for capture or inspection.
 8. Call `uvcCamera.stopPreview()` when preview is no longer needed.
 9. When finished, call `uvcCamera.closeUsbDevice()`.
 
@@ -133,6 +133,13 @@ if (frame != null) {
   // frame.width, frame.height: frame dimensions
 }
 ```
+
+#### Preview state
+
+`uvcCamera.isPreviewing` returns `true` while the native stream callback is
+active — that is, after a successful `startPreview()` and before `stopPreview()`
+or device close. Use it to guard UI state or skip work when preview is not
+running.
 
 #### Frame drop behavior
 

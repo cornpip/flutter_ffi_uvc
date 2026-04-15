@@ -597,7 +597,20 @@ abstract interface class UvcCamera {
   /// Stops the active preview stream.
   void stopPreview();
 
+  /// Closes the native UVC session opened via [openFd].
+  ///
+  /// Use this when the file descriptor was acquired and managed outside of this
+  /// package (e.g. passed directly from platform code). It closes the native
+  /// session without touching the Android USB channel.
+  ///
+  /// If the device was opened with [openUsbDevice], use [closeUsbDevice]
+  /// instead — it closes both the native session and the USB connection.
+  void closeFd();
+
   /// Closes the active native device/session.
+  ///
+  /// Deprecated: use [closeFd] instead.
+  @Deprecated('Use closeFd() instead.')
   void closeDevice();
 
   /// Whether the shared native preview stream is currently running.

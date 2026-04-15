@@ -155,10 +155,13 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   @override
-  void closeDevice() {
+  void closeFd() {
     _bindings.uvc_close_device();
     _resetPreviewState();
   }
+
+  @override
+  void closeDevice() => closeFd();
 
   @override
   bool get isPreviewing => _bindings.uvc_is_previewing() != 0;
