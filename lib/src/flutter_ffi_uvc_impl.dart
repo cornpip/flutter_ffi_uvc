@@ -43,12 +43,14 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   void _resetPreviewState() {}
 
-  Future<UvcModeProbeResult> _probeModeInternal(
+  Future<UvcPreviewStartResult> _startPreviewInternal(
     UvcCameraMode mode, {
+    required UvcPreviewPolicy policy,
     required int requiredConsecutiveValidFrames,
     required Duration timeout,
   }) async {
-    if (requiredConsecutiveValidFrames <= 0) {
+    if (policy == UvcPreviewPolicy.stableFrames &&
+        requiredConsecutiveValidFrames <= 0) {
       throw ArgumentError.value(
         requiredConsecutiveValidFrames,
         'requiredConsecutiveValidFrames',
@@ -61,7 +63,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     int errorCount = 0;
     int observedErrorGeneration = 0;
     int latestObservedErrorGeneration = 0;
-    String? lastProbeError;
+    String? lastError;
     int totalValidFrames = 0;
     int consecutiveValidFrames = 0;
     int lastSequence = latestFrameSequence();
@@ -70,7 +72,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     errorSub = errors.listen((UvcStreamError error) {
       errorCount += 1;
       latestObservedErrorGeneration += 1;
-      lastProbeError = error.message;
+      lastError = error.message;
       consecutiveValidFrames = 0;
       if (!errorReady.isCompleted) {
         errorReady.complete();
@@ -78,10 +80,10 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     });
 
     try {
-      final int startResult = startPreview(mode);
+      final int startResult = openPreview(mode);
       if (startResult != 0) {
-        final String error = lastError;
-        return UvcModeProbeResult(
+        final String error = this.lastError;
+        return UvcPreviewStartResult(
           mode: mode,
           success: false,
           validFrameCount: 0,
@@ -94,6 +96,23 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
       final DateTime deadline = DateTime.now().add(timeout);
       while (DateTime.now().isBefore(deadline)) {
+        if (policy == UvcPreviewPolicy.sequenceOnly) {
+          final int latestSequence = latestFrameSequence();
+          if (latestSequence > 0) {
+            return UvcPreviewStartResult(
+              mode: mode,
+              success: true,
+              validFrameCount: latestSequence,
+              consecutiveValidFrames: latestSequence,
+              errorCount: errorCount,
+              elapsed: stopwatch.elapsed,
+              lastError: lastError,
+            );
+          }
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          continue;
+        }
+
         if (latestObservedErrorGeneration != observedErrorGeneration) {
           observedErrorGeneration = latestObservedErrorGeneration;
           lastSequence = latestFrameSequence();
@@ -107,14 +126,14 @@ class _FlutterFfiUvcCamera implements UvcCamera {
           consecutiveValidFrames += delta;
           lastSequence = latestSequence;
           if (consecutiveValidFrames >= requiredConsecutiveValidFrames) {
-            return UvcModeProbeResult(
+            return UvcPreviewStartResult(
               mode: mode,
               success: true,
               validFrameCount: totalValidFrames,
               consecutiveValidFrames: consecutiveValidFrames,
               errorCount: errorCount,
               elapsed: stopwatch.elapsed,
-              lastError: lastProbeError,
+              lastError: lastError,
             );
           }
         }
@@ -125,9 +144,9 @@ class _FlutterFfiUvcCamera implements UvcCamera {
         ]);
       }
 
-      final String error = lastProbeError ?? lastError;
+      final String error = lastError ?? this.lastError;
       stopPreview();
-      return UvcModeProbeResult(
+      return UvcPreviewStartResult(
         mode: mode,
         success: false,
         validFrameCount: totalValidFrames,
@@ -265,7 +284,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   @override
-  int startPreview(UvcCameraMode mode) {
+  int openPreview(UvcCameraMode mode) {
     _resetPreviewState();
     final int startResult = _bindings.uvc_start_preview(
       mode.frameFormat,
@@ -280,12 +299,14 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   @override
-  Future<UvcModeProbeResult> probeMode(
+  Future<UvcPreviewStartResult> startPreview(
     UvcCameraMode mode, {
+    UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
     int consecutiveValidFrames = 3,
     Duration timeout = const Duration(seconds: 2),
-  }) => _probeModeInternal(
+  }) => _startPreviewInternal(
     mode,
+    policy: policy,
     requiredConsecutiveValidFrames: consecutiveValidFrames,
     timeout: timeout,
   );

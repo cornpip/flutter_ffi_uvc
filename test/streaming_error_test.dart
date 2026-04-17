@@ -33,13 +33,14 @@ class _FakeCamera implements UvcCamera {
   @override
   int openFd(int fd) => -1;
   @override
-  int startPreview(UvcCameraMode mode) => -1;
+  int openPreview(UvcCameraMode mode) => -1;
   @override
-  Future<UvcModeProbeResult> probeMode(
+  Future<UvcPreviewStartResult> startPreview(
     UvcCameraMode mode, {
+    UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
     int consecutiveValidFrames = 3,
     Duration timeout = const Duration(seconds: 2),
-  }) async => UvcModeProbeResult(
+  }) async => UvcPreviewStartResult(
     mode: mode,
     success: false,
     validFrameCount: 0,

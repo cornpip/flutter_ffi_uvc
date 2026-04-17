@@ -42,6 +42,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   static const String _logPrefix = '@@@@UVC_EXAMPLE';
   static const Duration _startupProbeTimeout = Duration(seconds: 2);
   static const Duration _fpsSampleInterval = Duration(milliseconds: 400);
+  static const Duration _streamErrorSnackbarCooldown = Duration(seconds: 3);
   UvcCamera get _camera => widget.camera;
 
   List<UvcUsbDevice> _devices = const <UvcUsbDevice>[];
@@ -65,6 +66,8 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   Timer? _focusValueHideTimer;
   bool _focusValueVisible = false;
   String? _status;
+  String? _lastSnackBarErrorKey;
+  DateTime? _lastSnackBarErrorAt;
   double _previewFps = 0;
   int _lastPreviewSequence = 0;
   DateTime? _lastPreviewSequenceSampleAt;
@@ -72,7 +75,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   @override
   void initState() {
     super.initState();
-    _camera.setLogLevel(UvcLogLevel.trace);
+    _camera.setLogLevel(UvcLogLevel.debug);
     WidgetsBinding.instance.addObserver(this);
     _streamErrorSub = _camera.streamErrors.listen(_onStreamError);
     unawaited(_initializePermissionsAndDevices());
@@ -196,34 +199,55 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       final List<UvcCameraMode> sortedModes = _sortModesByPreference(
         libuvcModes,
       );
+      final List<UvcCameraMode> autoProbeModes = _selectAutoProbeModes(
+        libuvcModes,
+      );
       UvcCameraMode? startedMode;
-      String? lastStartError;
-      for (final UvcCameraMode candidate in sortedModes) {
-        final String? probeError = await _startModeWithProbe(candidate);
-        if (probeError == null) {
+      UvcPreviewStartResult? lastProbeResult;
+      for (int i = 0; i < autoProbeModes.length; i += 1) {
+        final UvcCameraMode candidate = autoProbeModes[i];
+        _setStatus(
+          'Opening device... Probing mode ${i + 1}/${autoProbeModes.length}: ${candidate.label}',
+          openingDevice: true,
+        );
+        final UvcPreviewStartResult probeResult = await _startPreview(candidate);
+        if (probeResult.success) {
           startedMode = candidate;
           break;
         }
-        lastStartError = probeError;
+        lastProbeResult = probeResult;
       }
 
-      if (startedMode == null) {
-        throw Exception(
-          'Failed to start any supported mode: ${lastStartError ?? "unknown error"}',
-        );
+      final String statusMessage;
+      if (startedMode != null) {
+        statusMessage = 'Preview running: ${startedMode.label} / Texture';
+      } else if (autoProbeModes.isEmpty) {
+        statusMessage =
+            'Opened device. No modes were available for automatic probe.';
+      } else {
+        statusMessage =
+            'Opened device. Automatic probe tried ${autoProbeModes.length} mode(s) and found no working preview. Try a mode manually.';
       }
 
       setState(() {
         _selectedDevice = device;
         _cameraModes = libuvcModes;
         _cameraControls = controls;
-        _selectedMode = startedMode;
+        _selectedMode = startedMode ?? sortedModes.first;
         _openingDevice = false;
         _previewFrozen = false;
         _manualFocusControlsVisible = false;
-        _status = 'Preview running: ${startedMode!.label} / Texture';
+        _status = statusMessage;
       });
-      _log('Preview running: ${device.displayName} / ${startedMode.label} / Texture');
+      if (startedMode != null) {
+        _log(
+          'Preview running: ${device.displayName} / ${startedMode.label} / Texture',
+        );
+      } else {
+        _log(
+          'Device opened without working preview mode: ${device.displayName} / ${lastProbeResult == null ? "no probe result" : _startFailureMessage(lastProbeResult)}',
+        );
+      }
     } on PlatformException catch (error) {
       _setStatus(
         'Failed to open device: ${error.message ?? error.code}',
@@ -284,9 +308,12 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     _setStatus('Switching mode: ${mode.label}', openingDevice: true);
     await _stopCurrentPreview(clearPreviewImage: true);
 
-    final String? startError = await _startModeWithProbe(mode);
-    if (startError != null) {
-      _setStatus('Failed to switch mode: $startError', openingDevice: false);
+    final UvcPreviewStartResult probeResult = await _startPreview(mode, policy: UvcPreviewPolicy.sequenceOnly);
+    if (!probeResult.success) {
+      _setStatus(
+        'Failed to switch mode: ${_startFailureMessage(probeResult)}',
+        openingDevice: false,
+      );
       return;
     }
 
@@ -319,6 +346,34 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       return b.fps.compareTo(a.fps);
     });
     return sorted;
+  }
+
+  List<UvcCameraMode> _selectAutoProbeModes(List<UvcCameraMode> modes) {
+    final List<UvcCameraMode> sorted = List<UvcCameraMode>.from(modes);
+    sorted.sort((UvcCameraMode a, UvcCameraMode b) {
+      final int aIsMjpeg = a.formatName == 'MJPEG' ? 1 : 0;
+      final int bIsMjpeg = b.formatName == 'MJPEG' ? 1 : 0;
+      if (aIsMjpeg != bIsMjpeg) {
+        return bIsMjpeg - aIsMjpeg;
+      }
+
+      final int areaCompare = (a.width * a.height).compareTo(
+        b.width * b.height,
+      );
+      if (areaCompare != 0) {
+        return areaCompare;
+      }
+      return a.fps.compareTo(b.fps);
+    });
+    return sorted.take(3).toList();
+  }
+
+  String _startFailureMessage(UvcPreviewStartResult result) {
+    final String? error = result.lastError;
+    if (error != null && error.isNotEmpty) {
+      return error;
+    }
+    return 'No valid frame sequence was observed for this mode within ${_startupProbeTimeout.inSeconds}s.';
   }
 
   void _resetPreviewFps() {
@@ -391,63 +446,39 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     await _camera.disposePreviewTexture(textureId);
   }
 
-  Future<String?> _beginPreviewConsumption(UvcCameraMode mode) async {
-    _previewStatsTimer?.cancel();
-    _resetPreviewFps();
-    _lastPreviewSequence = 0;
-    _lastPreviewSequenceSampleAt = DateTime.now();
-
-    try {
-      final DateTime deadline = DateTime.now().add(_startupProbeTimeout);
-      while (DateTime.now().isBefore(deadline)) {
-        final int latestSequence = _camera.latestFrameSequence();
-        if (latestSequence > 0) {
-          _lastPreviewSequence = latestSequence;
-          _lastPreviewSequenceSampleAt = DateTime.now();
-          _previewStatsTimer = Timer.periodic(
-            _fpsSampleInterval,
-            (_) => _samplePreviewFps(),
-          );
-          return null;
-        }
-        await Future<void>.delayed(const Duration(milliseconds: 50));
-      }
-      _samplePreviewFps();
-      final String error = _camera.lastError;
-      if (error.isNotEmpty) {
-        return error;
-      }
-      return 'libuvc startup probe timed out for ${mode.label} (Texture)';
-    } finally {
-      if (_camera.latestFrameSequence() <= 0) {
-        _previewStatsTimer?.cancel();
-        _previewStatsTimer = null;
-      }
-    }
-  }
-
-  Future<String?> _startModeWithProbe(UvcCameraMode mode) async {
+  Future<UvcPreviewStartResult> _startPreview(
+    UvcCameraMode mode, {
+    UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
+  }) async {
     _log('libuvc preview start attempt: ${mode.label} / Texture');
-    final int? textureId = _previewTextureId;
-    if (textureId != null) {
-      await _camera.attachPreviewTexture(
-        textureId,
-        width: mode.width,
-        height: mode.height,
+    final UvcPreviewStartResult result = await _camera.startPreview(
+      mode,
+      policy: policy,
+      consecutiveValidFrames: 3,
+      timeout: _startupProbeTimeout,
+    );
+    if (result.success) {
+      final int? textureId = _previewTextureId;
+      if (textureId != null) {
+        await _camera.attachPreviewTexture(
+          textureId,
+          width: mode.width,
+          height: mode.height,
+        );
+      }
+      _previewStatsTimer?.cancel();
+      _resetPreviewFps();
+      _lastPreviewSequence = _camera.latestFrameSequence();
+      _lastPreviewSequenceSampleAt = DateTime.now();
+      _previewStatsTimer = Timer.periodic(
+        _fpsSampleInterval,
+        (_) => _samplePreviewFps(),
       );
+      return result;
     }
-    final int startResult = _camera.startPreview(mode);
-    if (startResult != 0) {
-      return _camera.lastError;
-    }
-
-    final String? probeError = await _beginPreviewConsumption(mode);
-    if (probeError == null) {
-      return null;
-    }
-
-    await _stopCurrentPreview(clearPreviewImage: true);
-    return probeError;
+    _previewStatsTimer?.cancel();
+    _previewStatsTimer = null;
+    return result;
   }
 
   Future<ui.Image> _decodeRgbaFrame(UvcPreviewFrame frame) {
@@ -682,10 +713,13 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     _setStatus('Resuming preview...', openingDevice: true);
     final ui.Image? previousImage = _previewImage;
     _previewImage = null;
-    final String? startError = await _startModeWithProbe(mode);
-    if (startError != null) {
+    final UvcPreviewStartResult probeResult = await _startPreview(mode, policy: UvcPreviewPolicy.sequenceOnly);
+    if (!probeResult.success) {
       _previewImage = previousImage;
-      _setStatus('Failed to resume preview: $startError', openingDevice: false);
+      _setStatus(
+        'Failed to resume preview: ${_startFailureMessage(probeResult)}',
+        openingDevice: false,
+      );
       return;
     }
     previousImage?.dispose();
@@ -752,8 +786,33 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
 
   void _onStreamError(UvcStreamError error) {
     _log('Stream error: ${error.message}');
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
+    _status = 'Stream error: ${error.message}';
+    if (!mounted) {
+      return;
+    }
+
+    final DateTime now = DateTime.now();
+    final String errorKey = _normaliseStreamErrorKey(error.message);
+    final bool isRepeatedMessage = _lastSnackBarErrorKey == errorKey;
+    final bool withinCooldown =
+        _lastSnackBarErrorAt != null &&
+        now.difference(_lastSnackBarErrorAt!) < _streamErrorSnackbarCooldown;
+
+    if (isRepeatedMessage && withinCooldown) {
+      setState(() {
+        _status = 'Stream error: ${error.message}';
+      });
+      return;
+    }
+
+    _lastSnackBarErrorKey = errorKey;
+    _lastSnackBarErrorAt = now;
+    setState(() {
+      _status = 'Stream error: ${error.message}';
+    });
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
       SnackBar(
         content: Text(error.message),
         backgroundColor: Colors.red.shade800,
@@ -766,6 +825,19 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         ),
       ),
     );
+  }
+
+  String _normaliseStreamErrorKey(String message) {
+    String normalized = message.trim();
+    normalized = normalized.replaceAll(RegExp(r'width=\d+'), 'width=*');
+    normalized = normalized.replaceAll(RegExp(r'height=\d+'), 'height=*');
+    normalized = normalized.replaceAll(RegExp(r'bytes=\d+'), 'bytes=*');
+    normalized = normalized.replaceAll(RegExp(r'expected>=\d+'), 'expected>=*');
+    normalized = normalized.replaceAll(RegExp(r'actual=\d+'), 'actual=*');
+    normalized = normalized.replaceAll(RegExp(r'callback=\d+'), 'callback=*');
+    normalized = normalized.replaceAll(RegExp(r'format=\d+'), 'format=*');
+    normalized = normalized.replaceAll(RegExp(r'err=[^,\s]+'), 'err=*');
+    return normalized;
   }
 
   void _log(String message, {Object? error}) {
@@ -1142,8 +1214,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                   onChanged: _openingDevice
                                       ? null
                                       : (UvcCameraMode? mode) {
-                                          if (mode == null ||
-                                              mode == _selectedMode) {
+                                          if (mode == null) {
                                             return;
                                           }
                                           unawaited(_switchMode(mode));

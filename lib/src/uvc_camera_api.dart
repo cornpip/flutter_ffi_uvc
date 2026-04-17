@@ -515,13 +515,13 @@ class UvcStreamError {
   String toString() => 'UvcStreamError($message)';
 }
 
-/// Result of probing whether a preview mode is healthy enough to use.
+/// Result of starting preview for a given mode.
 ///
-/// A probe starts preview for [mode] and waits until enough valid frames have
-/// been observed without an intervening frame-pipeline error. On success the
-/// preview stream remains running. On failure the probe stops the preview.
-class UvcModeProbeResult {
-  const UvcModeProbeResult({
+/// [startPreview] starts the preview stream for [mode] and waits until enough
+/// valid frames have been observed. On success the preview stream remains
+/// running. On failure the preview is stopped before the result is returned.
+class UvcPreviewStartResult {
+  const UvcPreviewStartResult({
     required this.mode,
     required this.success,
     required this.validFrameCount,
@@ -538,6 +538,15 @@ class UvcModeProbeResult {
   final int errorCount;
   final Duration elapsed;
   final String? lastError;
+}
+
+/// Policy controlling how [UvcCamera.startPreview] verifies frame delivery.
+enum UvcPreviewPolicy {
+  /// Require consecutive valid frames without an intervening stream error.
+  stableFrames,
+
+  /// Only require that the delivered frame sequence increases at least once.
+  sequenceOnly,
 }
 
 /// Preview transform applied to the live Flutter Texture output.
@@ -675,25 +684,22 @@ abstract interface class UvcCamera {
   /// Opens a UVC device using an already acquired platform file descriptor.
   int openFd(int fd);
 
-  /// Starts preview with the given [mode].
+  /// Starts the native preview stream for [mode] without frame verification.
   ///
-  /// To consume frames in Dart, call [copyLatestFrame] after starting preview.
-  ///
-  /// If a preview texture has been attached with [attachPreviewTexture], the
-  /// same native stream also renders into that texture on Android.
-  int startPreview(UvcCameraMode mode);
+  /// Returns 0 on success, or a non-zero error code. To also verify that
+  /// frames are delivered correctly, use [startPreview] instead.
+  int openPreview(UvcCameraMode mode);
 
-  /// Probes whether [mode] produces stable preview frames.
+  /// Starts the preview stream for [mode] and verifies frame delivery.
   ///
-  /// The probe starts preview for [mode] and waits until at least
-  /// [consecutiveValidFrames] valid frames have been observed without an
-  /// intervening stream error, or until [timeout] elapses.
+  /// Waits until at least [consecutiveValidFrames] valid frames have been
+  /// observed without an intervening stream error, or until [timeout] elapses.
   ///
-  /// On success, the preview stream remains running so callers can continue
-  /// using the mode immediately. On failure, the preview is stopped before the
-  /// result is returned.
-  Future<UvcModeProbeResult> probeMode(
+  /// On success, the preview stream remains running. On failure, the preview
+  /// is stopped before the result is returned.
+  Future<UvcPreviewStartResult> startPreview(
     UvcCameraMode mode, {
+    UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
     int consecutiveValidFrames = 3,
     Duration timeout = const Duration(seconds: 2),
   });
