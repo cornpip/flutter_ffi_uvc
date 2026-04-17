@@ -62,6 +62,8 @@ class _FakeCamera implements UvcCamera {
   @override
   UvcPreviewFrame? copyLatestFrame() => null;
   @override
+  UvcPreviewFrame? copyLatestFrameTransformed(UvcPreviewTransform transform) => null;
+  @override
   int latestFrameSequence() => 0;
   @override
   Future<int> createPreviewTexture() async => -1;

@@ -50,6 +50,15 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_with_metadata(
     int *out_width,
     int *out_height,
     int64_t *out_sequence);
+FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_transformed(
+    uint8_t *buffer,
+    int buffer_length,
+    int rotation,
+    int flip_h,
+    int flip_v,
+    int *out_width,
+    int *out_height,
+    int64_t *out_sequence);
 FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(void);
 FFI_PLUGIN_EXPORT void uvc_set_frame_listener(uvc_frame_listener_t listener);
 typedef void (*uvc_error_listener_t)(const char *message);

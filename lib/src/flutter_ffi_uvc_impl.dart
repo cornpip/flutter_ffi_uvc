@@ -351,6 +351,46 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   UvcPreviewFrame? copyLatestFrame() => _copyLatestFrameInternal();
 
   @override
+  UvcPreviewFrame? copyLatestFrameTransformed(UvcPreviewTransform transform) {
+    if (transform == UvcPreviewTransform.identity) {
+      return _copyLatestFrameInternal();
+    }
+    final int srcWidth = _bindings.uvc_frame_width();
+    final int srcHeight = _bindings.uvc_frame_height();
+    if (srcWidth <= 0 || srcHeight <= 0) return null;
+
+    final int expectedBytes = srcWidth * srcHeight * 4;
+    final Pointer<Uint8> nativeBuffer = calloc<Uint8>(expectedBytes);
+    final Pointer<Int> nativeWidth = calloc<Int>();
+    final Pointer<Int> nativeHeight = calloc<Int>();
+    final Pointer<Int64> nativeSequence = calloc<Int64>();
+    try {
+      final int copiedBytes = _bindings.uvc_copy_latest_frame_rgba_transformed(
+        nativeBuffer,
+        expectedBytes,
+        transform.rotation,
+        transform.flipHorizontal ? 1 : 0,
+        transform.flipVertical ? 1 : 0,
+        nativeWidth,
+        nativeHeight,
+        nativeSequence,
+      );
+      if (copiedBytes <= 0) return null;
+      return UvcPreviewFrame(
+        width: nativeWidth.value,
+        height: nativeHeight.value,
+        rgbaBytes: Uint8List.fromList(nativeBuffer.asTypedList(copiedBytes)),
+        sequence: nativeSequence.value,
+      );
+    } finally {
+      calloc.free(nativeBuffer);
+      calloc.free(nativeWidth);
+      calloc.free(nativeHeight);
+      calloc.free(nativeSequence);
+    }
+  }
+
+  @override
   int latestFrameSequence() => _bindings.uvc_latest_frame_sequence();
 
   @override

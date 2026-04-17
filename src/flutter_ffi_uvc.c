@@ -171,6 +171,39 @@ static void reset_frame_buffer_locked(void) {
   g_uvc_state.callback_count = 0;
 }
 
+static void blit_rgba_transform(
+    const uint32_t *src, int src_w, int src_h,
+    uint32_t *dst, int dst_stride,
+    int rot, int fh, int fv) {
+  const int out_w = (rot == 90 || rot == 270) ? src_h : src_w;
+  const int out_h = (rot == 90 || rot == 270) ? src_w : src_h;
+
+  if (rot == 0 && !fh && !fv) {
+    const size_t row_bytes = (size_t)out_w * 4u;
+    for (int row = 0; row < out_h; ++row) {
+      memcpy(dst + (size_t)row * (size_t)dst_stride,
+             src + (size_t)row * (size_t)src_w,
+             row_bytes);
+    }
+  } else {
+    for (int dr = 0; dr < out_h; ++dr) {
+      const int eff_dr = fv ? (out_h - 1 - dr) : dr;
+      for (int dc = 0; dc < out_w; ++dc) {
+        const int eff_dc = fh ? (out_w - 1 - dc) : dc;
+        int sr, sc;
+        switch (rot) {
+          case 90:  sr = (src_h - 1) - eff_dc; sc = eff_dr;             break;
+          case 180: sr = (src_h - 1) - eff_dr; sc = (src_w - 1) - eff_dc; break;
+          case 270: sr = eff_dc;               sc = (src_w - 1) - eff_dr; break;
+          default:  sr = eff_dr;               sc = eff_dc;              break;
+        }
+        dst[(size_t)dr * (size_t)dst_stride + (size_t)dc] =
+            src[(size_t)sr * (size_t)src_w + (size_t)sc];
+      }
+    }
+  }
+}
+
 #if defined(__ANDROID__)
 static void release_preview_window_locked(void) {
   if (g_uvc_state.preview_window == NULL) {
@@ -217,43 +250,7 @@ static int render_latest_rgba_to_preview_surface_locked(void) {
   uint32_t *dst = (uint32_t *)window_buffer.bits;
   const int dst_stride = window_buffer.stride;
 
-  if (rot == 0 && !fh && !fv) {
-    // Fast path: no transform — row-by-row memcpy.
-    const size_t row_bytes = (size_t)out_w * 4u;
-    for (int row = 0; row < out_h; ++row) {
-      memcpy(dst + (size_t)row * (size_t)dst_stride,
-             src + (size_t)row * (size_t)src_w,
-             row_bytes);
-    }
-  } else {
-    // General path: per-pixel with rotation and flip.
-    for (int dr = 0; dr < out_h; ++dr) {
-      const int eff_dr = fv ? (out_h - 1 - dr) : dr;
-      for (int dc = 0; dc < out_w; ++dc) {
-        const int eff_dc = fh ? (out_w - 1 - dc) : dc;
-        int sr, sc;
-        switch (rot) {
-          case 90:
-            sr = (src_h - 1) - eff_dc;
-            sc = eff_dr;
-            break;
-          case 180:
-            sr = (src_h - 1) - eff_dr;
-            sc = (src_w - 1) - eff_dc;
-            break;
-          case 270:
-            sr = eff_dc;
-            sc = (src_w - 1) - eff_dr;
-            break;
-          default: /* 0 */
-            sr = eff_dr;
-            sc = eff_dc;
-            break;
-        }
-        dst[dr * dst_stride + dc] = src[sr * src_w + sc];
-      }
-    }
-  }
+  blit_rgba_transform(src, src_w, src_h, dst, dst_stride, rot, fh, fv);
 
   ANativeWindow_unlockAndPost(g_uvc_state.preview_window);
   return 1;
@@ -1046,6 +1043,54 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_with_metadata(
   }
   pthread_mutex_unlock(&g_uvc_state.mutex);
   return bytes_to_copy;
+}
+
+FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_transformed(
+    uint8_t *buffer,
+    int buffer_length,
+    int rotation,
+    int flip_h,
+    int flip_v,
+    int *out_width,
+    int *out_height,
+    int64_t *out_sequence) {
+  if (buffer == NULL || buffer_length <= 0) {
+    return 0;
+  }
+
+  int r = rotation % 360;
+  if (r < 0) r += 360;
+  if (r != 0 && r != 90 && r != 180 && r != 270) r = 0;
+  const int fh = flip_h ? 1 : 0;
+  const int fv = flip_v ? 1 : 0;
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  if (g_uvc_state.latest_rgba == NULL || g_uvc_state.latest_rgba_bytes == 0) {
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return 0;
+  }
+
+  const int src_w = g_uvc_state.frame_width;
+  const int src_h = g_uvc_state.frame_height;
+  const int dst_w = (r == 90 || r == 270) ? src_h : src_w;
+  const int dst_h = (r == 90 || r == 270) ? src_w : src_h;
+  const int expected_bytes = dst_w * dst_h * 4;
+
+  if (buffer_length < expected_bytes) {
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return 0;
+  }
+
+  blit_rgba_transform(
+      (const uint32_t *)g_uvc_state.latest_rgba, src_w, src_h,
+      (uint32_t *)buffer, dst_w,
+      r, fh, fv);
+
+  if (out_width != NULL)   *out_width   = dst_w;
+  if (out_height != NULL)  *out_height  = dst_h;
+  if (out_sequence != NULL) *out_sequence = g_uvc_state.latest_sequence;
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+  return expected_bytes;
 }
 
 FFI_PLUGIN_EXPORT void uvc_set_frame_listener(uvc_frame_listener_t listener) {

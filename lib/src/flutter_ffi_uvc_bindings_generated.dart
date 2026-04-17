@@ -169,6 +169,58 @@ class FlutterFfiUvcBindings {
             )
           >();
 
+  int uvc_copy_latest_frame_rgba_transformed(
+    ffi.Pointer<ffi.Uint8> buffer,
+    int buffer_length,
+    int rotation,
+    int flip_h,
+    int flip_v,
+    ffi.Pointer<ffi.Int> out_width,
+    ffi.Pointer<ffi.Int> out_height,
+    ffi.Pointer<ffi.Int64> out_sequence,
+  ) {
+    return _uvc_copy_latest_frame_rgba_transformed(
+      buffer,
+      buffer_length,
+      rotation,
+      flip_h,
+      flip_v,
+      out_width,
+      out_height,
+      out_sequence,
+    );
+  }
+
+  late final _uvc_copy_latest_frame_rgba_transformedPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+            ffi.Pointer<ffi.Int>,
+            ffi.Pointer<ffi.Int>,
+            ffi.Pointer<ffi.Int64>,
+          )
+        >
+      >('uvc_copy_latest_frame_rgba_transformed');
+  late final _uvc_copy_latest_frame_rgba_transformed =
+      _uvc_copy_latest_frame_rgba_transformedPtr
+          .asFunction<
+            int Function(
+              ffi.Pointer<ffi.Uint8>,
+              int,
+              int,
+              int,
+              int,
+              ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Int>,
+              ffi.Pointer<ffi.Int64>,
+            )
+          >();
+
   int uvc_latest_frame_sequence() {
     return _uvc_latest_frame_sequence();
   }
@@ -190,6 +242,17 @@ class FlutterFfiUvcBindings {
       );
   late final _uvc_set_frame_listener = _uvc_set_frame_listenerPtr
       .asFunction<void Function(uvc_frame_listener_t)>();
+
+  void uvc_set_error_listener(uvc_error_listener_t listener) {
+    return _uvc_set_error_listener(listener);
+  }
+
+  late final _uvc_set_error_listenerPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(uvc_error_listener_t)>>(
+        'uvc_set_error_listener',
+      );
+  late final _uvc_set_error_listener = _uvc_set_error_listenerPtr
+      .asFunction<void Function(uvc_error_listener_t)>();
 
   int uvc_get_supported_modes_json(
     ffi.Pointer<ffi.Uint8> buffer,
@@ -241,17 +304,6 @@ class FlutterFfiUvcBindings {
       );
   late final _uvc_set_preview_transform = _uvc_set_preview_transformPtr
       .asFunction<void Function(int, int, int)>();
-
-  void uvc_set_error_listener(uvc_error_listener_t listener) {
-    return _uvc_set_error_listener(listener);
-  }
-
-  late final _uvc_set_error_listenerPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(uvc_error_listener_t)>>(
-        'uvc_set_error_listener',
-      );
-  late final _uvc_set_error_listener = _uvc_set_error_listenerPtr
-      .asFunction<void Function(uvc_error_listener_t)>();
 
   /// Returns JSON array of all controls the device supports, with min/max/def/cur/res fields.
   /// Returns number of bytes written, or 0 on failure.
@@ -559,9 +611,10 @@ typedef uvc_frame_listener_tFunction = ffi.Void Function(ffi.Int64 sequence);
 typedef Dartuvc_frame_listener_tFunction = void Function(int sequence);
 typedef uvc_frame_listener_t =
     ffi.Pointer<ffi.NativeFunction<uvc_frame_listener_tFunction>>;
-
-typedef uvc_error_listener_tFunction = ffi.Void Function(ffi.Pointer<ffi.Char> message);
-typedef Dartuvc_error_listener_tFunction = void Function(ffi.Pointer<ffi.Char> message);
+typedef uvc_error_listener_tFunction =
+    ffi.Void Function(ffi.Pointer<ffi.Char> message);
+typedef Dartuvc_error_listener_tFunction =
+    void Function(ffi.Pointer<ffi.Char> message);
 typedef uvc_error_listener_t =
     ffi.Pointer<ffi.NativeFunction<uvc_error_listener_tFunction>>;
 

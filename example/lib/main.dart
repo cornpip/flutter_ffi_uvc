@@ -389,7 +389,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     if (mode == null || mode.width <= 0 || mode.height <= 0) {
       return null;
     }
-    return mode.width / mode.height;
+    final (int w, int h) =
+        _camera.previewTransform.applyToSize(mode.width, mode.height);
+    return w / h;
   }
 
   void _samplePreviewFps() {
@@ -644,7 +646,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     setState(() => _savingPhoto = true);
     ui.Image? capturedImage;
     try {
-      final UvcPreviewFrame? frame = _camera.copyLatestFrame();
+      final UvcPreviewFrame? frame = _camera.copyLatestFrameTransformed(
+        _camera.previewTransform,
+      );
       if (frame == null) {
         throw Exception('No preview frame available to capture.');
       }
@@ -769,6 +773,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
           },
           onReset: () {
             for (final UvcCameraControl ctrl in _cameraControls) {
+              if (ctrl.id == UvcControlId.focusAbs ||
+                  ctrl.id == UvcControlId.focusAuto ||
+                  ctrl.id == UvcControlId.focusSimple) continue;
               _camera.setControl(ctrl.id, ctrl.def);
             }
             final List<UvcCameraControl> refreshed = _camera

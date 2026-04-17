@@ -581,6 +581,15 @@ class UvcPreviewTransform {
     flipVertical: flipVertical ?? this.flipVertical,
   );
 
+  /// Returns the effective [width] and [height] after applying this transform.
+  ///
+  /// For 90° and 270° rotations the dimensions are swapped; flip flags do not
+  /// affect the size.
+  (int width, int height) applyToSize(int width, int height) =>
+      (rotation == 90 || rotation == 270)
+          ? (height, width)
+          : (width, height);
+
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -740,6 +749,12 @@ abstract interface class UvcCamera {
 
   /// Copies the latest RGBA frame from the shared native preview buffer.
   UvcPreviewFrame? copyLatestFrame();
+
+  /// Copies the latest RGBA frame with [transform] applied to the pixel data.
+  ///
+  /// The returned frame's [UvcPreviewFrame.width] and [UvcPreviewFrame.height]
+  /// reflect the post-transform dimensions (swapped for 90° / 270° rotation).
+  UvcPreviewFrame? copyLatestFrameTransformed(UvcPreviewTransform transform);
 
   /// Returns the latest delivered preview frame sequence.
   ///
