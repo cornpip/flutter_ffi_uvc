@@ -1,3 +1,10 @@
+## 0.1.1
+
+### Added
+
+* Preview transform: rotation (0/90/180/270°) and flip (horizontal/vertical) applied to the Flutter `Texture` output. `copyLatestFrame()` always returns the original camera orientation unaffected. See `UvcPreviewTransform`, `setPreviewTransform()`, and the convenience helpers `rotatePreviewClockwise()`, `rotatePreviewCounterClockwise()`, `togglePreviewFlipHorizontal()`, `togglePreviewFlipVertical()`.
+* Streaming error reporting: frame pipeline errors (decode failures, undersized frames, buffer allocation failures) are now delivered proactively via `UvcCamera.streamErrors` (`Stream<UvcStreamError>`)
+
 ## 0.1.0
 
 ### Breaking changes
