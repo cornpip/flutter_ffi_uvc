@@ -79,6 +79,10 @@ YUV stream from a UVC device such as a standard webcam.
 #include "libuvc/libuvc_internal.h"
 #include "libuvc/uvc_log.h"
 
+#if !defined(LIBUSB_OPTION_NO_DEVICE_DISCOVERY)
+#define LIBUSB_OPTION_NO_DEVICE_DISCOVERY ((enum libusb_option)2)
+#endif
+
 /** @internal
  * @brief Event handler thread
  * There's one of these per UVC context.
@@ -114,7 +118,19 @@ uvc_error_t uvc_init(uvc_context_t **pctx, struct libusb_context *usb_ctx) {
   uvc_context_t *ctx = calloc(1, sizeof(*ctx));
 
   if (usb_ctx == NULL) {
-    ret = libusb_init(&ctx->usb_ctx);
+    // This package is Android-only and opens USB devices through
+    // UsbManager.openDevice() before handing the fd to libusb/libuvc.
+    // Keep libusb device discovery disabled so init never re-scans usbfs.
+    const struct libusb_init_option init_options[] = {
+      {
+        .option = LIBUSB_OPTION_NO_DEVICE_DISCOVERY,
+        .value.ival = 1,
+      },
+    };
+    ret = libusb_init_context(
+        &ctx->usb_ctx,
+        init_options,
+        (int)(sizeof(init_options) / sizeof(init_options[0])));
     ctx->own_usb_ctx = 1;
     if (ret != UVC_SUCCESS) {
       free(ctx);
@@ -168,4 +184,3 @@ void uvc_start_handler_thread(uvc_context_t *ctx) {
   if (ctx->own_usb_ctx)
     pthread_create(&ctx->handler_thread, NULL, _uvc_handle_events, (void*) ctx);
 }
-
