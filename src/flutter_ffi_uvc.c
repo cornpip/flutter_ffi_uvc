@@ -1105,6 +1105,27 @@ FFI_PLUGIN_EXPORT void uvc_set_error_listener(uvc_error_listener_t listener) {
   pthread_mutex_unlock(&g_uvc_state.mutex);
 }
 
+// Test-only: injects an RGBA buffer directly into the shared frame state.
+// Not declared in the public header — accessed only via test-specific bindings.
+FFI_PLUGIN_EXPORT void uvc_inject_test_frame_rgba(
+    const uint8_t *buffer, int width, int height) {
+  if (buffer == NULL || width <= 0 || height <= 0) return;
+
+  const size_t rgba_bytes = (size_t)width * (size_t)height * 4;
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  uint8_t *new_buffer = realloc(g_uvc_state.latest_rgba, rgba_bytes);
+  if (new_buffer != NULL) {
+    g_uvc_state.latest_rgba = new_buffer;
+    g_uvc_state.latest_rgba_bytes = rgba_bytes;
+    memcpy(g_uvc_state.latest_rgba, buffer, rgba_bytes);
+    g_uvc_state.frame_width = width;
+    g_uvc_state.frame_height = height;
+    g_uvc_state.latest_sequence += 1;
+  }
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+}
+
 // Test-only: fires error_listener with a caller-supplied message.
 // Not declared in the public header — accessed only via test-specific bindings.
 FFI_PLUGIN_EXPORT void uvc_trigger_test_error(const char *message) {
