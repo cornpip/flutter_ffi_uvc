@@ -1,9 +1,20 @@
-## 0.1.1
+## 0.2.0
+
+### Breaking changes
+
+* `startPreview(mode)` now returns `Future<UvcPreviewStartResult>` instead of `int` and verifies frame delivery on startup.
+* If you are migrating from 0.1.x and want the previous behaviour, replace `startPreview(mode)` with `openPreview(mode)`.
 
 ### Added
 
 * Preview transform: rotation (0/90/180/270°) and flip (horizontal/vertical) applied to the Flutter `Texture` output. `copyLatestFrame()` always returns the original camera orientation unaffected. See `UvcPreviewTransform`, `setPreviewTransform()`, and the convenience helpers `rotatePreviewClockwise()`, `rotatePreviewCounterClockwise()`, `togglePreviewFlipHorizontal()`, `togglePreviewFlipVertical()`.
-* Streaming error reporting: frame pipeline errors (decode failures, undersized frames, buffer allocation failures) are now delivered proactively via `UvcCamera.streamErrors` (`Stream<UvcStreamError>`)
+* Streaming error reporting: frame pipeline errors (decode failures, undersized frames, buffer allocation failures) are now delivered proactively via `UvcCamera.streamErrors` (`Stream<UvcStreamError>`).
+* `startPreview(mode, {policy, consecutiveValidFrames, timeout})` — starts the preview stream and verifies frame delivery before returning. `UvcPreviewPolicy.stableFrames` (default) verifies both frame delivery and frame validity; `UvcPreviewPolicy.sequenceOnly` verifies frame delivery only. On success the stream remains running; on failure preview is stopped. Returns `UvcPreviewStartResult`.
+
+### Fixed
+
+* USB permission intent now explicitly sets the package name, improving permission reliability on Android.
+* libuvc initialization no longer triggers libusb device discovery
 
 ## 0.1.0
 

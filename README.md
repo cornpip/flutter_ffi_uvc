@@ -28,6 +28,14 @@ flutter pub add flutter_ffi_uvc
 
 Or add `flutter_ffi_uvc` to the dependencies section of your `pubspec.yaml`.
 
+## How it works
+
+This package combines three layers:
+
+- **Android USB Host API** — device discovery, USB permission, and acquiring the file descriptor for the connected device.
+- **libusb** — wraps that file descriptor and handles the actual USB communication.
+- **libuvc** — sits on top of libusb and handles the UVC protocol: mode negotiation, frame streaming, and camera controls.
+
 ## Usage
 
 ### Typical lifecycle
@@ -36,8 +44,8 @@ Or add `flutter_ffi_uvc` to the dependencies section of your `pubspec.yaml`.
 2. Call `uvcCamera.listUsbDevices()` to discover attached UVC cameras.
 3. Call `uvcCamera.openUsbDevice(deviceId)` to request USB permission and open the device.
 4. Read `uvcCamera.supportedModes()`.
-5. Pick a mode and call `uvcCamera.startPreview(mode)`.
-6. For live preview on Android, prefer attaching a Flutter `Texture`.
+5. Pick a mode and call `await uvcCamera.startPreview(mode)` — starts the stream and verifies frame delivery.
+6. On success, attach a Flutter `Texture` via `attachPreviewTexture` for live preview on Android.
 7. Use `copyLatestFrame()` when you need frame bytes in Dart, such as for capture or inspection.
 8. Call `uvcCamera.stopPreview()` when preview is no longer needed.
 9. When finished, call `uvcCamera.closeUsbDevice()`.
@@ -72,9 +80,10 @@ if (result != 0) {
 }
 ```
 
-`openUsbDevice` requests USB permission from the user if needed before opening the device. 
-It throws a `PlatformException` if the USB layer fails (e.g. permission denied, device not found) 
-and returns a negative native error code if the UVC layer fails to initialize.
+`openUsbDevice` goes through the Android USB layer to acquire permission and a file
+descriptor, then passes it to libusb to open the session. It throws a
+`PlatformException` if the Android layer fails, and returns a non-zero code if
+libusb/libuvc fails to initialize.
 
 To close and release the USB connection:
 
@@ -82,9 +91,10 @@ To close and release the USB connection:
 await uvcCamera.closeUsbDevice();
 ```
 
-#### Advanced: opening by file descriptor
+#### Alternative: opening by file descriptor
 
-If your app manages USB device access independently, pass an already-acquired file descriptor directly:
+If your app manages USB access independently, pass the file descriptor directly to
+skip the Android layer:
 
 ```dart
 // fd: int from UsbDeviceConnection.fileDescriptor
@@ -95,16 +105,24 @@ uvcCamera.openFd(fd);
 
 #### Live preview with Texture
 
-Attach a Flutter `Texture` before starting the stream:
+Create a texture, start preview, then attach the texture once the stream is confirmed running:
 
 ```dart
 final int textureId = await uvcCamera.createPreviewTexture();
-await uvcCamera.attachPreviewTexture(
-  textureId,
-  width: mode.width,
-  height: mode.height,
+
+// stableFrames (default): verifies both frame delivery and frame validity.
+// sequenceOnly: verifies frame delivery only — frame validity is not checked.
+final UvcPreviewStartResult result = await uvcCamera.startPreview(
+  mode,
+  policy: UvcPreviewPolicy.stableFrames,
 );
-uvcCamera.startPreview(mode);
+if (result.success) {
+  await uvcCamera.attachPreviewTexture(
+    textureId,
+    width: mode.width,
+    height: mode.height,
+  );
+}
 ```
 
 Display it with Flutter's `Texture` widget:
@@ -281,6 +299,8 @@ Most users will interact with these primary API entry points:
 - `UvcUsbDevice`
 - `UvcCameraMode`
 - `UvcPreviewFrame`
+- `UvcPreviewStartResult`
+- `UvcPreviewPolicy`
 - `UvcPreviewTransform`
 - `UvcCameraControl`
 - `UvcControlId`
