@@ -500,6 +500,55 @@ class UvcRegionOfInterestControl {
   final int autoControls;
 }
 
+/// Preview transform applied to the live Flutter Texture output.
+///
+/// [rotation] is a clockwise angle in degrees; only 0, 90, 180, and 270 are
+/// accepted — other values are normalised to 0 by the native layer.
+/// [flipHorizontal] mirrors the rendered image left-right.
+/// [flipVertical] mirrors the rendered image top-bottom.
+///
+/// Transforms are applied during the native blit step and do not affect the
+/// shared RGBA buffer returned by [UvcCamera.copyLatestFrame].
+class UvcPreviewTransform {
+  const UvcPreviewTransform({
+    this.rotation = 0,
+    this.flipHorizontal = false,
+    this.flipVertical = false,
+  });
+
+  final int rotation;
+  final bool flipHorizontal;
+  final bool flipVertical;
+
+  static const UvcPreviewTransform identity = UvcPreviewTransform();
+
+  UvcPreviewTransform copyWith({
+    int? rotation,
+    bool? flipHorizontal,
+    bool? flipVertical,
+  }) => UvcPreviewTransform(
+    rotation: rotation ?? this.rotation,
+    flipHorizontal: flipHorizontal ?? this.flipHorizontal,
+    flipVertical: flipVertical ?? this.flipVertical,
+  );
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UvcPreviewTransform &&
+          other.rotation == rotation &&
+          other.flipHorizontal == flipHorizontal &&
+          other.flipVertical == flipVertical;
+
+  @override
+  int get hashCode => Object.hash(rotation, flipHorizontal, flipVertical);
+
+  @override
+  String toString() =>
+      'UvcPreviewTransform(rotation: $rotation, '
+      'flipH: $flipHorizontal, flipV: $flipVertical)';
+}
+
 /// Information about a UVC-capable USB device discovered on Android.
 class UvcUsbDevice {
   const UvcUsbDevice({
@@ -675,4 +724,26 @@ abstract interface class UvcCamera {
 
   /// Returns the camera modes reported by the currently opened device.
   List<UvcCameraMode> supportedModes();
+
+  // ---------------------------------------------------------------------------
+  // Preview transform controls
+  // ---------------------------------------------------------------------------
+
+  /// Current preview transform applied to the Flutter Texture output.
+  UvcPreviewTransform get previewTransform;
+
+  /// Replaces the entire preview transform in a single call.
+  void setPreviewTransform(UvcPreviewTransform transform);
+
+  /// Rotates the preview 90° clockwise relative to the current rotation.
+  void rotatePreviewClockwise();
+
+  /// Rotates the preview 90° counter-clockwise relative to the current rotation.
+  void rotatePreviewCounterClockwise();
+
+  /// Toggles the left-right mirror flag on the preview output.
+  void togglePreviewFlipHorizontal();
+
+  /// Toggles the top-bottom mirror flag on the preview output.
+  void togglePreviewFlipVertical();
 }

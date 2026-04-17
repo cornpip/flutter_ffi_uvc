@@ -16,6 +16,7 @@
 - Starts and stops UVC preview
 - Copies the latest preview frame as RGBA bytes
 - Renders preview directly into a Flutter `Texture` on Android
+- Applies rotation and flip transforms to the live preview output
 - Reads and writes supported UVC controls
 
 ## Installation
@@ -121,6 +122,35 @@ uvcCamera.stopPreview();
 await uvcCamera.disposePreviewTexture(textureId);
 ```
 
+#### Preview transform
+
+Rotation and flip are applied to the Flutter `Texture` output only. The shared
+RGBA buffer returned by `copyLatestFrame()` is always in the original camera
+orientation.
+
+```dart
+// Absolute: set rotation and flip in one call
+uvcCamera.setPreviewTransform(
+  const UvcPreviewTransform(rotation: 90, flipHorizontal: true),
+);
+
+// Incremental helpers
+uvcCamera.rotatePreviewClockwise();          // +90° each call
+uvcCamera.rotatePreviewCounterClockwise();   // -90° each call
+uvcCamera.togglePreviewFlipHorizontal();     // mirror left-right
+uvcCamera.togglePreviewFlipVertical();       // mirror top-bottom
+
+// Read current state
+final UvcPreviewTransform t = uvcCamera.previewTransform;
+```
+
+`rotation` accepts `0`, `90`, `180`, or `270` (clockwise degrees). Values
+outside this set are normalised to `0` by the native layer.
+
+For 90° and 270° rotations the native layer automatically swaps the output
+width and height when configuring the surface, so the `Texture` widget
+dimensions remain correct without any Dart-side adjustment.
+
 #### Capture
 
 To get frame bytes in Dart — for snapshot, processing, or inspection — call
@@ -219,6 +249,7 @@ Most users will interact with these primary API entry points:
 - `UvcUsbDevice`
 - `UvcCameraMode`
 - `UvcPreviewFrame`
+- `UvcPreviewTransform`
 - `UvcCameraControl`
 - `UvcControlId`
 - `UvcControlKind`

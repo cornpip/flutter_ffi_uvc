@@ -16,6 +16,8 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   );
   static const MethodChannel _usbChannel = MethodChannel('flutter_ffi_uvc/usb');
 
+  UvcPreviewTransform _previewTransform = UvcPreviewTransform.identity;
+
   void _resetPreviewState() {}
 
   UvcPreviewFrame? _copyFrameWithMetadata(
@@ -393,6 +395,55 @@ class _FlutterFfiUvcCamera implements UvcCamera {
         value.roiRight,
         value.autoControls,
       );
+
+  @override
+  UvcPreviewTransform get previewTransform => _previewTransform;
+
+  @override
+  void setPreviewTransform(UvcPreviewTransform transform) {
+    _previewTransform = transform;
+    _bindings.uvc_set_preview_transform(
+      transform.rotation,
+      transform.flipHorizontal ? 1 : 0,
+      transform.flipVertical ? 1 : 0,
+    );
+  }
+
+  @override
+  void rotatePreviewClockwise() {
+    setPreviewTransform(
+      _previewTransform.copyWith(
+        rotation: (_previewTransform.rotation + 90) % 360,
+      ),
+    );
+  }
+
+  @override
+  void rotatePreviewCounterClockwise() {
+    setPreviewTransform(
+      _previewTransform.copyWith(
+        rotation: (_previewTransform.rotation + 270) % 360,
+      ),
+    );
+  }
+
+  @override
+  void togglePreviewFlipHorizontal() {
+    setPreviewTransform(
+      _previewTransform.copyWith(
+        flipHorizontal: !_previewTransform.flipHorizontal,
+      ),
+    );
+  }
+
+  @override
+  void togglePreviewFlipVertical() {
+    setPreviewTransform(
+      _previewTransform.copyWith(
+        flipVertical: !_previewTransform.flipVertical,
+      ),
+    );
+  }
 
   @override
   List<UvcCameraMode> supportedModes() {

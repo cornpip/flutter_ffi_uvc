@@ -39,6 +39,9 @@ typedef struct {
 #if defined(__ANDROID__)
   ANativeWindow *preview_window;
 #endif
+  int preview_rotation;  // 0, 90, 180, 270 (clockwise)
+  int preview_flip_h;    // mirror left-right
+  int preview_flip_v;    // mirror top-bottom
 } ffi_uvc_state_t;
 
 static ffi_uvc_state_t g_uvc_state = {
@@ -182,12 +185,19 @@ static int render_latest_rgba_to_preview_surface_locked(void) {
     return 1;
   }
 
-  const int width = g_uvc_state.frame_width;
-  const int height = g_uvc_state.frame_height;
+  const int src_w = g_uvc_state.frame_width;
+  const int src_h = g_uvc_state.frame_height;
+  const int rot   = g_uvc_state.preview_rotation;
+  const int fh    = g_uvc_state.preview_flip_h;
+  const int fv    = g_uvc_state.preview_flip_v;
+
+  const int out_w = (rot == 90 || rot == 270) ? src_h : src_w;
+  const int out_h = (rot == 90 || rot == 270) ? src_w : src_h;
+
   if (ANativeWindow_setBuffersGeometry(
           g_uvc_state.preview_window,
-          width,
-          height,
+          out_w,
+          out_h,
           WINDOW_FORMAT_RGBA_8888) != 0) {
     set_last_error("Failed to configure preview surface geometry");
     return 0;
@@ -199,12 +209,46 @@ static int render_latest_rgba_to_preview_surface_locked(void) {
     return 0;
   }
 
-  const uint8_t *src = g_uvc_state.latest_rgba;
-  uint8_t *dst = (uint8_t *)window_buffer.bits;
-  const size_t src_stride = (size_t)width * 4u;
-  const size_t dst_stride = (size_t)window_buffer.stride * 4u;
-  for (int row = 0; row < height; ++row) {
-    memcpy(dst + (size_t)row * dst_stride, src + (size_t)row * src_stride, src_stride);
+  const uint32_t *src = (const uint32_t *)g_uvc_state.latest_rgba;
+  uint32_t *dst = (uint32_t *)window_buffer.bits;
+  const int dst_stride = window_buffer.stride;
+
+  if (rot == 0 && !fh && !fv) {
+    // Fast path: no transform — row-by-row memcpy.
+    const size_t row_bytes = (size_t)out_w * 4u;
+    for (int row = 0; row < out_h; ++row) {
+      memcpy(dst + (size_t)row * (size_t)dst_stride,
+             src + (size_t)row * (size_t)src_w,
+             row_bytes);
+    }
+  } else {
+    // General path: per-pixel with rotation and flip.
+    for (int dr = 0; dr < out_h; ++dr) {
+      const int eff_dr = fv ? (out_h - 1 - dr) : dr;
+      for (int dc = 0; dc < out_w; ++dc) {
+        const int eff_dc = fh ? (out_w - 1 - dc) : dc;
+        int sr, sc;
+        switch (rot) {
+          case 90:
+            sr = (src_h - 1) - eff_dc;
+            sc = eff_dr;
+            break;
+          case 180:
+            sr = (src_h - 1) - eff_dr;
+            sc = (src_w - 1) - eff_dc;
+            break;
+          case 270:
+            sr = eff_dc;
+            sc = (src_w - 1) - eff_dr;
+            break;
+          default: /* 0 */
+            sr = eff_dr;
+            sc = eff_dc;
+            break;
+        }
+        dst[dr * dst_stride + dc] = src[sr * src_w + sc];
+      }
+    }
   }
 
   ANativeWindow_unlockAndPost(g_uvc_state.preview_window);
@@ -986,6 +1030,19 @@ FFI_PLUGIN_EXPORT void uvc_set_frame_listener(uvc_frame_listener_t listener) {
 
 FFI_PLUGIN_EXPORT const char *uvc_last_error(void) {
   return g_uvc_state.last_error;
+}
+
+FFI_PLUGIN_EXPORT void uvc_set_preview_transform(int rotation, int flip_h, int flip_v) {
+  // Normalise rotation to one of 0/90/180/270.
+  int r = rotation % 360;
+  if (r < 0) r += 360;
+  if (r != 0 && r != 90 && r != 180 && r != 270) r = 0;
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  g_uvc_state.preview_rotation = r;
+  g_uvc_state.preview_flip_h = flip_h ? 1 : 0;
+  g_uvc_state.preview_flip_v = flip_v ? 1 : 0;
+  pthread_mutex_unlock(&g_uvc_state.mutex);
 }
 
 // ---------------------------------------------------------------------------

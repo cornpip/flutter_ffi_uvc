@@ -56,6 +56,12 @@ FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uint8_t *buffer, int buffer_l
 FFI_PLUGIN_EXPORT const char *uvc_last_error(void);
 FFI_PLUGIN_EXPORT void uvc_set_log_level(int level);
 
+// Preview transform: rotation is 0, 90, 180, or 270 (clockwise degrees).
+// flip_h mirrors the output left-right; flip_v mirrors it top-bottom.
+// Transforms are applied during preview blit to the attached Flutter Texture
+// and do not affect the shared RGBA buffer returned by copyLatestFrame.
+FFI_PLUGIN_EXPORT void uvc_set_preview_transform(int rotation, int flip_h, int flip_v);
+
 // CT/PU camera control IDs
 // PU (Processing Unit) controls: 1-19
 #define UVC_CTRL_ID_BRIGHTNESS                  1

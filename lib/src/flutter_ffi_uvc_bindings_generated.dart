@@ -227,6 +227,21 @@ class FlutterFfiUvcBindings {
   late final _uvc_set_log_level = _uvc_set_log_levelPtr
       .asFunction<void Function(int)>();
 
+  /// Preview transform: rotation is 0, 90, 180, or 270 (clockwise degrees).
+  /// flip_h mirrors the output left-right; flip_v mirrors it top-bottom.
+  /// Transforms are applied during preview blit to the attached Flutter Texture
+  /// and do not affect the shared RGBA buffer returned by copyLatestFrame.
+  void uvc_set_preview_transform(int rotation, int flip_h, int flip_v) {
+    return _uvc_set_preview_transform(rotation, flip_h, flip_v);
+  }
+
+  late final _uvc_set_preview_transformPtr =
+      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int, ffi.Int, ffi.Int)>>(
+        'uvc_set_preview_transform',
+      );
+  late final _uvc_set_preview_transform = _uvc_set_preview_transformPtr
+      .asFunction<void Function(int, int, int)>();
+
   /// Returns JSON array of all controls the device supports, with min/max/def/cur/res fields.
   /// Returns number of bytes written, or 0 on failure.
   int uvc_ctrl_get_all_json(ffi.Pointer<ffi.Uint8> buffer, int buffer_length) {

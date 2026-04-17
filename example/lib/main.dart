@@ -58,6 +58,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   bool _previewFrozen = false;
   bool _savingPhoto = false;
   bool _saveToGallery = false;
+  bool _transformControlsExpanded = false;
   bool _manualFocusControlsVisible = false;
   Timer? _focusRepeatTimer;
   Timer? _focusValueHideTimer;
@@ -250,6 +251,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         _cameraModes = const <UvcCameraMode>[];
         _cameraControls = const <UvcCameraControl>[];
         _previewFrozen = false;
+        _transformControlsExpanded = false;
         _manualFocusControlsVisible = false;
         _openingDevice = false;
         _status = 'Device disconnected.';
@@ -916,6 +918,78 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                         ),
                       ),
                     ),
+                    if (_hasLivePreview)
+                      Positioned(
+                        left: 12,
+                        bottom: 16,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            AnimatedSize(
+                              duration: const Duration(milliseconds: 200),
+                              curve: Curves.easeInOut,
+                              alignment: Alignment.bottomLeft,
+                              child: _transformControlsExpanded
+                                  ? Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: <Widget>[
+                                        _TransformIconButton(
+                                          icon: Icons.rotate_90_degrees_cw,
+                                          tooltip: 'Rotate 90° CW',
+                                          active: false,
+                                          onTap: () {
+                                            _camera.rotatePreviewClockwise();
+                                            setState(() {});
+                                          },
+                                        ),
+                                        const SizedBox(height: 8),
+                                        _TransformIconButton(
+                                          icon: Icons.flip,
+                                          tooltip: 'Flip horizontal',
+                                          active: _camera
+                                              .previewTransform.flipHorizontal,
+                                          onTap: () {
+                                            _camera
+                                                .togglePreviewFlipHorizontal();
+                                            setState(() {});
+                                          },
+                                        ),
+                                        const SizedBox(height: 8),
+                                        _TransformIconButton(
+                                          icon: Icons.flip,
+                                          iconAngle: 90,
+                                          tooltip: 'Flip vertical',
+                                          active: _camera
+                                              .previewTransform.flipVertical,
+                                          onTap: () {
+                                            _camera.togglePreviewFlipVertical();
+                                            setState(() {});
+                                          },
+                                        ),
+                                        const SizedBox(height: 8),
+                                      ],
+                                    )
+                                  : const SizedBox.shrink(),
+                            ),
+                            _TransformIconButton(
+                              icon: Icons.screen_rotation,
+                              tooltip: _transformControlsExpanded
+                                  ? 'Close transform controls'
+                                  : 'Transform controls',
+                              active: _transformControlsExpanded ||
+                                  _camera.previewTransform !=
+                                      UvcPreviewTransform.identity,
+                              onTap: () => setState(
+                                () => _transformControlsExpanded =
+                                    !_transformControlsExpanded,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     if (_focusAbsControl != null)
                       Positioned(
                         right: 12,
@@ -1170,6 +1244,51 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _TransformIconButton extends StatelessWidget {
+  const _TransformIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.active,
+    required this.onTap,
+    this.iconAngle = 0,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final bool active;
+  final VoidCallback onTap;
+
+  /// Rotation in degrees applied to the icon (0 or 90).
+  final double iconAngle;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Material(
+          color: active
+              ? Colors.white.withValues(alpha: 0.9)
+              : Colors.black54,
+          shape: const CircleBorder(),
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Transform.rotate(
+              angle: iconAngle * 3.141592653589793 / 180,
+              child: Icon(
+                icon,
+                color: active ? Colors.black87 : Colors.white,
+                size: 22,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
