@@ -43,6 +43,105 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   void _resetPreviewState() {}
 
+  Future<UvcModeProbeResult> _probeModeInternal(
+    UvcCameraMode mode, {
+    required int requiredConsecutiveValidFrames,
+    required Duration timeout,
+  }) async {
+    if (requiredConsecutiveValidFrames <= 0) {
+      throw ArgumentError.value(
+        requiredConsecutiveValidFrames,
+        'requiredConsecutiveValidFrames',
+        'Must be greater than 0.',
+      );
+    }
+
+    final Stopwatch stopwatch = Stopwatch()..start();
+    final Stream<UvcStreamError> errors = streamErrors;
+    int errorCount = 0;
+    int observedErrorGeneration = 0;
+    int latestObservedErrorGeneration = 0;
+    String? lastProbeError;
+    int totalValidFrames = 0;
+    int consecutiveValidFrames = 0;
+    int lastSequence = latestFrameSequence();
+    final Completer<void> errorReady = Completer<void>();
+    late final StreamSubscription<UvcStreamError> errorSub;
+    errorSub = errors.listen((UvcStreamError error) {
+      errorCount += 1;
+      latestObservedErrorGeneration += 1;
+      lastProbeError = error.message;
+      consecutiveValidFrames = 0;
+      if (!errorReady.isCompleted) {
+        errorReady.complete();
+      }
+    });
+
+    try {
+      final int startResult = startPreview(mode);
+      if (startResult != 0) {
+        final String error = lastError;
+        return UvcModeProbeResult(
+          mode: mode,
+          success: false,
+          validFrameCount: 0,
+          consecutiveValidFrames: 0,
+          errorCount: 0,
+          elapsed: stopwatch.elapsed,
+          lastError: error.isNotEmpty ? error : null,
+        );
+      }
+
+      final DateTime deadline = DateTime.now().add(timeout);
+      while (DateTime.now().isBefore(deadline)) {
+        if (latestObservedErrorGeneration != observedErrorGeneration) {
+          observedErrorGeneration = latestObservedErrorGeneration;
+          lastSequence = latestFrameSequence();
+          consecutiveValidFrames = 0;
+        }
+
+        final int latestSequence = latestFrameSequence();
+        final int delta = latestSequence - lastSequence;
+        if (delta > 0) {
+          totalValidFrames += delta;
+          consecutiveValidFrames += delta;
+          lastSequence = latestSequence;
+          if (consecutiveValidFrames >= requiredConsecutiveValidFrames) {
+            return UvcModeProbeResult(
+              mode: mode,
+              success: true,
+              validFrameCount: totalValidFrames,
+              consecutiveValidFrames: consecutiveValidFrames,
+              errorCount: errorCount,
+              elapsed: stopwatch.elapsed,
+              lastError: lastProbeError,
+            );
+          }
+        }
+
+        await Future.any(<Future<void>>[
+          Future<void>.delayed(const Duration(milliseconds: 50)),
+          if (!errorReady.isCompleted) errorReady.future,
+        ]);
+      }
+
+      final String error = lastProbeError ?? lastError;
+      stopPreview();
+      return UvcModeProbeResult(
+        mode: mode,
+        success: false,
+        validFrameCount: totalValidFrames,
+        consecutiveValidFrames: consecutiveValidFrames,
+        errorCount: errorCount,
+        elapsed: stopwatch.elapsed,
+        lastError: error.isNotEmpty ? error : null,
+      );
+    } finally {
+      await errorSub.cancel();
+      stopwatch.stop();
+    }
+  }
+
   UvcPreviewFrame? _copyFrameWithMetadata(
     int Function(
       Pointer<Uint8> buffer,
@@ -179,6 +278,17 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     }
     return startResult;
   }
+
+  @override
+  Future<UvcModeProbeResult> probeMode(
+    UvcCameraMode mode, {
+    int consecutiveValidFrames = 3,
+    Duration timeout = const Duration(seconds: 2),
+  }) => _probeModeInternal(
+    mode,
+    requiredConsecutiveValidFrames: consecutiveValidFrames,
+    timeout: timeout,
+  );
 
   @override
   void stopPreview() {

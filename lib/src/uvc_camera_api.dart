@@ -515,6 +515,31 @@ class UvcStreamError {
   String toString() => 'UvcStreamError($message)';
 }
 
+/// Result of probing whether a preview mode is healthy enough to use.
+///
+/// A probe starts preview for [mode] and waits until enough valid frames have
+/// been observed without an intervening frame-pipeline error. On success the
+/// preview stream remains running. On failure the probe stops the preview.
+class UvcModeProbeResult {
+  const UvcModeProbeResult({
+    required this.mode,
+    required this.success,
+    required this.validFrameCount,
+    required this.consecutiveValidFrames,
+    required this.errorCount,
+    required this.elapsed,
+    this.lastError,
+  });
+
+  final UvcCameraMode mode;
+  final bool success;
+  final int validFrameCount;
+  final int consecutiveValidFrames;
+  final int errorCount;
+  final Duration elapsed;
+  final String? lastError;
+}
+
 /// Preview transform applied to the live Flutter Texture output.
 ///
 /// [rotation] is a clockwise angle in degrees; only 0, 90, 180, and 270 are
@@ -657,6 +682,21 @@ abstract interface class UvcCamera {
   /// If a preview texture has been attached with [attachPreviewTexture], the
   /// same native stream also renders into that texture on Android.
   int startPreview(UvcCameraMode mode);
+
+  /// Probes whether [mode] produces stable preview frames.
+  ///
+  /// The probe starts preview for [mode] and waits until at least
+  /// [consecutiveValidFrames] valid frames have been observed without an
+  /// intervening stream error, or until [timeout] elapses.
+  ///
+  /// On success, the preview stream remains running so callers can continue
+  /// using the mode immediately. On failure, the preview is stopped before the
+  /// result is returned.
+  Future<UvcModeProbeResult> probeMode(
+    UvcCameraMode mode, {
+    int consecutiveValidFrames = 3,
+    Duration timeout = const Duration(seconds: 2),
+  });
 
   /// Stops the active preview stream.
   void stopPreview();
