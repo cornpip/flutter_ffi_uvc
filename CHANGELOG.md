@@ -1,3 +1,14 @@
+## 0.3.0
+
+### Added
+
+* `copyLatestFrameTransformed(UvcPreviewTransform)` — copies the latest frame with rotation and flip applied to the pixel data.
+* `UvcPreviewTransform.applyToSize(int width, int height)` — returns the width and height after applying the transform, for use with `AspectRatio` when displaying the preview `Texture`.
+
+### Fixed
+
+* Example: `AspectRatio` for the preview `Texture` was not updated when rotation was 90° or 270°.
+
 ## 0.2.0
 
 ### Breaking changes

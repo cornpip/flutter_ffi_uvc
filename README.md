@@ -32,9 +32,9 @@ Or add `flutter_ffi_uvc` to the dependencies section of your `pubspec.yaml`.
 
 This package combines three layers:
 
-- **Android USB Host API** — device discovery, USB permission, and acquiring the file descriptor for the connected device.
-- **libusb** — wraps that file descriptor and handles the actual USB communication.
-- **libuvc** — sits on top of libusb and handles the UVC protocol: mode negotiation, frame streaming, and camera controls.
+- Android USB Host API — device discovery, USB permission, and acquiring the file descriptor for the connected device.
+- libusb — wraps that file descriptor and handles the actual USB communication.
+- libuvc — sits on top of libusb and handles the UVC protocol: mode negotiation, frame streaming, and camera controls.
 
 ## Usage
 
@@ -143,9 +143,7 @@ await uvcCamera.disposePreviewTexture(textureId);
 
 #### Preview transform
 
-Rotation and flip are applied to the Flutter `Texture` output only. The shared
-RGBA buffer returned by `copyLatestFrame()` is always in the original camera
-orientation.
+Rotation and flip are applied to the Flutter `Texture` output only.
 
 ```dart
 // Absolute: set rotation and flip in one call
@@ -166,14 +164,20 @@ final UvcPreviewTransform t = uvcCamera.previewTransform;
 `rotation` accepts `0`, `90`, `180`, or `270` (clockwise degrees). Values
 outside this set are normalised to `0` by the native layer.
 
-For 90° and 270° rotations the native layer automatically swaps the output
-width and height when configuring the surface, so the `Texture` widget
-dimensions remain correct without any Dart-side adjustment.
+For 90° and 270° rotations the output dimensions are swapped. Use
+`applyToSize()` to get the correct dimensions for the `AspectRatio` widget:
+
+```dart
+final (int w, int h) = uvcCamera.previewTransform.applyToSize(mode.width, mode.height);
+AspectRatio(
+  aspectRatio: w / h,
+  child: Texture(textureId: textureId),
+)
+```
 
 #### Capture
 
-To get frame bytes in Dart — for snapshot, processing, or inspection — call
-`copyLatestFrame()` while preview is running:
+To get frame bytes in Dart — call `copyLatestFrame()` while preview is running:
 
 ```dart
 final UvcPreviewFrame? frame = uvcCamera.copyLatestFrame();
@@ -182,6 +186,16 @@ if (frame != null) {
   // frame.width, frame.height: frame dimensions
 }
 ```
+
+To capture with the current preview transform applied:
+
+```dart
+final UvcPreviewFrame? frame = uvcCamera.copyLatestFrameTransformed(
+  uvcCamera.previewTransform,
+);
+```
+
+`frame.width` and `frame.height` reflect the post-transform dimensions.
 
 #### Preview state
 
