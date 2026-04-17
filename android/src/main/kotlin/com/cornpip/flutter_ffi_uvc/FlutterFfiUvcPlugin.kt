@@ -263,7 +263,7 @@ class FlutterFfiUvcPlugin :
                     val pendingIntent = PendingIntent.getBroadcast(
                         act,
                         deviceId,
-                        Intent(usbPermissionAction),
+                        Intent(usbPermissionAction).apply { `package` = act.packageName },
                         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
                     )
                     manager.requestPermission(device, pendingIntent)
