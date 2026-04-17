@@ -17,6 +17,7 @@
 - Copies the latest preview frame as RGBA bytes
 - Renders preview directly into a Flutter `Texture` on Android
 - Applies rotation and flip transforms to the live preview output
+- Reports frame pipeline errors proactively via a stream
 - Reads and writes supported UVC controls
 
 ## Installation
@@ -182,6 +183,36 @@ Dropped callbacks are visible at `UvcLogLevel.trace`:
 dropping frame callback because previous callback is still processing
 ```
 
+#### Streaming error reporting
+
+Frame pipeline errors — decode failures, undersized frames, buffer allocation
+failures — are delivered proactively via `streamErrors` rather than being
+silently stored in `lastError`.
+
+Subscribe once when the widget is initialised and cancel on dispose:
+
+```dart
+StreamSubscription<UvcStreamError>? _streamErrorSub;
+
+@override
+void initState() {
+  super.initState();
+  _streamErrorSub = uvcCamera.streamErrors.listen((UvcStreamError error) {
+    // handle error, e.g. show a SnackBar
+    print(error.message);
+  });
+}
+
+@override
+void dispose() {
+  _streamErrorSub?.cancel();
+  super.dispose();
+}
+```
+
+`streamErrors` is a broadcast stream, so multiple subscribers are allowed.  
+Errors are only emitted while a native error listener is active.
+
 ### Controls
 
 `supportedControls()` returns the controls exposed by the currently opened
@@ -246,6 +277,7 @@ The bundled example app demonstrates:
 Most users will interact with these primary API entry points:
 
 - `UvcCamera`
+- `UvcStreamError`
 - `UvcUsbDevice`
 - `UvcCameraMode`
 - `UvcPreviewFrame`

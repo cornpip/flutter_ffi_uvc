@@ -60,6 +60,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   bool _saveToGallery = false;
   bool _transformControlsExpanded = false;
   bool _manualFocusControlsVisible = false;
+  StreamSubscription<UvcStreamError>? _streamErrorSub;
   Timer? _focusRepeatTimer;
   Timer? _focusValueHideTimer;
   bool _focusValueVisible = false;
@@ -73,6 +74,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     super.initState();
     _camera.setLogLevel(UvcLogLevel.trace);
     WidgetsBinding.instance.addObserver(this);
+    _streamErrorSub = _camera.streamErrors.listen(_onStreamError);
     unawaited(_initializePermissionsAndDevices());
   }
 
@@ -86,6 +88,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _streamErrorSub?.cancel();
     _previewStatsTimer?.cancel();
     _focusRepeatTimer?.cancel();
     _focusValueHideTimer?.cancel();
@@ -747,6 +750,24 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     );
   }
 
+  void _onStreamError(UvcStreamError error) {
+    _log('Stream error: ${error.message}');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(error.message),
+        backgroundColor: Colors.red.shade800,
+        duration: const Duration(seconds: 5),
+        action: SnackBarAction(
+          label: 'Dismiss',
+          textColor: Colors.white,
+          onPressed: () =>
+              ScaffoldMessenger.of(context).hideCurrentSnackBar(),
+        ),
+      ),
+    );
+  }
+
   void _log(String message, {Object? error}) {
     debugPrint('$_logPrefix $message');
     if (error != null) {
@@ -1250,6 +1271,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
 }
 
 class _TransformIconButton extends StatelessWidget {
+
   const _TransformIconButton({
     required this.icon,
     required this.tooltip,

@@ -18,6 +18,29 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   UvcPreviewTransform _previewTransform = UvcPreviewTransform.identity;
 
+  final StreamController<UvcStreamError> _streamErrorController =
+      StreamController<UvcStreamError>.broadcast();
+  NativeCallable<Void Function(Pointer<Char>)>? _errorCallable;
+
+  void _setupNativeErrorListener() {
+    if (_errorCallable != null) return;
+    _errorCallable = NativeCallable<Void Function(Pointer<Char>)>.listener(_onNativeError);
+    _bindings.uvc_set_error_listener(_errorCallable!.nativeFunction);
+  }
+
+  void _tearDownNativeErrorListener() {
+    _bindings.uvc_set_error_listener(nullptr);
+    _errorCallable?.close();
+    _errorCallable = null;
+  }
+
+  void _onNativeError(Pointer<Char> messagePtr) {
+    final String message = messagePtr.cast<Utf8>().toDartString();
+    if (message.isNotEmpty) {
+      _streamErrorController.add(UvcStreamError(message: message));
+    }
+  }
+
   void _resetPreviewState() {}
 
   UvcPreviewFrame? _copyFrameWithMetadata(
@@ -128,12 +151,19 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   @override
   Future<void> closeUsbDevice() async {
     _ensureAndroid();
+    _tearDownNativeErrorListener();
     _bindings.uvc_close_device();
     await _usbChannel.invokeMethod<void>('closeUsbDevice');
   }
 
   @override
-  int openFd(int fd) => _bindings.uvc_open_fd(fd);
+  int openFd(int fd) {
+    final int result = _bindings.uvc_open_fd(fd);
+    if (result == 0) {
+      _setupNativeErrorListener();
+    }
+    return result;
+  }
 
   @override
   int startPreview(UvcCameraMode mode) {
@@ -158,6 +188,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   @override
   void closeFd() {
+    _tearDownNativeErrorListener();
     _bindings.uvc_close_device();
     _resetPreviewState();
   }
@@ -167,6 +198,14 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   @override
   bool get isPreviewing => _bindings.uvc_is_previewing() != 0;
+
+  @override
+  Stream<UvcStreamError> get streamErrors {
+    if (_errorCallable == null) {
+      _setupNativeErrorListener();
+    }
+    return _streamErrorController.stream;
+  }
 
   @override
   String get lastError {

@@ -500,6 +500,21 @@ class UvcRegionOfInterestControl {
   final int autoControls;
 }
 
+/// An error reported by the native frame pipeline during streaming.
+///
+/// These are errors that occur inside the frame callback — decode failures,
+/// buffer allocation failures, undersized frames, etc. — and are delivered
+/// proactively via [UvcCamera.streamErrors] rather than being silently stored
+/// in [UvcCamera.lastError].
+class UvcStreamError {
+  const UvcStreamError({required this.message});
+
+  final String message;
+
+  @override
+  String toString() => 'UvcStreamError($message)';
+}
+
 /// Preview transform applied to the live Flutter Texture output.
 ///
 /// [rotation] is a clockwise angle in degrees; only 0, 90, 180, and 270 are
@@ -667,6 +682,15 @@ abstract interface class UvcCamera {
 
   /// Last error message reported by the native layer.
   String get lastError;
+
+  /// Stream of errors emitted by the native frame pipeline.
+  ///
+  /// Errors occurring during frame decode, buffer allocation, or format
+  /// conversion are reported here instead of being silently stored in
+  /// [lastError]. Subscribe before calling [startPreview] to avoid missing
+  /// early errors. The stream remains open for the lifetime of the camera
+  /// session; errors stop arriving after [closeUsbDevice] or [closeFd].
+  Stream<UvcStreamError> get streamErrors;
 
   /// Copies the latest RGBA frame from the shared native preview buffer.
   UvcPreviewFrame? copyLatestFrame();

@@ -33,9 +33,13 @@ typedef struct {
   uint32_t callbacks_inflight;
   int64_t latest_sequence;
   uvc_frame_listener_t frame_listener;
+  uvc_error_listener_t error_listener;
   uint32_t callback_count;
   uint32_t mjpeg_warmup_drop_remaining;
   char last_error[256];
+  // Ring buffer so each pending async error callback gets its own stable slot.
+  char error_ring[8][256];
+  uint32_t error_ring_next;
 #if defined(__ANDROID__)
   ANativeWindow *preview_window;
 #endif
@@ -320,6 +324,7 @@ static void close_device_resources_locked(void) {
   g_uvc_state.previewing = 0;
   g_uvc_state.stopping_preview = 0;
   g_uvc_state.frame_listener = NULL;
+  g_uvc_state.error_listener = NULL;
 }
 
 static int ensure_rgb_frame_locked(size_t required_bytes) {
@@ -446,6 +451,7 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
   g_uvc_state.callbacks_inflight += 1;
   g_uvc_state.callback_count += 1;
   uint32_t callback_count = g_uvc_state.callback_count;
+  uvc_error_listener_t error_listener = NULL;
 
   if (callback_count <= 5 || callback_count % 30 == 0) {
     UVC_LOGT(
@@ -477,8 +483,12 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         frame->height,
         expected_input_bytes,
         frame->data_bytes);
+    uint32_t _ring_idx = g_uvc_state.error_ring_next++ % 8;
+    snprintf(g_uvc_state.error_ring[_ring_idx], 256, "%s", g_uvc_state.last_error);
+    error_listener = g_uvc_state.error_listener;
     finish_callback_locked();
     pthread_mutex_unlock(&g_uvc_state.mutex);
+    if (error_listener) error_listener(g_uvc_state.error_ring[_ring_idx]);
     return;
   }
 
@@ -513,8 +523,12 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
           frame->width,
           frame->height,
           frame->data_bytes);
+      uint32_t _ring_idx = g_uvc_state.error_ring_next++ % 8;
+      snprintf(g_uvc_state.error_ring[_ring_idx], 256, "%s", g_uvc_state.last_error);
+      error_listener = g_uvc_state.error_listener;
       finish_callback_locked();
       pthread_mutex_unlock(&g_uvc_state.mutex);
+      if (error_listener) error_listener(g_uvc_state.error_ring[_ring_idx]);
       return;
     }
   }
@@ -529,8 +543,12 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         frame->width,
         frame->height,
         required_rgb_bytes);
+    uint32_t _ring_idx = g_uvc_state.error_ring_next++ % 8;
+    snprintf(g_uvc_state.error_ring[_ring_idx], 256, "%s", g_uvc_state.last_error);
+    error_listener = g_uvc_state.error_listener;
     finish_callback_locked();
     pthread_mutex_unlock(&g_uvc_state.mutex);
+    if (error_listener) error_listener(g_uvc_state.error_ring[_ring_idx]);
     return;
   }
 
@@ -545,8 +563,12 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         frame->width,
         frame->height,
         uvc_strerror(convert_result));
+    uint32_t _ring_idx = g_uvc_state.error_ring_next++ % 8;
+    snprintf(g_uvc_state.error_ring[_ring_idx], 256, "%s", g_uvc_state.last_error);
+    error_listener = g_uvc_state.error_listener;
     finish_callback_locked();
     pthread_mutex_unlock(&g_uvc_state.mutex);
+    if (error_listener) error_listener(g_uvc_state.error_ring[_ring_idx]);
     return;
   }
 
@@ -555,8 +577,12 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
   uvc_frame_listener_t frame_listener = NULL;
 
   if (!update_latest_rgba_locked()) {
+    uint32_t _ring_idx = g_uvc_state.error_ring_next++ % 8;
+    snprintf(g_uvc_state.error_ring[_ring_idx], 256, "%s", g_uvc_state.last_error);
+    error_listener = g_uvc_state.error_listener;
     finish_callback_locked();
     pthread_mutex_unlock(&g_uvc_state.mutex);
+    if (error_listener) error_listener(g_uvc_state.error_ring[_ring_idx]);
     return;
   }
 #if defined(__ANDROID__)
@@ -1026,6 +1052,25 @@ FFI_PLUGIN_EXPORT void uvc_set_frame_listener(uvc_frame_listener_t listener) {
   pthread_mutex_lock(&g_uvc_state.mutex);
   g_uvc_state.frame_listener = listener;
   pthread_mutex_unlock(&g_uvc_state.mutex);
+}
+
+FFI_PLUGIN_EXPORT void uvc_set_error_listener(uvc_error_listener_t listener) {
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  g_uvc_state.error_listener = listener;
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+}
+
+// Test-only: fires error_listener with a caller-supplied message.
+// Not declared in the public header — accessed only via test-specific bindings.
+FFI_PLUGIN_EXPORT void uvc_trigger_test_error(const char *message) {
+  const char *msg = message != NULL ? message : "test error";
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  set_last_error("%s", msg);
+  uint32_t ring_idx = g_uvc_state.error_ring_next++ % 8;
+  snprintf(g_uvc_state.error_ring[ring_idx], 256, "%s", msg);
+  uvc_error_listener_t listener = g_uvc_state.error_listener;
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+  if (listener) listener(g_uvc_state.error_ring[ring_idx]);
 }
 
 FFI_PLUGIN_EXPORT const char *uvc_last_error(void) {
