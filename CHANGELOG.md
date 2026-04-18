@@ -1,3 +1,9 @@
+## 0.3.1
+
+### Changed
+
+* Standardized the changelog structure and migration notes.
+
 ## 0.3.0
 
 ### Added
@@ -13,8 +19,12 @@
 
 ### Breaking changes
 
-* `startPreview(mode)` now returns `Future<UvcPreviewStartResult>` instead of `int` and verifies frame delivery on startup.
-* If you are migrating from 0.1.x and want the previous behaviour, replace `startPreview(mode)` with `openPreview(mode)`.
+* `startPreview(mode)` now returns `Future<UvcPreviewStartResult>` instead of `int` and verifies frame delivery on startup before returning.
+
+### Migration notes
+
+* Update code that uses the `int` returned by `startPreview(mode)` to use `UvcPreviewStartResult` instead.
+* Use `openPreview(mode)` instead of `startPreview(mode)` if you want the previous non-verifying startup behaviour.
 
 ### Added
 
@@ -29,10 +39,16 @@
 
 ## 0.1.0
 
-### Breaking changes
+### Changed
 
-* USB opening: use `openUsbDevice(deviceId)` instead of managing a file descriptor manually. `openFd(fd)` remains available for advanced use.
-* Preview: Flutter `Texture` is now the standard preview path. `copyLatestFrame()` is recommended for capture or frame inspection.
+* `openUsbDevice(deviceId)` is now the standard USB opening path.
+* `openFd(fd)` remains available if you need to manage the USB file descriptor yourself.
+* Flutter `Texture` is now the standard preview path.
+* `copyLatestFrame()` is recommended for capture or frame inspection.
+
+### Migration notes
+
+* Use `openUsbDevice(deviceId)` instead of `openFd(fd)`. Get the `deviceId` from `listUsbDevices()`.
 
 ### Added
 
