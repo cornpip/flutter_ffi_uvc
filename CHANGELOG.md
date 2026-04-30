@@ -1,3 +1,9 @@
+## 0.3.2
+
+### Added
+
+* `getStreamStats()` / `UvcStreamStats` — exposes cumulative native preview session stats such as input and delivered FPS, drop counts, decode failures, frame gap timing, and first-frame latency.
+
 ## 0.3.1
 
 ### Changed

@@ -33,6 +33,51 @@ void main() {
       });
     });
 
+    test('UvcStreamStats.fromJson parses native stream stats snapshot', () {
+      final UvcStreamStats stats = UvcStreamStats.fromJson(<String, dynamic>{
+        'inputFrameCount': 300,
+        'deliveredFrameCount': 285,
+        'decodeSuccessCount': 285,
+        'decodeFailureCount': 8,
+        'callbackLockDropCount': 4,
+        'warmupDropCount': 3,
+        'staleFrameCount': 1,
+        'undersizedFrameCount': 2,
+        'invalidMjpegCount': 5,
+        'bufferAllocationFailureCount': 0,
+        'previewSurfaceFailureCount': 0,
+        'conversionFailureCount': 1,
+        'inputFps': 30.0,
+        'deliveredFps': 28.5,
+        'avgInterFrameGapMs': 35.1,
+        'p95InterFrameGapMs': 44.8,
+        'maxInterFrameGapMs': 80.2,
+        'firstFrameLatencyMs': 120.0,
+        'elapsedMs': 10000.0,
+      });
+
+      expect(stats.inputFrameCount, 300);
+      expect(stats.deliveredFrameCount, 285);
+      expect(stats.decodeSuccessCount, 285);
+      expect(stats.decodeFailureCount, 8);
+      expect(stats.callbackLockDropCount, 4);
+      expect(stats.warmupDropCount, 3);
+      expect(stats.staleFrameCount, 1);
+      expect(stats.undersizedFrameCount, 2);
+      expect(stats.invalidMjpegCount, 5);
+      expect(stats.bufferAllocationFailureCount, 0);
+      expect(stats.previewSurfaceFailureCount, 0);
+      expect(stats.conversionFailureCount, 1);
+      expect(stats.inputFps, 30.0);
+      expect(stats.deliveredFps, 28.5);
+      expect(stats.avgInterFrameGapMs, 35.1);
+      expect(stats.p95InterFrameGapMs, 44.8);
+      expect(stats.maxInterFrameGapMs, 80.2);
+      expect(stats.firstFrameLatencyMs, 120.0);
+      expect(stats.elapsed, const Duration(seconds: 10));
+      expect(stats.toJson()['elapsedMs'], 10000.0);
+    });
+
     test('UvcCameraControl.fromJson keeps ID and UI metadata stable', () {
       final UvcCameraControl control =
           UvcCameraControl.fromJson(<String, dynamic>{

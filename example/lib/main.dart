@@ -8,6 +8,7 @@ import 'package:flutter_ffi_uvc_example/android_bridge.dart';
 
 import 'app_theme.dart';
 import 'widgets/controls_panel.dart';
+import 'widgets/stream_stats_card.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -41,7 +42,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   static const AndroidBridge _androidBridge = AndroidBridge();
   static const String _logPrefix = '@@@@UVC_EXAMPLE';
   static const Duration _startupProbeTimeout = Duration(seconds: 2);
-  static const Duration _fpsSampleInterval = Duration(milliseconds: 400);
+  static const Duration _fpsSampleInterval = Duration(milliseconds: 1000);
   static const Duration _streamErrorSnackbarCooldown = Duration(seconds: 3);
   UvcCamera get _camera => widget.camera;
 
@@ -71,6 +72,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   double _previewFps = 0;
   int _lastPreviewSequence = 0;
   DateTime? _lastPreviewSequenceSampleAt;
+  UvcStreamStats _streamStats = const UvcStreamStats.zero();
 
   @override
   void initState() {
@@ -382,6 +384,10 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     _lastPreviewSequenceSampleAt = null;
   }
 
+  void _resetStreamStats() {
+    _streamStats = const UvcStreamStats.zero();
+  }
+
   bool get _hasLivePreview => _previewTextureId != null && _camera.isPreviewing;
 
   double? get _previewAspectRatio {
@@ -398,9 +404,11 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     final DateTime now = DateTime.now();
     final DateTime? previousAt = _lastPreviewSequenceSampleAt;
     final int latestSequence = _camera.latestFrameSequence();
+    final UvcStreamStats streamStats = _camera.getStreamStats();
     if (previousAt == null) {
       _lastPreviewSequence = latestSequence;
       _lastPreviewSequenceSampleAt = now;
+      _streamStats = streamStats;
       return;
     }
 
@@ -416,10 +424,12 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     _lastPreviewSequenceSampleAt = now;
     if (!mounted) {
       _previewFps = frameDelta <= 0 ? 0 : frameDelta / seconds;
+      _streamStats = streamStats;
       return;
     }
     setState(() {
       _previewFps = frameDelta <= 0 ? 0 : frameDelta / seconds;
+      _streamStats = streamStats;
     });
   }
 
@@ -470,6 +480,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       }
       _previewStatsTimer?.cancel();
       _resetPreviewFps();
+      _resetStreamStats();
       _lastPreviewSequence = _camera.latestFrameSequence();
       _lastPreviewSequenceSampleAt = DateTime.now();
       _previewStatsTimer = Timer.periodic(
@@ -775,7 +786,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
             for (final UvcCameraControl ctrl in _cameraControls) {
               if (ctrl.id == UvcControlId.focusAbs ||
                   ctrl.id == UvcControlId.focusAuto ||
-                  ctrl.id == UvcControlId.focusSimple) continue;
+                  ctrl.id == UvcControlId.focusSimple) {
+                continue;
+              }
               _camera.setControl(ctrl.id, ctrl.def);
             }
             final List<UvcCameraControl> refreshed = _camera
@@ -1228,6 +1241,10 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                         },
                                 ),
                               ),
+                            if (_selectedDevice != null &&
+                                (_selectedMode != null ||
+                                    _streamStats.elapsed > Duration.zero))
+                              StreamStatsCard(stats: _streamStats),
                             if (_loadingDevices)
                               const Padding(
                                 padding: EdgeInsets.all(24),

@@ -1,8 +1,10 @@
 #include "flutter_ffi_uvc.h"
 
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(__ANDROID__)
 #include <android/native_window.h>
@@ -17,6 +19,32 @@ int g_uvc_native_log_level = UVC_LOG_LEVEL_DEFAULT;
 
 // libuvc only exposes this declaration when libusb version macros are visible.
 uvc_error_t uvc_wrap(int sys_dev, uvc_context_t *context, uvc_device_handle_t **devh);
+
+typedef struct {
+  uint64_t start_monotonic_ns;
+  uint64_t stop_monotonic_ns;
+  uint64_t first_frame_latency_ns;
+  uint64_t delivered_gap_sum_ns;
+  uint64_t delivered_gap_max_ns;
+  uint64_t last_delivered_monotonic_ns;
+  uint32_t last_source_sequence;
+  uint32_t has_last_source_sequence;
+  uint64_t input_frame_count;
+  uint64_t delivered_frame_count;
+  uint64_t decode_success_count;
+  uint64_t decode_failure_count;
+  uint64_t callback_lock_drop_count;
+  uint64_t warmup_drop_count;
+  uint64_t stale_frame_count;
+  uint64_t undersized_frame_count;
+  uint64_t invalid_mjpeg_count;
+  uint64_t buffer_allocation_failure_count;
+  uint64_t preview_surface_failure_count;
+  uint64_t conversion_failure_count;
+  uint64_t gap_ring[256];
+  uint32_t gap_ring_count;
+  uint32_t gap_ring_next;
+} ffi_uvc_stream_stats_t;
 
 typedef struct {
   pthread_mutex_t mutex;
@@ -46,12 +74,34 @@ typedef struct {
   int preview_rotation;  // 0, 90, 180, 270 (clockwise)
   int preview_flip_h;    // mirror left-right
   int preview_flip_v;    // mirror top-bottom
+  ffi_uvc_stream_stats_t stats;
 } ffi_uvc_state_t;
 
 static ffi_uvc_state_t g_uvc_state = {
     .mutex = PTHREAD_MUTEX_INITIALIZER,
     .callback_cond = PTHREAD_COND_INITIALIZER,
 };
+
+static uint64_t monotonic_time_ns(void) {
+  struct timespec ts;
+  if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
+    return 0;
+  }
+
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static int compare_uint64_ascending(const void *lhs, const void *rhs) {
+  const uint64_t a = *(const uint64_t *)lhs;
+  const uint64_t b = *(const uint64_t *)rhs;
+  if (a < b) {
+    return -1;
+  }
+  if (a > b) {
+    return 1;
+  }
+  return 0;
+}
 
 FFI_PLUGIN_EXPORT void uvc_set_log_level(int level) {
   if (level < UVC_LOG_LEVEL_ERROR) {
@@ -160,6 +210,9 @@ static void clear_last_error(void) {
   g_uvc_state.last_error[0] = '\0';
 }
 
+static void reset_stream_stats_locked(void) {
+  memset(&g_uvc_state.stats, 0, sizeof(g_uvc_state.stats));
+}
 
 static void reset_frame_buffer_locked(void) {
   free(g_uvc_state.latest_rgba);
@@ -236,12 +289,14 @@ static int render_latest_rgba_to_preview_surface_locked(void) {
           out_w,
           out_h,
           WINDOW_FORMAT_RGBA_8888) != 0) {
+    g_uvc_state.stats.preview_surface_failure_count += 1;
     set_last_error("Failed to configure preview surface geometry");
     return 0;
   }
 
   ANativeWindow_Buffer window_buffer;
   if (ANativeWindow_lock(g_uvc_state.preview_window, &window_buffer, NULL) != 0) {
+    g_uvc_state.stats.preview_surface_failure_count += 1;
     set_last_error("Failed to lock preview surface");
     return 0;
   }
@@ -277,6 +332,10 @@ static void wait_for_callbacks_locked(void) {
 static int begin_stop_preview_locked(uvc_device_handle_t **devh_to_stop) {
   if (g_uvc_state.previewing && g_uvc_state.devh != NULL) {
     *devh_to_stop = g_uvc_state.devh;
+    if (g_uvc_state.stats.start_monotonic_ns != 0 &&
+        g_uvc_state.stats.stop_monotonic_ns == 0) {
+      g_uvc_state.stats.stop_monotonic_ns = monotonic_time_ns();
+    }
     g_uvc_state.previewing = 0;
     g_uvc_state.stopping_preview = 1;
     g_uvc_state.frame_listener = NULL;
@@ -317,6 +376,10 @@ static void close_device_resources_locked(void) {
   }
 
   UVC_LOGD("UVC_NATIVE", "close_device_resources_locked resetting frame buffers");
+  if (g_uvc_state.stats.start_monotonic_ns != 0 &&
+      g_uvc_state.stats.stop_monotonic_ns == 0) {
+    g_uvc_state.stats.stop_monotonic_ns = monotonic_time_ns();
+  }
   reset_frame_buffer_locked();
   g_uvc_state.previewing = 0;
   g_uvc_state.stopping_preview = 0;
@@ -333,6 +396,7 @@ static int ensure_rgb_frame_locked(size_t required_bytes) {
   if (g_uvc_state.rgb_frame == NULL) {
     g_uvc_state.rgb_frame = uvc_allocate_frame(required_bytes);
     if (g_uvc_state.rgb_frame == NULL) {
+      g_uvc_state.stats.buffer_allocation_failure_count += 1;
       set_last_error("Failed to allocate RGB frame buffer (%zu bytes)", required_bytes);
       return 0;
     }
@@ -342,6 +406,7 @@ static int ensure_rgb_frame_locked(size_t required_bytes) {
   if (g_uvc_state.rgb_frame->data_bytes < required_bytes) {
     uint8_t *new_data = realloc(g_uvc_state.rgb_frame->data, required_bytes);
     if (new_data == NULL) {
+      g_uvc_state.stats.buffer_allocation_failure_count += 1;
       set_last_error("Failed to grow RGB frame buffer to %zu bytes", required_bytes);
       return 0;
     }
@@ -358,6 +423,7 @@ static int update_latest_rgba_locked(void) {
   if (g_uvc_state.latest_rgba_bytes != rgba_bytes) {
     uint8_t *new_buffer = realloc(g_uvc_state.latest_rgba, rgba_bytes);
     if (new_buffer == NULL) {
+      g_uvc_state.stats.buffer_allocation_failure_count += 1;
       set_last_error("Failed to allocate %zu bytes for preview frame", rgba_bytes);
       return 0;
     }
@@ -428,6 +494,7 @@ static int is_valid_mjpeg_frame(const uvc_frame_t *frame) {
 
 static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
   (void)user_ptr;
+  const uint64_t callback_monotonic_ns = monotonic_time_ns();
 
   if (frame == NULL || frame->data == NULL) {
     UVC_LOGW("UVC_NATIVE", "frame callback received null frame");
@@ -435,6 +502,8 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
   }
 
   if (pthread_mutex_trylock(&g_uvc_state.mutex) != 0) {
+    __sync_add_and_fetch(&g_uvc_state.stats.input_frame_count, 1);
+    __sync_add_and_fetch(&g_uvc_state.stats.callback_lock_drop_count, 1);
     UVC_LOGT(
         "UVC_NATIVE",
         "dropping frame callback because previous callback is still processing");
@@ -447,8 +516,16 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
   }
   g_uvc_state.callbacks_inflight += 1;
   g_uvc_state.callback_count += 1;
+  g_uvc_state.stats.input_frame_count += 1;
   uint32_t callback_count = g_uvc_state.callback_count;
   uvc_error_listener_t error_listener = NULL;
+
+  if (g_uvc_state.stats.has_last_source_sequence &&
+      frame->sequence <= g_uvc_state.stats.last_source_sequence) {
+    g_uvc_state.stats.stale_frame_count += 1;
+  }
+  g_uvc_state.stats.last_source_sequence = frame->sequence;
+  g_uvc_state.stats.has_last_source_sequence = 1;
 
   if (callback_count <= 5 || callback_count % 30 == 0) {
     UVC_LOGT(
@@ -464,6 +541,8 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
 
   const size_t expected_input_bytes = expected_frame_bytes_for_format(frame);
   if (expected_input_bytes > 0 && frame->data_bytes < expected_input_bytes) {
+    g_uvc_state.stats.undersized_frame_count += 1;
+    g_uvc_state.stats.decode_failure_count += 1;
     set_last_error(
         "Frame too small for format=%s width=%u height=%u expected>=%zu actual=%zu",
         frame_format_name(frame->frame_format),
@@ -502,12 +581,15 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
           callback_count,
           warmup_drop_remaining - 1,
           frame->data_bytes);
+      g_uvc_state.stats.warmup_drop_count += 1;
       finish_callback_locked();
       pthread_mutex_unlock(&g_uvc_state.mutex);
       return;
     }
 
     if (!is_valid_mjpeg_frame(frame)) {
+      g_uvc_state.stats.invalid_mjpeg_count += 1;
+      g_uvc_state.stats.decode_failure_count += 1;
       set_last_error(
           "Invalid MJPEG frame width=%u height=%u bytes=%zu",
           frame->width,
@@ -551,6 +633,8 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
 
   uvc_error_t convert_result = uvc_any2rgb(frame, g_uvc_state.rgb_frame);
   if (convert_result != UVC_SUCCESS) {
+    g_uvc_state.stats.conversion_failure_count += 1;
+    g_uvc_state.stats.decode_failure_count += 1;
     set_last_error("uvc_any2rgb failed: %s", uvc_strerror(convert_result));
     UVC_LOGE(
         "UVC_NATIVE",
@@ -585,6 +669,29 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
 #if defined(__ANDROID__)
   render_latest_rgba_to_preview_surface_locked();
 #endif
+  if (g_uvc_state.stats.start_monotonic_ns != 0) {
+    if (g_uvc_state.stats.delivered_frame_count == 0) {
+      g_uvc_state.stats.first_frame_latency_ns =
+          callback_monotonic_ns - g_uvc_state.stats.start_monotonic_ns;
+    } else if (g_uvc_state.stats.last_delivered_monotonic_ns != 0 &&
+               callback_monotonic_ns >= g_uvc_state.stats.last_delivered_monotonic_ns) {
+      const uint64_t gap_ns =
+          callback_monotonic_ns - g_uvc_state.stats.last_delivered_monotonic_ns;
+      g_uvc_state.stats.delivered_gap_sum_ns += gap_ns;
+      if (gap_ns > g_uvc_state.stats.delivered_gap_max_ns) {
+        g_uvc_state.stats.delivered_gap_max_ns = gap_ns;
+      }
+      g_uvc_state.stats.gap_ring[g_uvc_state.stats.gap_ring_next] = gap_ns;
+      g_uvc_state.stats.gap_ring_next =
+          (g_uvc_state.stats.gap_ring_next + 1u) % 256u;
+      if (g_uvc_state.stats.gap_ring_count < 256u) {
+        g_uvc_state.stats.gap_ring_count += 1u;
+      }
+    }
+  }
+  g_uvc_state.stats.last_delivered_monotonic_ns = callback_monotonic_ns;
+  g_uvc_state.stats.delivered_frame_count += 1;
+  g_uvc_state.stats.decode_success_count += 1;
   delivered_sequence = g_uvc_state.latest_sequence;
   frame_listener = g_uvc_state.frame_listener;
   clear_last_error();
@@ -766,6 +873,8 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(
     return result;
   }
 
+  reset_stream_stats_locked();
+  g_uvc_state.stats.start_monotonic_ns = monotonic_time_ns();
   g_uvc_state.previewing = 1;
   g_uvc_state.callback_count = 0;
   g_uvc_state.latest_sequence = 0;
@@ -894,6 +1003,106 @@ FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(void) {
   return latest_sequence;
 }
 
+FFI_PLUGIN_EXPORT int uvc_get_stream_stats_json(uint8_t *buffer, int buffer_length) {
+  if (buffer == NULL || buffer_length <= 0) {
+    return 0;
+  }
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  const ffi_uvc_stream_stats_t stats = g_uvc_state.stats;
+  const uint64_t now_ns = monotonic_time_ns();
+  const uint64_t end_ns =
+      stats.stop_monotonic_ns != 0 ? stats.stop_monotonic_ns : now_ns;
+  const uint64_t elapsed_ns =
+      (stats.start_monotonic_ns != 0 && end_ns >= stats.start_monotonic_ns)
+          ? (end_ns - stats.start_monotonic_ns)
+          : 0;
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+
+  double input_fps = 0.0;
+  double delivered_fps = 0.0;
+  double avg_gap_ms = 0.0;
+  double p95_gap_ms = 0.0;
+  double max_gap_ms = (double)stats.delivered_gap_max_ns / 1000000.0;
+  double first_frame_latency_ms =
+      (double)stats.first_frame_latency_ns / 1000000.0;
+
+  if (elapsed_ns > 0) {
+    const double elapsed_seconds = (double)elapsed_ns / 1000000000.0;
+    input_fps = (double)stats.input_frame_count / elapsed_seconds;
+    delivered_fps = (double)stats.delivered_frame_count / elapsed_seconds;
+  }
+
+  if (stats.delivered_frame_count > 1) {
+    avg_gap_ms =
+        ((double)stats.delivered_gap_sum_ns /
+            (double)(stats.delivered_frame_count - 1)) /
+        1000000.0;
+  }
+
+  if (stats.gap_ring_count > 0) {
+    uint64_t sorted_gaps[256];
+    memcpy(sorted_gaps, stats.gap_ring, sizeof(uint64_t) * stats.gap_ring_count);
+    qsort(sorted_gaps, stats.gap_ring_count, sizeof(uint64_t), compare_uint64_ascending);
+    size_t p95_index = (size_t)(((stats.gap_ring_count - 1u) * 95u) / 100u);
+    if (p95_index >= stats.gap_ring_count) {
+      p95_index = stats.gap_ring_count - 1u;
+    }
+    p95_gap_ms = (double)sorted_gaps[p95_index] / 1000000.0;
+  }
+
+  char *json = (char *)buffer;
+  size_t offset = 0;
+  if (!append_json(
+          json,
+          (size_t)buffer_length,
+          &offset,
+          "{"
+          "\"inputFrameCount\":%" PRIu64 ","
+          "\"deliveredFrameCount\":%" PRIu64 ","
+          "\"decodeSuccessCount\":%" PRIu64 ","
+          "\"decodeFailureCount\":%" PRIu64 ","
+          "\"callbackLockDropCount\":%" PRIu64 ","
+          "\"warmupDropCount\":%" PRIu64 ","
+          "\"staleFrameCount\":%" PRIu64 ","
+          "\"undersizedFrameCount\":%" PRIu64 ","
+          "\"invalidMjpegCount\":%" PRIu64 ","
+          "\"bufferAllocationFailureCount\":%" PRIu64 ","
+          "\"previewSurfaceFailureCount\":%" PRIu64 ","
+          "\"conversionFailureCount\":%" PRIu64 ","
+          "\"inputFps\":%.3f,"
+          "\"deliveredFps\":%.3f,"
+          "\"avgInterFrameGapMs\":%.3f,"
+          "\"p95InterFrameGapMs\":%.3f,"
+          "\"maxInterFrameGapMs\":%.3f,"
+          "\"firstFrameLatencyMs\":%.3f,"
+          "\"elapsedMs\":%.3f"
+          "}",
+          stats.input_frame_count,
+          stats.delivered_frame_count,
+          stats.decode_success_count,
+          stats.decode_failure_count,
+          stats.callback_lock_drop_count,
+          stats.warmup_drop_count,
+          stats.stale_frame_count,
+          stats.undersized_frame_count,
+          stats.invalid_mjpeg_count,
+          stats.buffer_allocation_failure_count,
+          stats.preview_surface_failure_count,
+          stats.conversion_failure_count,
+          input_fps,
+          delivered_fps,
+          avg_gap_ms,
+          p95_gap_ms,
+          max_gap_ms,
+          first_frame_latency_ms,
+          (double)elapsed_ns / 1000000.0)) {
+    return 0;
+  }
+
+  return (int)offset;
+}
+
 FFI_PLUGIN_EXPORT void uvc_stop_preview(void) {
   uvc_device_handle_t *devh_to_stop = NULL;
   int should_stop_streaming = 0;
@@ -915,6 +1124,10 @@ FFI_PLUGIN_EXPORT void uvc_stop_preview(void) {
   }
 
   pthread_mutex_lock(&g_uvc_state.mutex);
+  if (g_uvc_state.stats.start_monotonic_ns != 0 &&
+      g_uvc_state.stats.stop_monotonic_ns == 0) {
+    g_uvc_state.stats.stop_monotonic_ns = monotonic_time_ns();
+  }
   finish_stop_preview_locked();
   pthread_mutex_unlock(&g_uvc_state.mutex);
   UVC_LOGD("UVC_NATIVE", "uvc_stop_preview end");

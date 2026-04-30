@@ -254,6 +254,20 @@ class FlutterFfiUvcBindings {
   late final _uvc_set_error_listener = _uvc_set_error_listenerPtr
       .asFunction<void Function(uvc_error_listener_t)>();
 
+  int uvc_get_stream_stats_json(
+    ffi.Pointer<ffi.Uint8> buffer,
+    int buffer_length,
+  ) {
+    return _uvc_get_stream_stats_json(buffer, buffer_length);
+  }
+
+  late final _uvc_get_stream_stats_jsonPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+      >('uvc_get_stream_stats_json');
+  late final _uvc_get_stream_stats_json = _uvc_get_stream_stats_jsonPtr
+      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+
   int uvc_get_supported_modes_json(
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,

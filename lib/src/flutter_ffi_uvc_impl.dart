@@ -394,6 +394,12 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   int latestFrameSequence() => _bindings.uvc_latest_frame_sequence();
 
   @override
+  UvcStreamStats getStreamStats() => _readJsonObject(
+    _bindings.uvc_get_stream_stats_json,
+    UvcStreamStats.fromJson,
+  ) ?? const UvcStreamStats.zero();
+
+  @override
   Future<int> createPreviewTexture() async {
     _ensureAndroid();
     final int? textureId = await _textureChannel.invokeMethod<int>(

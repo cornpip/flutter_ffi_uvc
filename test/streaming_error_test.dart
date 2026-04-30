@@ -66,6 +66,8 @@ class _FakeCamera implements UvcCamera {
   @override
   int latestFrameSequence() => 0;
   @override
+  UvcStreamStats getStreamStats() => const UvcStreamStats.zero();
+  @override
   Future<int> createPreviewTexture() async => -1;
   @override
   Future<void> disposePreviewTexture(int textureId) async {}

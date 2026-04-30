@@ -515,6 +515,161 @@ class UvcStreamError {
   String toString() => 'UvcStreamError($message)';
 }
 
+/// Snapshot of native stream statistics accumulated for the current session.
+///
+/// Stats are reset when [UvcCamera.startPreview] begins a new preview session
+/// and remain available as a snapshot until the next [UvcCamera.startPreview].
+class UvcStreamStats {
+  const UvcStreamStats({
+    required this.inputFrameCount,
+    required this.deliveredFrameCount,
+    required this.decodeSuccessCount,
+    required this.decodeFailureCount,
+    required this.callbackLockDropCount,
+    required this.warmupDropCount,
+    required this.staleFrameCount,
+    required this.undersizedFrameCount,
+    required this.invalidMjpegCount,
+    required this.bufferAllocationFailureCount,
+    required this.previewSurfaceFailureCount,
+    required this.conversionFailureCount,
+    required this.inputFps,
+    required this.deliveredFps,
+    required this.avgInterFrameGapMs,
+    required this.p95InterFrameGapMs,
+    required this.maxInterFrameGapMs,
+    required this.firstFrameLatencyMs,
+    required this.elapsed,
+  });
+
+  const UvcStreamStats.zero()
+    : inputFrameCount = 0,
+      deliveredFrameCount = 0,
+      decodeSuccessCount = 0,
+      decodeFailureCount = 0,
+      callbackLockDropCount = 0,
+      warmupDropCount = 0,
+      staleFrameCount = 0,
+      undersizedFrameCount = 0,
+      invalidMjpegCount = 0,
+      bufferAllocationFailureCount = 0,
+      previewSurfaceFailureCount = 0,
+      conversionFailureCount = 0,
+      inputFps = 0,
+      deliveredFps = 0,
+      avgInterFrameGapMs = 0,
+      p95InterFrameGapMs = 0,
+      maxInterFrameGapMs = 0,
+      firstFrameLatencyMs = 0,
+      elapsed = Duration.zero;
+
+  factory UvcStreamStats.fromJson(Map<String, dynamic> json) {
+    return UvcStreamStats(
+      inputFrameCount: json['inputFrameCount'] as int,
+      deliveredFrameCount: json['deliveredFrameCount'] as int,
+      decodeSuccessCount: json['decodeSuccessCount'] as int,
+      decodeFailureCount: json['decodeFailureCount'] as int,
+      callbackLockDropCount: json['callbackLockDropCount'] as int,
+      warmupDropCount: json['warmupDropCount'] as int,
+      staleFrameCount: json['staleFrameCount'] as int,
+      undersizedFrameCount: json['undersizedFrameCount'] as int,
+      invalidMjpegCount: json['invalidMjpegCount'] as int,
+      bufferAllocationFailureCount:
+          json['bufferAllocationFailureCount'] as int,
+      previewSurfaceFailureCount: json['previewSurfaceFailureCount'] as int,
+      conversionFailureCount: json['conversionFailureCount'] as int,
+      inputFps: (json['inputFps'] as num).toDouble(),
+      deliveredFps: (json['deliveredFps'] as num).toDouble(),
+      avgInterFrameGapMs: (json['avgInterFrameGapMs'] as num).toDouble(),
+      p95InterFrameGapMs: (json['p95InterFrameGapMs'] as num).toDouble(),
+      maxInterFrameGapMs: (json['maxInterFrameGapMs'] as num).toDouble(),
+      firstFrameLatencyMs: (json['firstFrameLatencyMs'] as num).toDouble(),
+      elapsed: Duration(
+        microseconds: ((json['elapsedMs'] as num).toDouble() * 1000).round(),
+      ),
+    );
+  }
+
+  /// Total number of source frames observed by the native frame callback.
+  final int inputFrameCount;
+
+  /// Total number of frames successfully delivered after conversion/update.
+  final int deliveredFrameCount;
+
+  /// Total number of frames that completed native decode/convert successfully.
+  final int decodeSuccessCount;
+
+  /// Total number of frames rejected or failed during decode/convert.
+  final int decodeFailureCount;
+
+  /// Number of callbacks dropped because the previous callback was still busy.
+  final int callbackLockDropCount;
+
+  /// Number of MJPEG warmup frames intentionally dropped at stream start.
+  final int warmupDropCount;
+
+  /// Number of frames treated as stale, such as non-incrementing source sequence.
+  final int staleFrameCount;
+
+  /// Number of frames rejected because the payload was smaller than expected.
+  final int undersizedFrameCount;
+
+  /// Number of MJPEG frames rejected as structurally invalid.
+  final int invalidMjpegCount;
+
+  /// Number of RGB/RGBA buffer allocation or growth failures.
+  final int bufferAllocationFailureCount;
+
+  /// Number of preview surface update failures on the native preview path.
+  final int previewSurfaceFailureCount;
+
+  /// Number of failures reported by native pixel format conversion.
+  final int conversionFailureCount;
+
+  /// Average source frame rate observed at the native callback boundary.
+  final double inputFps;
+
+  /// Average delivered frame rate for successfully processed frames.
+  final double deliveredFps;
+
+  /// Average gap, in milliseconds, between successfully delivered frames.
+  final double avgInterFrameGapMs;
+
+  /// 95th percentile of delivered-frame gaps, in milliseconds.
+  final double p95InterFrameGapMs;
+
+  /// Maximum delivered-frame gap observed in the current session, in milliseconds.
+  final double maxInterFrameGapMs;
+
+  /// Time from preview start to the first successfully delivered frame, in milliseconds.
+  final double firstFrameLatencyMs;
+
+  /// Total elapsed time for the current or last preview session snapshot.
+  final Duration elapsed;
+
+  Map<String, Object?> toJson() => <String, Object?>{
+    'inputFrameCount': inputFrameCount,
+    'deliveredFrameCount': deliveredFrameCount,
+    'decodeSuccessCount': decodeSuccessCount,
+    'decodeFailureCount': decodeFailureCount,
+    'callbackLockDropCount': callbackLockDropCount,
+    'warmupDropCount': warmupDropCount,
+    'staleFrameCount': staleFrameCount,
+    'undersizedFrameCount': undersizedFrameCount,
+    'invalidMjpegCount': invalidMjpegCount,
+    'bufferAllocationFailureCount': bufferAllocationFailureCount,
+    'previewSurfaceFailureCount': previewSurfaceFailureCount,
+    'conversionFailureCount': conversionFailureCount,
+    'inputFps': inputFps,
+    'deliveredFps': deliveredFps,
+    'avgInterFrameGapMs': avgInterFrameGapMs,
+    'p95InterFrameGapMs': p95InterFrameGapMs,
+    'maxInterFrameGapMs': maxInterFrameGapMs,
+    'firstFrameLatencyMs': firstFrameLatencyMs,
+    'elapsedMs': elapsed.inMicroseconds / 1000.0,
+  };
+}
+
 /// Result of starting preview for a given mode.
 ///
 /// [startPreview] starts the preview stream for [mode] and waits until enough
@@ -761,6 +916,11 @@ abstract interface class UvcCamera {
   /// This is a lightweight metadata read intended for FPS counters or liveness
   /// checks without copying full frame bytes into Dart.
   int latestFrameSequence();
+
+  /// Returns the latest cumulative native stream statistics snapshot.
+  ///
+  /// Stats are reset when [startPreview] starts a new preview session.
+  UvcStreamStats getStreamStats();
 
   /// Creates a Flutter texture suitable for native preview rendering.
   ///

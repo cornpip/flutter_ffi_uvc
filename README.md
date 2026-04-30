@@ -2,31 +2,24 @@
 
 **This package is based on `libuvc`.**
 
+It provides Android UVC camera access, including USB device handling,
+preview streaming to a Flutter `Texture`, frame access from Dart, preview
+transforms, stream diagnostics, and UVC camera controls.
+
+<img src="./readme_img/260430.gif" alt="app_image_2" width="300"/>
+
+
 ## Support
 
 - Android only
 - `minSdk 24`
 - Supported ABIs: `arm64-v8a`, `armeabi-v7a`, `x86_64`
 
-## Features
-
-- Lists UVC-capable USB devices and manages USB permission
-- Opens a UVC camera device
-- Lists camera modes reported
-- Starts and stops UVC preview
-- Copies the latest preview frame as RGBA bytes
-- Renders preview directly into a Flutter `Texture` on Android
-- Applies rotation and flip transforms to the live preview output
-- Reports frame pipeline errors proactively via a stream
-- Reads and writes supported UVC controls
-
 ## Installation
 
 ```sh
 flutter pub add flutter_ffi_uvc
 ```
-
-Or add `flutter_ffi_uvc` to the dependencies section of your `pubspec.yaml`.
 
 ## How it works
 
@@ -215,6 +208,14 @@ Dropped callbacks are visible at `UvcLogLevel.trace`:
 dropping frame callback because previous callback is still processing
 ```
 
+#### Stream stats
+
+Use `getStreamStats()` to read cumulative native stats for the current preview
+session, including input/delivered FPS, decode failures, dropped frames,
+inter-frame gap timing, and first-frame latency.
+
+Stats reset when a new `startPreview()` session begins.
+
 #### Streaming error reporting
 
 Frame pipeline errors — decode failures, undersized frames, buffer allocation
@@ -304,9 +305,9 @@ The bundled example app demonstrates:
 - Preview rendering via Flutter `Texture`
 - Basic camera control interactions
 
-## Primary API
+## Key Classes
 
-Most users will interact with these primary API entry points:
+Most users will interact with these classes:
 
 - `UvcCamera`
 - `UvcStreamError`
@@ -320,14 +321,11 @@ Most users will interact with these primary API entry points:
 - `UvcControlId`
 - `UvcControlKind`
 
-Debugging APIs are also available when needed:
+Useful debugging classes:
 
+- `UvcStreamStats`
 - `UvcLogLevel`
 - `UvcBmControlInfo`
-- `debugBmControls()`
-
-Do not depend on the generated bindings directly unless you are working on the
-package internals.
 
 ## RoadMap
 
