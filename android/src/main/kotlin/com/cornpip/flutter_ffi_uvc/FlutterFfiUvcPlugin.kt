@@ -7,10 +7,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.hardware.usb.UsbConstants
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbDeviceConnection
 import android.hardware.usb.UsbManager
 import android.os.Build
+import android.util.Log
 import android.view.Surface
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -30,6 +32,7 @@ class FlutterFfiUvcPlugin :
 
     companion object {
         private const val CAMERA_PERMISSION_REQUEST_CODE = 9001
+        private const val TAG = "flutter_ffi_uvc"
 
         init {
             System.loadLibrary("flutter_ffi_uvc")
@@ -307,6 +310,7 @@ class FlutterFfiUvcPlugin :
             result.error("open_failed", "Unable to open USB device", null)
             return
         }
+        logUsbDeviceLayout(device, connection)
         currentDevice = device
         currentConnection = connection
         result.success(mapOf("fileDescriptor" to connection.fileDescriptor))
@@ -330,6 +334,54 @@ class FlutterFfiUvcPlugin :
             if (device.getInterface(index).interfaceClass == 14) return true
         }
         return false
+    }
+
+    private fun logUsbDeviceLayout(device: UsbDevice, connection: UsbDeviceConnection) {
+        Log.d(
+            TAG,
+            "@@@@UVC_ANDROID/D openDevice id=${device.deviceId} name=${device.deviceName} " +
+                "vendor=${device.vendorId} product=${device.productId} " +
+                "fd=${connection.fileDescriptor} configs=${device.configurationCount} " +
+                "interfaces=${device.interfaceCount}",
+        )
+        for (configIndex in 0 until device.configurationCount) {
+            val config = device.getConfiguration(configIndex)
+            Log.d(
+                TAG,
+                "@@@@UVC_ANDROID/D config index=$configIndex id=${config.id} " +
+                    "name=${config.name ?: ""} interfaces=${config.interfaceCount}",
+            )
+            for (interfaceIndex in 0 until config.interfaceCount) {
+                val usbInterface = config.getInterface(interfaceIndex)
+                Log.d(
+                    TAG,
+                    "@@@@UVC_ANDROID/D interface config=$configIndex index=$interfaceIndex " +
+                        "id=${usbInterface.id} alt=${usbInterface.alternateSetting} " +
+                        "class=${usbInterface.interfaceClass} subclass=${usbInterface.interfaceSubclass} " +
+                        "protocol=${usbInterface.interfaceProtocol} endpoints=${usbInterface.endpointCount}",
+                )
+                for (endpointIndex in 0 until usbInterface.endpointCount) {
+                    val endpoint = usbInterface.getEndpoint(endpointIndex)
+                    Log.d(
+                        TAG,
+                        "@@@@UVC_ANDROID/D endpoint interface=${usbInterface.id} " +
+                            "alt=${usbInterface.alternateSetting} index=$endpointIndex " +
+                            "address=0x${endpoint.address.toString(16)} " +
+                            "type=${usbEndpointTypeName(endpoint.type)} " +
+                            "direction=${if (endpoint.direction == UsbConstants.USB_DIR_IN) "IN" else "OUT"} " +
+                            "maxPacket=${endpoint.maxPacketSize} interval=${endpoint.interval}",
+                    )
+                }
+            }
+        }
+    }
+
+    private fun usbEndpointTypeName(type: Int): String = when (type) {
+        UsbConstants.USB_ENDPOINT_XFER_CONTROL -> "CONTROL"
+        UsbConstants.USB_ENDPOINT_XFER_ISOC -> "ISOC"
+        UsbConstants.USB_ENDPOINT_XFER_BULK -> "BULK"
+        UsbConstants.USB_ENDPOINT_XFER_INT -> "INT"
+        else -> type.toString()
     }
 
     // ── JNI ──────────────────────────────────────────────────────────────────
