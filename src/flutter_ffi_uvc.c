@@ -470,26 +470,15 @@ static size_t expected_frame_bytes_for_format(const uvc_frame_t *frame) {
   }
 }
 
-static int is_valid_mjpeg_frame(const uvc_frame_t *frame) {
+static int has_mjpeg_soi_marker(const uvc_frame_t *frame) {
   const uint8_t *data;
-  size_t index;
 
   if (frame == NULL || frame->data == NULL || frame->data_bytes < 4) {
     return 0;
   }
 
   data = (const uint8_t *)frame->data;
-  if (data[0] != 0xFF || data[1] != 0xD8) {
-    return 0;
-  }
-
-  for (index = frame->data_bytes; index >= 2; --index) {
-    if (data[index - 2] == 0xFF && data[index - 1] == 0xD9) {
-      return 1;
-    }
-  }
-
-  return 0;
+  return data[0] == 0xFF && data[1] == 0xD8;
 }
 
 static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
@@ -587,17 +576,17 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
       return;
     }
 
-    if (!is_valid_mjpeg_frame(frame)) {
+    if (!has_mjpeg_soi_marker(frame)) {
       g_uvc_state.stats.invalid_mjpeg_count += 1;
       g_uvc_state.stats.decode_failure_count += 1;
       set_last_error(
-          "Invalid MJPEG frame width=%u height=%u bytes=%zu",
+          "Invalid MJPEG frame missing SOI marker width=%u height=%u bytes=%zu",
           frame->width,
           frame->height,
           frame->data_bytes);
       UVC_LOGW(
           "UVC_NATIVE",
-          "rejecting invalid MJPEG frame callback=%u width=%u height=%u bytes=%zu",
+          "rejecting MJPEG frame missing SOI marker callback=%u width=%u height=%u bytes=%zu",
           callback_count,
           frame->width,
           frame->height,

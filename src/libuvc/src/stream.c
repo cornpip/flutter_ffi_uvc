@@ -39,6 +39,10 @@
 #include "libuvc/libuvc.h"
 #include "libuvc/libuvc_internal.h"
 #include "libuvc/uvc_log.h"
+
+#if defined(__ANDROID__)
+#define LIBUVC_MAX_ISO_TRANSFER_SIZE 49152u
+#endif
 #include "errno.h"
 
 #ifdef _MSC_VER
@@ -1094,7 +1098,7 @@ uvc_error_t uvc_stream_start(
   /* USB interface we'll be using */
   const struct libusb_interface *interface;
   int interface_id;
-  char isochronous;
+  int isochronous;
   uvc_frame_desc_t *frame_desc;
   uvc_format_desc_t *format_desc;
   uvc_stream_ctrl_t *ctrl;
@@ -1103,6 +1107,10 @@ uvc_error_t uvc_stream_start(
   size_t total_transfer_size = 0;
   struct libusb_transfer *transfer;
   int transfer_id;
+  int submitted_transfer_count = 0;
+  int iso_retry_attempted = 0;
+  size_t iso_packets_per_transfer = 0;
+  size_t iso_endpoint_bytes_per_packet = 0;
 
   ctrl = &strmh->cur_ctrl;
 
@@ -1136,9 +1144,40 @@ uvc_error_t uvc_stream_start(
   interface_id = strmh->stream_if->bInterfaceNumber;
   interface = &strmh->devh->info->config->interface[interface_id];
 
-  /* A VS interface uses isochronous transfers iff it has multiple altsettings.
-   * (UVC 1.5: 2.4.3. VideoStreaming Interface) */
+  /* A VS interface commonly uses isochronous transfers when it has multiple
+   * altsettings, but some Android UVC cameras expose multiple altsettings while
+   * the advertised streaming endpoint is bulk. Prefer the endpoint descriptor
+   * transfer type when it is available. */
   isochronous = interface->num_altsetting > 1;
+  for (int alt_idx = 0; alt_idx < interface->num_altsetting; alt_idx++) {
+    const struct libusb_interface_descriptor *altsetting =
+        interface->altsetting + alt_idx;
+    for (int ep_idx = 0; ep_idx < altsetting->bNumEndpoints; ep_idx++) {
+      const struct libusb_endpoint_descriptor *endpoint =
+          altsetting->endpoint + ep_idx;
+      if (endpoint->bEndpointAddress != format_desc->parent->bEndpointAddress) {
+        continue;
+      }
+
+      const int transfer_type =
+          endpoint->bmAttributes & LIBUSB_TRANSFER_TYPE_MASK;
+      if (transfer_type == LIBUSB_TRANSFER_TYPE_BULK) {
+        isochronous = 0;
+      } else if (transfer_type == LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
+        isochronous = 1;
+      }
+      UVC_LOGD(
+          "UVC_STREAM",
+          "stream endpoint=0x%02x type=%d interface=%u alt=%u selectedTransfer=%s",
+          endpoint->bEndpointAddress,
+          transfer_type,
+          altsetting->bInterfaceNumber,
+          altsetting->bAlternateSetting,
+          isochronous ? "isochronous" : "bulk");
+      alt_idx = interface->num_altsetting;
+      break;
+    }
+  }
 
   if (isochronous) {
     /* For isochronous streaming, we choose an appropriate altsetting for the endpoint
@@ -1212,6 +1251,24 @@ uvc_error_t uvc_stream_start(
         /* But keep a reasonable limit: Otherwise we start dropping data */
         if (packets_per_transfer > 32)
           packets_per_transfer = 32;
+#if defined(__ANDROID__)
+        if (endpoint_bytes_per_packet > 0 &&
+            packets_per_transfer * endpoint_bytes_per_packet >
+                LIBUVC_MAX_ISO_TRANSFER_SIZE) {
+          size_t android_packets_per_transfer =
+              LIBUVC_MAX_ISO_TRANSFER_SIZE / endpoint_bytes_per_packet;
+          if (android_packets_per_transfer == 0) {
+            android_packets_per_transfer = 1;
+          }
+          UVC_LOGI(
+              "UVC_STREAM",
+              "limiting iso packets_per_transfer for Android from %zu to %zu packetBytes=%zu",
+              packets_per_transfer,
+              android_packets_per_transfer,
+              endpoint_bytes_per_packet);
+          packets_per_transfer = android_packets_per_transfer;
+        }
+#endif
         
         total_transfer_size = packets_per_transfer * endpoint_bytes_per_packet;
         if (packets_per_transfer == 0 || total_transfer_size == 0) {
@@ -1224,6 +1281,8 @@ uvc_error_t uvc_stream_start(
               ctrl->dwMaxVideoFrameSize);
           continue;
         }
+        iso_packets_per_transfer = packets_per_transfer;
+        iso_endpoint_bytes_per_packet = endpoint_bytes_per_packet;
         break;
       }
     }
@@ -1242,7 +1301,7 @@ uvc_error_t uvc_stream_start(
       UVC_DEBUG("libusb_set_interface_alt_setting failed");
       goto fail;
     }
-    UVC_LOGI(
+    UVC_LOGD(
         "UVC_STREAM",
         "selected iso altsetting interface=%u alt=%u endpoint=0x%02x packets_per_transfer=%u total_transfer_size=%u",
         altsetting->bInterfaceNumber,
@@ -1285,16 +1344,8 @@ uvc_error_t uvc_stream_start(
     }
   }
 
-  strmh->user_cb = cb;
-  strmh->user_ptr = user_ptr;
-
-  /* If the user wants it, set up a thread that calls the user's function
-   * with the contents of each frame.
-   */
-  if (cb) {
-    pthread_create(&strmh->cb_thread, NULL, _uvc_user_caller, (void*) strmh);
-  }
-
+submit_transfers:
+  submitted_transfer_count = 0;
   for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS;
       transfer_id++) {
     ret = libusb_submit_transfer(strmh->transfers[transfer_id]);
@@ -1303,6 +1354,7 @@ uvc_error_t uvc_stream_start(
       UVC_LOGE("UVC_STREAM", "libusb_submit_transfer failed transfer_id=%d ret=%d", transfer_id, ret);
       break;
     }
+    submitted_transfer_count += 1;
     UVC_LOGD("UVC_STREAM", "libusb_submit_transfer ok transfer_id=%d", transfer_id);
   }
 
@@ -1312,7 +1364,56 @@ uvc_error_t uvc_stream_start(
       libusb_free_transfer ( strmh->transfers[transfer_id]);
       strmh->transfers[transfer_id] = 0;
     }
+#if defined(__ANDROID__)
+    if (submitted_transfer_count == 0 &&
+        isochronous &&
+        !iso_retry_attempted &&
+        iso_packets_per_transfer > 1 &&
+        iso_endpoint_bytes_per_packet > 0) {
+      iso_retry_attempted = 1;
+      iso_packets_per_transfer /= 2;
+      if (iso_packets_per_transfer == 0) {
+        iso_packets_per_transfer = 1;
+      }
+      total_transfer_size =
+          iso_packets_per_transfer * iso_endpoint_bytes_per_packet;
+      UVC_LOGW(
+          "UVC_STREAM",
+          "retrying iso submit with smaller Android transfer packets_per_transfer=%zu total_transfer_size=%zu",
+          iso_packets_per_transfer,
+          total_transfer_size);
+
+      for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
+        transfer = libusb_alloc_transfer(iso_packets_per_transfer);
+        strmh->transfers[transfer_id] = transfer;
+        strmh->transfer_bufs[transfer_id] = malloc(total_transfer_size);
+
+        libusb_fill_iso_transfer(
+          transfer, strmh->devh->usb_devh, format_desc->parent->bEndpointAddress,
+          strmh->transfer_bufs[transfer_id],
+          total_transfer_size, iso_packets_per_transfer, _uvc_stream_callback, (void*) strmh, 5000);
+
+        libusb_set_iso_packet_lengths(transfer, iso_endpoint_bytes_per_packet);
+      }
+      goto submit_transfers;
+    }
+#endif
+    if (submitted_transfer_count == 0) {
+      strmh->running = 0;
+      UVC_EXIT(ret);
+      return ret;
+    }
     ret = UVC_SUCCESS;
+  }
+
+  strmh->user_cb = cb;
+  strmh->user_ptr = user_ptr;
+
+  /* If the user wants it, set up a thread that calls the user's function
+   * with the contents of each frame.
+   */
+  if (cb) {
+    pthread_create(&strmh->cb_thread, NULL, _uvc_user_caller, (void*) strmh);
   }
 
   UVC_EXIT(ret);

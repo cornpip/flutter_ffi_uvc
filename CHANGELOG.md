@@ -1,3 +1,12 @@
+## 0.4.0
+
+### Fixed
+
+* Improved Android isochronous UVC streaming compatibility by limiting large ISO transfers and retrying with a smaller transfer size when initial submit fails.
+* Fixed UVC stream transfer selection to use the endpoint descriptor transfer type instead of assuming interfaces with multiple altsettings are always isochronous.
+* Fixed a libuvc streaming startup path that could report success even when no USB transfers were submitted.
+* Relaxed MJPEG pre-validation so decodable frames are not rejected before libjpeg-turbo can process them.
+
 ## 0.3.2
 
 ### Added

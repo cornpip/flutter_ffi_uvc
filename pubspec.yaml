@@ -1,6 +1,6 @@
 name: flutter_ffi_uvc
-description: Flutter UVC camera plugin using FFI (libuvc) — live preview, frame access, and device control
-version: 0.3.2
+description: UVC camera plugin based on libuvc, with live preview, frame access, and device controls.
+version: 0.4.0
 repository: https://github.com/cornpip/flutter_ffi_uvc
 
 environment:
@@ -12,6 +12,7 @@ topics:
   - usb
   - uvc
   - ffi
+  - libuvc
 
 dependencies:
   flutter:
