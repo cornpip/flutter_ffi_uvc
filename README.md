@@ -8,12 +8,11 @@ transforms, stream diagnostics, and UVC camera controls.
 
 <img src="./readme_img/260430.gif" alt="app_image_2" width="300"/>
 
+## Supported Platforms
 
-## Support
-
-- Android only
-- `minSdk 24`
-- Supported ABIs: `arm64-v8a`, `armeabi-v7a`, `x86_64`
+- Android(arm64-v8a, x86_64, armeabi-v7a)
+- Dart SDK: `>=3.8.1 <4.0.0`
+- Android minSdk: `24`
 
 ## Installation
 

@@ -1,3 +1,11 @@
+## 0.4.1
+
+### Changed
+
+* Lowered minimum Dart SDK requirement to `^3.8.1`.
+* Lowered plugin Android `compileSdk` from 36 to 35 and pinned `ndkVersion` to `26.3.11579264` to align with Flutter 3.32.x defaults.
+* Example app: set `minSdk = 24` explicitly to satisfy the plugin's minimum Android API requirement.
+
 ## 0.4.0
 
 ### Fixed
