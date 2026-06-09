@@ -1,3 +1,9 @@
+## 0.5.0
+
+### Fixed
+
+* Rebuilt bundled third-party native libraries with 16 KB page alignment.
+
 ## 0.4.1
 
 ### Changed
