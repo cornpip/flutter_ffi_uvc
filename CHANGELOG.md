@@ -1,3 +1,12 @@
+## 0.6.0
+
+### Added
+
+* `deviceEvents` (`Stream<UvcDeviceEvent>`) — USB attach/detach events for UVC-capable devices, so apps can react when a camera is plugged in or unplugged mid-session. Android only.
+* `startPreviewAuto()` / `UvcAutoPreviewResult` — tries candidate modes in order (MJPEG-first, resolution/fps descending by default) and keeps the first mode that streams and verifies successfully. Per-mode verification results are returned in `UvcAutoPreviewResult.attempts`.
+* Stall detection: `enableStallDetection(UvcStallDetectionConfig)`, `disableStallDetection()`, and `stallEvents` (`Stream<UvcStallEvent>`). Detects when frame delivery stops while previewing and can optionally stop and restart the preview automatically with the most recent `startPreview` parameters.
+* Typed errors: `UvcErrorCode` (mirrors libuvc `uvc_error_t`) and `UvcException`. `UvcPreviewStartResult` gains `nativeErrorCode` and an `errorCode` getter for stream startup failures.
+
 ## 0.5.0
 
 ### Fixed

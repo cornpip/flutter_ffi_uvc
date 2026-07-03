@@ -49,6 +49,24 @@ class _FakeCamera implements UvcCamera {
     elapsed: Duration.zero,
   );
   @override
+  Future<UvcAutoPreviewResult> startPreviewAuto({
+    List<UvcCameraMode>? candidates,
+    UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
+    int consecutiveValidFrames = 3,
+    Duration perModeTimeout = const Duration(seconds: 2),
+    int maxCandidates = 8,
+  }) async => const UvcAutoPreviewResult(attempts: []);
+  @override
+  Stream<UvcDeviceEvent> get deviceEvents => const Stream.empty();
+  @override
+  Stream<UvcStallEvent> get stallEvents => const Stream.empty();
+  @override
+  void enableStallDetection([
+    UvcStallDetectionConfig config = const UvcStallDetectionConfig(),
+  ]) {}
+  @override
+  void disableStallDetection() {}
+  @override
   void stopPreview() {}
   @override
   void closeFd() {}

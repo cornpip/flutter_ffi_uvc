@@ -83,6 +83,27 @@ To close and release the USB connection:
 await uvcCamera.closeUsbDevice();
 ```
 
+#### Attach / detach events
+
+`deviceEvents` reports when a UVC-capable device is plugged in or unplugged:
+
+```dart
+StreamSubscription<UvcDeviceEvent>? _deviceEventSub;
+
+_deviceEventSub = uvcCamera.deviceEvents.listen((UvcDeviceEvent event) {
+  if (event.type == UvcDeviceEventType.detached) {
+    // If this was the opened device, the native session lost its transport.
+    uvcCamera.stopPreview();
+    uvcCamera.closeUsbDevice();
+  } else {
+    // A camera was plugged in — refresh the device list, offer to open it, …
+  }
+});
+```
+
+This is a broadcast stream; the underlying Android receiver is only registered
+while at least one listener is subscribed. Cancel the subscription on dispose.
+
 #### Alternative: opening by file descriptor
 
 If your app manages USB access independently, pass the file descriptor directly to
@@ -132,6 +153,35 @@ On teardown:
 uvcCamera.stopPreview();
 await uvcCamera.disposePreviewTexture(textureId);
 ```
+
+#### Automatic mode selection
+
+Descriptor-reported modes are candidates, not guaranteed-safe defaults — a mode
+may negotiate but never deliver decodable frames. `startPreviewAuto()` encodes
+the recommended fallback loop: it tries candidate modes in order and keeps the
+first one that streams and verifies successfully.
+
+```dart
+final UvcAutoPreviewResult result = await uvcCamera.startPreviewAuto();
+if (result.success) {
+  final UvcCameraMode mode = result.mode!; // now streaming in this mode
+  await uvcCamera.attachPreviewTexture(
+    textureId,
+    width: mode.width,
+    height: mode.height,
+  );
+} else {
+  // Inspect per-mode failures:
+  for (final UvcPreviewStartResult attempt in result.attempts) {
+    print('${attempt.mode.label}: ${attempt.lastError}');
+  }
+}
+```
+
+By default candidates come from `supportedModes()` ordered MJPEG-first
+(compressed modes are far less likely to exceed USB bandwidth), then by
+resolution and frame rate descending, capped at `maxCandidates` (default 8).
+Pass `candidates` to control the order yourself.
 
 #### Preview transform
 
@@ -245,6 +295,66 @@ void dispose() {
 `streamErrors` is a broadcast stream, so multiple subscribers are allowed.  
 Errors are only emitted while a native error listener is active.
 
+#### Stall detection and recovery
+
+Some devices keep the stream "running" while silently delivering no frames.
+Enable the watchdog to detect this and optionally recover:
+
+```dart
+uvcCamera.enableStallDetection(
+  const UvcStallDetectionConfig(
+    stallTimeout: Duration(seconds: 2),
+    autoRestart: true,
+    maxRestartAttempts: 3,
+  ),
+);
+
+uvcCamera.stallEvents.listen((UvcStallEvent event) {
+  switch (event.type) {
+    case UvcStallEventType.stalled:
+      // No frames for `event.silence` while previewing.
+      break;
+    case UvcStallEventType.restartSucceeded:
+      // Preview is running again (attempt `event.restartAttempt`).
+      break;
+    case UvcStallEventType.restartFailed:
+      // `event.restartResult` holds the failed verification details.
+      break;
+  }
+});
+```
+
+A stall is declared when the delivered frame sequence stops advancing for
+`stallTimeout` while `isPreviewing` is true, and is reported once per stall
+episode. With `autoRestart`, the preview is stopped and restarted with the
+parameters of the most recent `startPreview` call; the attempt counter resets
+once frames flow again. Detection stays enabled across preview sessions until
+`disableStallDetection()`.
+
+#### Typed error codes
+
+APIs that return raw `int` codes pass through libuvc `uvc_error_t` values.
+`UvcErrorCode` gives them names, and `UvcException` is available for
+throw-style handling in app code:
+
+```dart
+final UvcPreviewStartResult result = await uvcCamera.startPreview(mode);
+if (!result.success) {
+  if (result.errorCode == UvcErrorCode.noDevice) {
+    // Device disconnected or never opened.
+  }
+  // Or wrap it:
+  throw UvcException.fromNativeCode(
+    result.nativeErrorCode,
+    message: result.lastError ?? '',
+  );
+}
+```
+
+`UvcPreviewStartResult.nativeErrorCode` is non-zero only when stream startup
+itself failed; verification failures keep it at 0 — inspect `lastError` and
+the frame counters instead.
+
 ### Controls
 
 `supportedControls()` returns the controls exposed by the currently opened
@@ -311,11 +421,15 @@ Most users will interact with these classes:
 - `UvcCamera`
 - `UvcStreamError`
 - `UvcUsbDevice`
+- `UvcDeviceEvent` / `UvcDeviceEventType`
 - `UvcCameraMode`
 - `UvcPreviewFrame`
 - `UvcPreviewStartResult`
+- `UvcAutoPreviewResult`
 - `UvcPreviewPolicy`
 - `UvcPreviewTransform`
+- `UvcStallDetectionConfig` / `UvcStallEvent`
+- `UvcErrorCode` / `UvcException`
 - `UvcCameraControl`
 - `UvcControlId`
 - `UvcControlKind`

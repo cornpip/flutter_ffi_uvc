@@ -194,6 +194,104 @@ final class UvcControlId {
   String toString() => 'UvcControlId($debugName)';
 }
 
+/// Typed error codes reported by the native UVC layer.
+///
+/// These mirror the `uvc_error_t` codes from libuvc. APIs that return a raw
+/// `int` error code can be mapped through [fromNativeValue].
+enum UvcErrorCode {
+  /// Input/output error.
+  io(-1),
+
+  /// Invalid parameter.
+  invalidParam(-2),
+
+  /// Access denied.
+  access(-3),
+
+  /// No such device — including a device that was disconnected mid-session.
+  noDevice(-4),
+
+  /// Entity not found.
+  notFound(-5),
+
+  /// Resource busy.
+  busy(-6),
+
+  /// Operation timed out.
+  timeout(-7),
+
+  /// Overflow.
+  overflow(-8),
+
+  /// Pipe error.
+  pipe(-9),
+
+  /// System call interrupted.
+  interrupted(-10),
+
+  /// Insufficient memory.
+  noMem(-11),
+
+  /// Operation not supported.
+  notSupported(-12),
+
+  /// Device is not UVC-compliant.
+  invalidDevice(-50),
+
+  /// The requested mode is not supported.
+  invalidMode(-51),
+
+  /// Resource has a callback (can't use polling and async).
+  callbackExists(-52),
+
+  /// Undefined or unknown error.
+  other(-99);
+
+  const UvcErrorCode(this.nativeValue);
+
+  final int nativeValue;
+
+  /// Maps a raw native return code to a typed error code.
+  ///
+  /// Returns null for `0` (success). Unknown non-zero codes map to [other].
+  static UvcErrorCode? fromNativeValue(int nativeValue) {
+    if (nativeValue == 0) return null;
+    for (final UvcErrorCode code in UvcErrorCode.values) {
+      if (code.nativeValue == nativeValue) return code;
+    }
+    return UvcErrorCode.other;
+  }
+}
+
+/// Exception carrying a typed UVC error code alongside the native code and
+/// the last native error message, for APIs and helpers that throw instead of
+/// returning raw integer codes.
+class UvcException implements Exception {
+  const UvcException({
+    required this.code,
+    this.nativeCode = 0,
+    this.message = '',
+  });
+
+  /// Creates an exception from a raw native return code.
+  factory UvcException.fromNativeCode(int nativeCode, {String message = ''}) {
+    return UvcException(
+      code: UvcErrorCode.fromNativeValue(nativeCode) ?? UvcErrorCode.other,
+      nativeCode: nativeCode,
+      message: message,
+    );
+  }
+
+  final UvcErrorCode code;
+  final int nativeCode;
+  final String message;
+
+  @override
+  String toString() =>
+      'UvcException(${code.name}, nativeCode: $nativeCode'
+      '${message.isEmpty ? '' : ', $message'})';
+}
+
 /// UI/interaction kind for a control value.
 enum UvcControlKind {
   integer,
@@ -684,6 +782,7 @@ class UvcPreviewStartResult {
     required this.errorCount,
     required this.elapsed,
     this.lastError,
+    this.nativeErrorCode = 0,
   });
 
   final UvcCameraMode mode;
@@ -693,6 +792,15 @@ class UvcPreviewStartResult {
   final int errorCount;
   final Duration elapsed;
   final String? lastError;
+
+  /// Raw native return code when stream startup itself failed, otherwise 0.
+  ///
+  /// Verification failures (stream started but frames never became valid)
+  /// keep this at 0; inspect [lastError] and the frame counters instead.
+  final int nativeErrorCode;
+
+  /// Typed error code for [nativeErrorCode], or null when it is 0.
+  UvcErrorCode? get errorCode => UvcErrorCode.fromNativeValue(nativeErrorCode);
 }
 
 /// Policy controlling how [UvcCamera.startPreview] verifies frame delivery.
@@ -814,6 +922,133 @@ class UvcUsbDevice {
   }
 }
 
+/// Kind of USB device lifecycle event reported by [UvcCamera.deviceEvents].
+enum UvcDeviceEventType {
+  /// A UVC-capable USB device was plugged in.
+  attached,
+
+  /// A UVC-capable USB device was unplugged.
+  detached,
+}
+
+/// A USB attach/detach event for a UVC-capable device. Android only.
+///
+/// Detach events for the currently opened device mean the native session has
+/// lost its transport; call [UvcCamera.closeUsbDevice] (or [UvcCamera.closeFd])
+/// and re-open when the device returns.
+class UvcDeviceEvent {
+  const UvcDeviceEvent({required this.type, required this.device});
+
+  factory UvcDeviceEvent.fromMap(Map<Object?, Object?> map) {
+    return UvcDeviceEvent(
+      type: map['event'] == 'attached'
+          ? UvcDeviceEventType.attached
+          : UvcDeviceEventType.detached,
+      device: UvcUsbDevice.fromMap(
+        (map['device'] as Map<Object?, Object?>?) ?? <Object?, Object?>{},
+      ),
+    );
+  }
+
+  final UvcDeviceEventType type;
+  final UvcUsbDevice device;
+
+  @override
+  String toString() => 'UvcDeviceEvent(${type.name}, ${device.displayName})';
+}
+
+/// Configuration for preview stall detection.
+///
+/// A stall is declared when the delivered frame sequence stops advancing for
+/// longer than [stallTimeout] while the preview stream is running.
+class UvcStallDetectionConfig {
+  const UvcStallDetectionConfig({
+    this.stallTimeout = const Duration(seconds: 2),
+    this.checkInterval = const Duration(milliseconds: 500),
+    this.autoRestart = false,
+    this.maxRestartAttempts = 3,
+  });
+
+  /// How long the frame sequence may stay unchanged before a stall is declared.
+  final Duration stallTimeout;
+
+  /// How often the watchdog samples the native frame sequence.
+  final Duration checkInterval;
+
+  /// Whether to automatically stop and restart the preview after a stall.
+  ///
+  /// The restart reuses the mode and verification parameters of the most
+  /// recent [UvcCamera.startPreview] call.
+  final bool autoRestart;
+
+  /// Maximum consecutive automatic restart attempts per stall episode.
+  ///
+  /// The attempt counter resets once frames are delivered again.
+  final int maxRestartAttempts;
+}
+
+/// Phase of a stall episode reported on [UvcCamera.stallEvents].
+enum UvcStallEventType {
+  /// No new frames were delivered for at least the configured stall timeout.
+  stalled,
+
+  /// An automatic restart attempt brought frame delivery back.
+  restartSucceeded,
+
+  /// An automatic restart attempt failed.
+  restartFailed,
+}
+
+/// A stall detection or recovery event for the shared preview stream.
+class UvcStallEvent {
+  const UvcStallEvent({
+    required this.type,
+    required this.mode,
+    required this.silence,
+    this.restartAttempt = 0,
+    this.restartResult,
+  });
+
+  final UvcStallEventType type;
+
+  /// The mode the preview was running in when the stall was detected.
+  final UvcCameraMode mode;
+
+  /// Time since the last delivered frame when the event was emitted.
+  final Duration silence;
+
+  /// 1-based restart attempt number; 0 for [UvcStallEventType.stalled].
+  final int restartAttempt;
+
+  /// Verification result of the restart attempt, if one was made.
+  final UvcPreviewStartResult? restartResult;
+
+  @override
+  String toString() =>
+      'UvcStallEvent(${type.name}, mode: ${mode.label}, '
+      'silence: ${silence.inMilliseconds}ms'
+      '${restartAttempt > 0 ? ', attempt: $restartAttempt' : ''})';
+}
+
+/// Result of [UvcCamera.startPreviewAuto].
+///
+/// [attempts] holds the per-mode verification results in the order they were
+/// tried, ending with the successful attempt when [success] is true.
+class UvcAutoPreviewResult {
+  const UvcAutoPreviewResult({required this.attempts});
+
+  final List<UvcPreviewStartResult> attempts;
+
+  /// Whether some candidate mode started and verified successfully.
+  bool get success => attempts.isNotEmpty && attempts.last.success;
+
+  /// The verification result of the mode that is now streaming, if any.
+  UvcPreviewStartResult? get selected => success ? attempts.last : null;
+
+  /// The mode that is now streaming, if any.
+  UvcCameraMode? get mode => selected?.mode;
+}
+
 /// High-level camera API for the shared native UVC session.
 ///
 /// This package exposes a single shared camera service through [uvcCamera].
@@ -833,6 +1068,14 @@ abstract interface class UvcCamera {
 
   /// Lists USB devices that expose a UVC video interface. Android only.
   Future<List<UvcUsbDevice>> listUsbDevices();
+
+  /// Stream of USB attach/detach events for UVC-capable devices. Android only.
+  ///
+  /// This is a broadcast stream; the underlying Android receiver is registered
+  /// while at least one listener is subscribed. When the currently opened
+  /// device reports [UvcDeviceEventType.detached], the native session has lost
+  /// its transport — stop the preview and call [closeUsbDevice] or [closeFd].
+  Stream<UvcDeviceEvent> get deviceEvents;
 
   /// Opens a USB device by [deviceId], acquiring USB permission if needed,
   /// then passes the resulting file descriptor to the native UVC layer.
@@ -868,6 +1111,29 @@ abstract interface class UvcCamera {
     Duration timeout = const Duration(seconds: 2),
   });
 
+  /// Tries candidate modes in order and keeps the first one that streams and
+  /// verifies successfully.
+  ///
+  /// Descriptor-reported modes are candidates, not guaranteed-safe defaults —
+  /// a mode may negotiate but never deliver decodable frames. This helper
+  /// encodes the recommended fallback loop: each candidate goes through the
+  /// same verification as [startPreview] and is rejected on failure.
+  ///
+  /// [candidates] defaults to [supportedModes] ordered MJPEG-first (compressed
+  /// modes are far less likely to exceed USB bandwidth on Android), then by
+  /// resolution and frame rate descending, capped at [maxCandidates].
+  ///
+  /// On success the preview stream remains running in the returned
+  /// [UvcAutoPreviewResult.mode]. On total failure all attempts are stopped
+  /// and the per-mode results are available in [UvcAutoPreviewResult.attempts].
+  Future<UvcAutoPreviewResult> startPreviewAuto({
+    List<UvcCameraMode>? candidates,
+    UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
+    int consecutiveValidFrames = 3,
+    Duration perModeTimeout = const Duration(seconds: 2),
+    int maxCandidates = 8,
+  });
+
   /// Stops the active preview stream.
   void stopPreview();
 
@@ -901,6 +1167,31 @@ abstract interface class UvcCamera {
   /// early errors. The stream remains open for the lifetime of the camera
   /// session; errors stop arriving after [closeUsbDevice] or [closeFd].
   Stream<UvcStreamError> get streamErrors;
+
+  /// Enables watchdog-based stall detection for the shared preview stream.
+  ///
+  /// While enabled, the delivered frame sequence is sampled every
+  /// [UvcStallDetectionConfig.checkInterval]; if it stops advancing for
+  /// [UvcStallDetectionConfig.stallTimeout] while [isPreviewing] is true, a
+  /// [UvcStallEventType.stalled] event is emitted on [stallEvents] once per
+  /// stall episode. With [UvcStallDetectionConfig.autoRestart] the preview is
+  /// stopped and restarted with the parameters of the most recent
+  /// [startPreview] call.
+  ///
+  /// Calling this again replaces the previous configuration. Detection stays
+  /// enabled across preview sessions until [disableStallDetection].
+  void enableStallDetection([
+    UvcStallDetectionConfig config = const UvcStallDetectionConfig(),
+  ]);
+
+  /// Disables stall detection and cancels any in-progress automatic restart.
+  void disableStallDetection();
+
+  /// Stream of stall detection and recovery events.
+  ///
+  /// Events are only emitted while stall detection is enabled via
+  /// [enableStallDetection]. This is a broadcast stream.
+  Stream<UvcStallEvent> get stallEvents;
 
   /// Copies the latest RGBA frame from the shared native preview buffer.
   UvcPreviewFrame? copyLatestFrame();
