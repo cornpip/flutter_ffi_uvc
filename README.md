@@ -83,6 +83,27 @@ To close and release the USB connection:
 await uvcCamera.closeUsbDevice();
 ```
 
+#### Attach / detach events
+
+`deviceEvents` reports when a UVC-capable device is plugged in or unplugged:
+
+```dart
+StreamSubscription<UvcDeviceEvent>? _deviceEventSub;
+
+_deviceEventSub = uvcCamera.deviceEvents.listen((UvcDeviceEvent event) {
+  if (event.type == UvcDeviceEventType.detached) {
+    // If this was the opened device, the native session lost its transport.
+    uvcCamera.stopPreview();
+    uvcCamera.closeUsbDevice();
+  } else {
+    // A camera was plugged in — refresh the device list, offer to open it, …
+  }
+});
+```
+
+This is a broadcast stream; the underlying Android receiver is only registered
+while at least one listener is subscribed. Cancel the subscription on dispose.
+
 #### Alternative: opening by file descriptor
 
 If your app manages USB access independently, pass the file descriptor directly to
@@ -132,6 +153,48 @@ On teardown:
 uvcCamera.stopPreview();
 await uvcCamera.disposePreviewTexture(textureId);
 ```
+
+#### Automatic mode selection
+
+Descriptor-reported modes are candidates, not guaranteed-safe defaults — a mode
+may negotiate but never deliver decodable frames. `startPreviewAuto()` encodes
+the recommended fallback loop: it tries candidate modes in order and keeps the
+first one that streams and verifies successfully.
+
+```dart
+final UvcAutoPreviewResult result = await uvcCamera.startPreviewAuto();
+if (result.success) {
+  final UvcCameraMode mode = result.mode!; // now streaming in this mode
+  await uvcCamera.attachPreviewTexture(
+    textureId,
+    width: mode.width,
+    height: mode.height,
+  );
+} else {
+  // Inspect per-mode failures:
+  for (final UvcPreviewStartResult attempt in result.attempts) {
+    print('${attempt.mode.label}: ${attempt.lastError}');
+  }
+}
+```
+
+By default candidates come from `supportedModes()` ordered MJPEG-first
+(compressed modes are far less likely to exceed USB bandwidth), then by
+resolution and frame rate according to `preference`, capped at
+`maxCandidates` (default 8):
+
+- `UvcAutoPreviewPreference.reliability` (default) — smaller resolutions
+  first; attaches fastest and is least likely to hit bandwidth limits.
+- `UvcAutoPreviewPreference.quality` — larger resolutions first; picks the
+  best-looking mode that actually streams.
+
+```dart
+final UvcAutoPreviewResult result = await uvcCamera.startPreviewAuto(
+  preference: UvcAutoPreviewPreference.quality,
+);
+```
+
+Pass `candidates` to control the order yourself; `preference` is then ignored.
 
 #### Preview transform
 
@@ -209,9 +272,10 @@ dropping frame callback because previous callback is still processing
 
 #### Stream stats
 
-Use `getStreamStats()` to read cumulative native stats for the current preview
-session, including input/delivered FPS, decode failures, dropped frames,
-inter-frame gap timing, and first-frame latency.
+Use `getStreamStats()` to read a `UvcStreamStats` snapshot of cumulative
+native stats for the current preview session, including input/delivered FPS,
+decode failures, dropped frames, inter-frame gap timing, and first-frame
+latency.
 
 Stats reset when a new `startPreview()` session begins.
 
@@ -245,14 +309,76 @@ void dispose() {
 `streamErrors` is a broadcast stream, so multiple subscribers are allowed.  
 Errors are only emitted while a native error listener is active.
 
+#### Stall detection and recovery
+
+Some devices keep the stream "running" while silently delivering no frames.
+Enable the watchdog to detect this and optionally recover:
+
+```dart
+uvcCamera.enableStallDetection(
+  const UvcStallDetectionConfig(
+    stallTimeout: Duration(seconds: 2),
+    autoRestart: true,
+    maxRestartAttempts: 3,
+  ),
+);
+
+uvcCamera.stallEvents.listen((UvcStallEvent event) {
+  switch (event.type) {
+    case UvcStallEventType.stalled:
+      // No frames for `event.silence` while previewing.
+      break;
+    case UvcStallEventType.restartSucceeded:
+      // Preview is running again (attempt `event.restartAttempt`).
+      break;
+    case UvcStallEventType.restartFailed:
+      // `event.restartResult` holds the failed verification details.
+      break;
+  }
+});
+```
+
+A stall is declared when the delivered frame sequence stops advancing for
+`stallTimeout` while `isPreviewing` is true, and is reported once per stall
+episode. With `autoRestart`, the preview is stopped and restarted with the
+parameters of the most recent `startPreview` call; the attempt counter resets
+once frames flow again. Detection stays enabled across preview sessions until
+`disableStallDetection()`.
+
+#### Typed error codes
+
+APIs that return raw `int` codes pass through libuvc `uvc_error_t` values.
+`UvcErrorCode` gives them names, and `UvcException` is available for
+throw-style handling in app code:
+
+```dart
+final UvcPreviewStartResult result = await uvcCamera.startPreview(mode);
+if (!result.success) {
+  if (result.errorCode == UvcErrorCode.noDevice) {
+    // Device disconnected or never opened.
+  }
+  // Or wrap it:
+  throw UvcException.fromNativeCode(
+    result.nativeErrorCode,
+    message: result.lastError ?? '',
+  );
+}
+```
+
+`UvcPreviewStartResult.nativeErrorCode` is non-zero only when stream startup
+itself failed; verification failures keep it at 0 — inspect `lastError` and
+the frame counters instead.
+
 ### Controls
 
-`supportedControls()` returns the controls exposed by the currently opened
-device, including min/max/default/current values. `getControl(...)` and
-`setControl(...)` use typed `UvcControlId` values instead of raw integer IDs.  
-For device debugging, `debugBmControls()` returns the controls advertised by
-descriptor `bmControls` without `GET_CUR` probing. This is useful when a device
-reports a control bit but rejects or mishandles `GET_CUR`.
+`supportedControls()` returns the `UvcCameraControl` list exposed by the
+currently opened device, including min/max/default/current values and a
+`UvcControlKind` (integer, boolean, or enum-like) describing how the value
+behaves. `getControl(...)` and `setControl(...)` use typed `UvcControlId`
+values instead of raw integer IDs.  
+For device debugging, `debugBmControls()` returns the `UvcBmControlInfo` list
+advertised by descriptor `bmControls` without `GET_CUR` probing. This is useful
+when a device reports a control bit but rejects or mishandles `GET_CUR`.
 
 Control labels are for display only. Use `UvcControlId` to identify controls in code:
 
@@ -298,33 +424,8 @@ If you do not call `uvcCamera.setLogLevel(...)`, the package defaults to `UvcLog
 
 ## Example app
 
-The bundled example app demonstrates:
-
-- USB device discovery and permission handling
-- Preview rendering via Flutter `Texture`
-- Basic camera control interactions
-
-## Key Classes
-
-Most users will interact with these classes:
-
-- `UvcCamera`
-- `UvcStreamError`
-- `UvcUsbDevice`
-- `UvcCameraMode`
-- `UvcPreviewFrame`
-- `UvcPreviewStartResult`
-- `UvcPreviewPolicy`
-- `UvcPreviewTransform`
-- `UvcCameraControl`
-- `UvcControlId`
-- `UvcControlKind`
-
-Useful debugging classes:
-
-- `UvcStreamStats`
-- `UvcLogLevel`
-- `UvcBmControlInfo`
+A demo app lives in the `example/` directory at the root of this
+repository.
 
 ## RoadMap
 

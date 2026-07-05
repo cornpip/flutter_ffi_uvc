@@ -63,15 +63,22 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   bool _transformControlsExpanded = false;
   bool _manualFocusControlsVisible = false;
   StreamSubscription<UvcStreamError>? _streamErrorSub;
+  StreamSubscription<UvcDeviceEvent>? _deviceEventSub;
+  StreamSubscription<UvcStallEvent>? _stallEventSub;
+  bool _stallAutoRecover = true;
   Timer? _focusRepeatTimer;
   Timer? _focusValueHideTimer;
   bool _focusValueVisible = false;
   String? _status;
   String? _lastSnackBarErrorKey;
-  DateTime? _lastSnackBarErrorAt;
+  Duration? _lastSnackBarErrorAt;
   double _previewFps = 0;
   int _lastPreviewSequence = 0;
-  DateTime? _lastPreviewSequenceSampleAt;
+  Duration? _lastPreviewSequenceSampleAt;
+
+  // Monotonic clock for FPS sampling and snackbar cooldowns; unlike
+  // DateTime.now() it is immune to wall-clock adjustments.
+  final Stopwatch _monotonicClock = Stopwatch()..start();
   UvcStreamStats _streamStats = const UvcStreamStats.zero();
 
   @override
@@ -80,8 +87,19 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     _camera.setLogLevel(UvcLogLevel.debug);
     WidgetsBinding.instance.addObserver(this);
     _streamErrorSub = _camera.streamErrors.listen(_onStreamError);
+    // USB hot-plug notifications: attach refreshes the list, detach of the
+    // active device tears the session down. Android only.
+    _deviceEventSub = _camera.deviceEvents.listen(_onDeviceEvent);
+    // Watchdog: report (and, when enabled, auto-recover from) silent stalls.
+    _stallEventSub = _camera.stallEvents.listen(_onStallEvent);
+    _camera.enableStallDetection(_stallDetectionConfig());
     unawaited(_initializePermissionsAndDevices());
   }
+
+  // Library defaults (2s stall timeout, 500ms checks, 3 restart attempts)
+  // are fine for the demo; only the auto-restart switch is ours.
+  UvcStallDetectionConfig _stallDetectionConfig() =>
+      UvcStallDetectionConfig(autoRestart: _stallAutoRecover);
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -94,6 +112,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _streamErrorSub?.cancel();
+    _deviceEventSub?.cancel();
+    _stallEventSub?.cancel();
+    _camera.disableStallDetection();
     _previewStatsTimer?.cancel();
     _focusRepeatTimer?.cancel();
     _focusValueHideTimer?.cancel();
@@ -201,34 +222,37 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       final List<UvcCameraMode> sortedModes = _sortModesByPreference(
         libuvcModes,
       );
-      final List<UvcCameraMode> autoProbeModes = _selectAutoProbeModes(
-        libuvcModes,
+      _setStatus(
+        'Opening device... Auto-selecting a working mode...',
+        openingDevice: true,
       );
-      UvcCameraMode? startedMode;
-      UvcPreviewStartResult? lastProbeResult;
-      for (int i = 0; i < autoProbeModes.length; i += 1) {
-        final UvcCameraMode candidate = autoProbeModes[i];
-        _setStatus(
-          'Opening device... Probing mode ${i + 1}/${autoProbeModes.length}: ${candidate.label}',
-          openingDevice: true,
-        );
-        final UvcPreviewStartResult probeResult = await _startPreview(candidate);
-        if (probeResult.success) {
-          startedMode = candidate;
-          break;
-        }
-        lastProbeResult = probeResult;
+      // startPreviewAuto() runs the MJPEG-first fallback loop this example
+      // used to implement by hand: each candidate is verified like
+      // startPreview and rejected on failure, keeping the first mode that
+      // actually delivers frames. The default reliability preference probes
+      // smaller, safer modes first; pass
+      // preference: UvcAutoPreviewPreference.quality to try larger
+      // resolutions first instead.
+      final UvcAutoPreviewResult autoResult = await _camera.startPreviewAuto(
+        perModeTimeout: _startupProbeTimeout,
+        maxCandidates: 3,
+      );
+      final UvcCameraMode? startedMode = autoResult.mode;
+      if (startedMode != null) {
+        await _onPreviewStarted(startedMode);
       }
+      final UvcPreviewStartResult? lastProbeResult =
+          autoResult.attempts.isEmpty ? null : autoResult.attempts.last;
 
       final String statusMessage;
       if (startedMode != null) {
         statusMessage = 'Preview running: ${startedMode.label} / Texture';
-      } else if (autoProbeModes.isEmpty) {
+      } else if (autoResult.attempts.isEmpty) {
         statusMessage =
             'Opened device. No modes were available for automatic probe.';
       } else {
         statusMessage =
-            'Opened device. Automatic probe tried ${autoProbeModes.length} mode(s) and found no working preview. Try a mode manually.';
+            'Opened device. Automatic probe tried ${autoResult.attempts.length} mode(s) and found no working preview. Try a mode manually.';
       }
 
       setState(() {
@@ -350,32 +374,86 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     return sorted;
   }
 
-  List<UvcCameraMode> _selectAutoProbeModes(List<UvcCameraMode> modes) {
-    final List<UvcCameraMode> sorted = List<UvcCameraMode>.from(modes);
-    sorted.sort((UvcCameraMode a, UvcCameraMode b) {
-      final int aIsMjpeg = a.formatName == 'MJPEG' ? 1 : 0;
-      final int bIsMjpeg = b.formatName == 'MJPEG' ? 1 : 0;
-      if (aIsMjpeg != bIsMjpeg) {
-        return bIsMjpeg - aIsMjpeg;
-      }
-
-      final int areaCompare = (a.width * a.height).compareTo(
-        b.width * b.height,
-      );
-      if (areaCompare != 0) {
-        return areaCompare;
-      }
-      return a.fps.compareTo(b.fps);
-    });
-    return sorted.take(3).toList();
-  }
-
   String _startFailureMessage(UvcPreviewStartResult result) {
+    // When the native stream failed to start, startPreview now reports a typed
+    // error code (e.g. noDevice on mid-session disconnect, notSupported for an
+    // unusable mode). Surface it so failures are actionable.
+    final UvcErrorCode? code = result.errorCode;
+    final String codeSuffix = code == null
+        ? ''
+        : ' [${code.name} (${result.nativeErrorCode})]';
     final String? error = result.lastError;
     if (error != null && error.isNotEmpty) {
-      return error;
+      return '$error$codeSuffix';
     }
-    return 'No valid frame sequence was observed for this mode within ${_startupProbeTimeout.inSeconds}s.';
+    return 'No valid frame sequence was observed for this mode within '
+        '${_startupProbeTimeout.inSeconds}s.$codeSuffix';
+  }
+
+  void _onDeviceEvent(UvcDeviceEvent event) {
+    _log('Device event: $event');
+    final bool isActiveDevice =
+        _selectedDevice != null &&
+        event.device.deviceId == _selectedDevice!.deviceId;
+    switch (event.type) {
+      case UvcDeviceEventType.attached:
+        _setStatus('USB camera attached: ${event.device.displayName}');
+        unawaited(_refreshDevices());
+      case UvcDeviceEventType.detached:
+        if (isActiveDevice) {
+          // The active device lost its transport; the native session is dead.
+          _setStatus('Active camera detached: ${event.device.displayName}');
+          unawaited(_disconnectSelectedDevice());
+        } else {
+          _setStatus('USB camera detached: ${event.device.displayName}');
+          unawaited(_refreshDevices());
+        }
+    }
+  }
+
+  void _onStallEvent(UvcStallEvent event) {
+    _log('Stall event: $event');
+    final String message;
+    final Color background;
+    switch (event.type) {
+      case UvcStallEventType.stalled:
+        message =
+            'Preview stalled: no frames for ${event.silence.inMilliseconds}ms'
+            '${_stallAutoRecover ? ' — recovering...' : '.'}';
+        background = Colors.orange.shade900;
+      case UvcStallEventType.restartSucceeded:
+        message =
+            'Preview recovered after ${event.restartAttempt} restart '
+            'attempt(s).';
+        background = Colors.green.shade800;
+      case UvcStallEventType.restartFailed:
+        final UvcPreviewStartResult? restart = event.restartResult;
+        message =
+            'Preview restart attempt ${event.restartAttempt} failed'
+            '${restart == null ? '' : ': ${_startFailureMessage(restart)}'}.';
+        background = Colors.red.shade800;
+    }
+    if (!mounted) {
+      _status = message;
+      return;
+    }
+    setState(() => _status = message);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: Text(message),
+          backgroundColor: background,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+  }
+
+  void _setStallAutoRecover(bool value) {
+    setState(() => _stallAutoRecover = value);
+    // Reconfigure the watchdog in place: detection stays on either way, only
+    // the automatic stop/restart behaviour is toggled.
+    _camera.enableStallDetection(_stallDetectionConfig());
   }
 
   void _resetPreviewFps() {
@@ -401,8 +479,8 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   }
 
   void _samplePreviewFps() {
-    final DateTime now = DateTime.now();
-    final DateTime? previousAt = _lastPreviewSequenceSampleAt;
+    final Duration now = _monotonicClock.elapsed;
+    final Duration? previousAt = _lastPreviewSequenceSampleAt;
     final int latestSequence = _camera.latestFrameSequence();
     final UvcStreamStats streamStats = _camera.getStreamStats();
     if (previousAt == null) {
@@ -413,8 +491,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     }
 
     final double seconds =
-        now.difference(previousAt).inMicroseconds /
-        Duration.microsecondsPerSecond;
+        (now - previousAt).inMicroseconds / Duration.microsecondsPerSecond;
     if (seconds <= 0) {
       return;
     }
@@ -470,28 +547,35 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       timeout: _startupProbeTimeout,
     );
     if (result.success) {
-      final int? textureId = _previewTextureId;
-      if (textureId != null) {
-        await _camera.attachPreviewTexture(
-          textureId,
-          width: mode.width,
-          height: mode.height,
-        );
-      }
-      _previewStatsTimer?.cancel();
-      _resetPreviewFps();
-      _resetStreamStats();
-      _lastPreviewSequence = _camera.latestFrameSequence();
-      _lastPreviewSequenceSampleAt = DateTime.now();
-      _previewStatsTimer = Timer.periodic(
-        _fpsSampleInterval,
-        (_) => _samplePreviewFps(),
-      );
+      await _onPreviewStarted(mode);
       return result;
     }
     _previewStatsTimer?.cancel();
     _previewStatsTimer = null;
     return result;
+  }
+
+  /// Attaches the preview texture and (re)starts FPS/stats sampling after any
+  /// successful preview start, whether via [_startPreview] or the library's
+  /// [UvcCamera.startPreviewAuto].
+  Future<void> _onPreviewStarted(UvcCameraMode mode) async {
+    final int? textureId = _previewTextureId;
+    if (textureId != null) {
+      await _camera.attachPreviewTexture(
+        textureId,
+        width: mode.width,
+        height: mode.height,
+      );
+    }
+    _previewStatsTimer?.cancel();
+    _resetPreviewFps();
+    _resetStreamStats();
+    _lastPreviewSequence = _camera.latestFrameSequence();
+    _lastPreviewSequenceSampleAt = _monotonicClock.elapsed;
+    _previewStatsTimer = Timer.periodic(
+      _fpsSampleInterval,
+      (_) => _samplePreviewFps(),
+    );
   }
 
   Future<ui.Image> _decodeRgbaFrame(UvcPreviewFrame frame) {
@@ -811,12 +895,12 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       return;
     }
 
-    final DateTime now = DateTime.now();
+    final Duration now = _monotonicClock.elapsed;
     final String errorKey = _normaliseStreamErrorKey(error.message);
     final bool isRepeatedMessage = _lastSnackBarErrorKey == errorKey;
     final bool withinCooldown =
         _lastSnackBarErrorAt != null &&
-        now.difference(_lastSnackBarErrorAt!) < _streamErrorSnackbarCooldown;
+        now - _lastSnackBarErrorAt! < _streamErrorSnackbarCooldown;
 
     if (isRepeatedMessage && withinCooldown) {
       setState(() {
@@ -1209,6 +1293,19 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                 value: _saveToGallery,
                                 onChanged: (bool value) =>
                                     setState(() => _saveToGallery = value),
+                              ),
+                            if (_cameraModes.isNotEmpty)
+                              SwitchListTile(
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                ),
+                                title: const Text('Auto-recover on stall'),
+                                subtitle: const Text(
+                                  'Watchdog restarts the preview if frame '
+                                  'delivery silently stops',
+                                ),
+                                value: _stallAutoRecover,
+                                onChanged: _setStallAutoRecover,
                               ),
                             if (_cameraModes.isNotEmpty)
                               Padding(

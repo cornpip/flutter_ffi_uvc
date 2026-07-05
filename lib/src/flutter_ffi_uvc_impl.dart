@@ -9,18 +9,55 @@ import 'package:flutter/services.dart';
 import 'flutter_ffi_uvc_bindings_generated.dart';
 import 'uvc_camera_api.dart';
 
+class _PreviewRequest {
+  const _PreviewRequest({
+    required this.mode,
+    required this.policy,
+    required this.consecutiveValidFrames,
+    required this.timeout,
+  });
+
+  final UvcCameraMode mode;
+  final UvcPreviewPolicy policy;
+  final int consecutiveValidFrames;
+  final Duration timeout;
+}
+
 class _FlutterFfiUvcCamera implements UvcCamera {
   _FlutterFfiUvcCamera();
   static const MethodChannel _textureChannel = MethodChannel(
     'flutter_ffi_uvc/texture',
   );
   static const MethodChannel _usbChannel = MethodChannel('flutter_ffi_uvc/usb');
+  static const EventChannel _deviceEventChannel = EventChannel(
+    'flutter_ffi_uvc/device_events',
+  );
 
   UvcPreviewTransform _previewTransform = UvcPreviewTransform.identity;
 
   final StreamController<UvcStreamError> _streamErrorController =
       StreamController<UvcStreamError>.broadcast();
   NativeCallable<Void Function(Pointer<Char>)>? _errorCallable;
+
+  Stream<UvcDeviceEvent>? _deviceEventStream;
+
+  // Stall detection state. The session epoch increments whenever the user
+  // starts/stops/closes the preview session so an in-flight automatic restart
+  // can detect it has been superseded and abort.
+  final StreamController<UvcStallEvent> _stallEventController =
+      StreamController<UvcStallEvent>.broadcast();
+  UvcStallDetectionConfig? _stallConfig;
+  Timer? _stallTimer;
+  int _sessionEpoch = 0;
+  int _stallLastSequence = 0;
+  // Monotonic clock for stall timing so wall-clock adjustments (NTP, manual
+  // time changes) can neither fake nor mask a stall.
+  final Stopwatch _stallClock = Stopwatch()..start();
+  Duration _stallLastProgress = Duration.zero;
+  bool _inStallEpisode = false;
+  bool _restartInProgress = false;
+  int _restartAttempts = 0;
+  _PreviewRequest? _lastPreviewRequest;
 
   void _setupNativeErrorListener() {
     if (_errorCallable != null) return;
@@ -91,11 +128,11 @@ class _FlutterFfiUvcCamera implements UvcCamera {
           errorCount: 0,
           elapsed: stopwatch.elapsed,
           lastError: error.isNotEmpty ? error : null,
+          nativeErrorCode: startResult,
         );
       }
 
-      final DateTime deadline = DateTime.now().add(timeout);
-      while (DateTime.now().isBefore(deadline)) {
+      while (stopwatch.elapsed < timeout) {
         if (policy == UvcPreviewPolicy.sequenceOnly) {
           final int latestSequence = latestFrameSequence();
           if (latestSequence > 0) {
@@ -145,7 +182,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
       }
 
       final String error = lastError ?? this.lastError;
-      stopPreview();
+      _stopPreviewNative();
       return UvcPreviewStartResult(
         mode: mode,
         success: false,
@@ -269,6 +306,8 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   @override
   Future<void> closeUsbDevice() async {
     _ensureAndroid();
+    _sessionEpoch += 1;
+    _resetStallTracking();
     _tearDownNativeErrorListener();
     _bindings.uvc_close_device();
     await _usbChannel.invokeMethod<void>('closeUsbDevice');
@@ -286,16 +325,30 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   @override
   int openPreview(UvcCameraMode mode) {
     _resetPreviewState();
-    final int startResult = _bindings.uvc_start_preview(
+    // Record the mode so stall detection can report and restart previews
+    // started through openPreview directly, using default verification.
+    // Requests recorded by startPreview for the same mode are kept so their
+    // policy/timeout parameters survive.
+    final _PreviewRequest? existing = _lastPreviewRequest;
+    final bool sameMode = existing != null &&
+        existing.mode.frameFormat == mode.frameFormat &&
+        existing.mode.width == mode.width &&
+        existing.mode.height == mode.height &&
+        existing.mode.fps == mode.fps;
+    if (!sameMode) {
+      _lastPreviewRequest = _PreviewRequest(
+        mode: mode,
+        policy: UvcPreviewPolicy.stableFrames,
+        consecutiveValidFrames: 3,
+        timeout: const Duration(seconds: 2),
+      );
+    }
+    return _bindings.uvc_start_preview(
       mode.frameFormat,
       mode.width,
       mode.height,
       mode.fps,
     );
-    if (startResult != 0) {
-      return startResult;
-    }
-    return startResult;
   }
 
   @override
@@ -304,21 +357,95 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
     int consecutiveValidFrames = 3,
     Duration timeout = const Duration(seconds: 2),
-  }) => _startPreviewInternal(
-    mode,
-    policy: policy,
-    requiredConsecutiveValidFrames: consecutiveValidFrames,
-    timeout: timeout,
-  );
+  }) {
+    _sessionEpoch += 1;
+    _lastPreviewRequest = _PreviewRequest(
+      mode: mode,
+      policy: policy,
+      consecutiveValidFrames: consecutiveValidFrames,
+      timeout: timeout,
+    );
+    _resetStallTracking();
+    return _startPreviewInternal(
+      mode,
+      policy: policy,
+      requiredConsecutiveValidFrames: consecutiveValidFrames,
+      timeout: timeout,
+    );
+  }
 
   @override
-  void stopPreview() {
+  Future<UvcAutoPreviewResult> startPreviewAuto({
+    List<UvcCameraMode>? candidates,
+    UvcAutoPreviewPreference preference = UvcAutoPreviewPreference.reliability,
+    UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
+    int consecutiveValidFrames = 3,
+    Duration perModeTimeout = const Duration(seconds: 2),
+    int maxCandidates = 8,
+  }) async {
+    if (maxCandidates <= 0) {
+      throw ArgumentError.value(
+        maxCandidates,
+        'maxCandidates',
+        'Must be greater than 0.',
+      );
+    }
+    final List<UvcCameraMode> modes = (candidates ??
+            _defaultAutoCandidates(preference))
+        .take(maxCandidates)
+        .toList();
+    final List<UvcPreviewStartResult> attempts = <UvcPreviewStartResult>[];
+    for (final UvcCameraMode mode in modes) {
+      final UvcPreviewStartResult result = await startPreview(
+        mode,
+        policy: policy,
+        consecutiveValidFrames: consecutiveValidFrames,
+        timeout: perModeTimeout,
+      );
+      attempts.add(result);
+      if (result.success) break;
+    }
+    return UvcAutoPreviewResult(attempts: attempts);
+  }
+
+  /// Orders descriptor-reported modes MJPEG before uncompressed formats, then
+  /// by resolution and frame rate — ascending for
+  /// [UvcAutoPreviewPreference.reliability], descending for
+  /// [UvcAutoPreviewPreference.quality].
+  List<UvcCameraMode> _defaultAutoCandidates(
+    UvcAutoPreviewPreference preference,
+  ) {
+    int formatRank(UvcCameraMode mode) => mode.formatName == 'MJPEG' ? 0 : 1;
+    final int direction =
+        preference == UvcAutoPreviewPreference.reliability ? 1 : -1;
+    final List<UvcCameraMode> modes = supportedModes();
+    modes.sort((UvcCameraMode a, UvcCameraMode b) {
+      final int byFormat = formatRank(a).compareTo(formatRank(b));
+      if (byFormat != 0) return byFormat;
+      final int byArea =
+          direction * (a.width * a.height).compareTo(b.width * b.height);
+      if (byArea != 0) return byArea;
+      return direction * a.fps.compareTo(b.fps);
+    });
+    return modes;
+  }
+
+  void _stopPreviewNative() {
     _bindings.uvc_stop_preview();
     _resetPreviewState();
   }
 
   @override
+  void stopPreview() {
+    _sessionEpoch += 1;
+    _resetStallTracking();
+    _stopPreviewNative();
+  }
+
+  @override
   void closeFd() {
+    _sessionEpoch += 1;
+    _resetStallTracking();
     _tearDownNativeErrorListener();
     _bindings.uvc_close_device();
     _resetPreviewState();
@@ -336,6 +463,135 @@ class _FlutterFfiUvcCamera implements UvcCamera {
       _setupNativeErrorListener();
     }
     return _streamErrorController.stream;
+  }
+
+  @override
+  Stream<UvcDeviceEvent> get deviceEvents {
+    _ensureAndroid();
+    return _deviceEventStream ??= _deviceEventChannel
+        .receiveBroadcastStream()
+        .map(
+          (dynamic event) => UvcDeviceEvent.fromMap(
+            (event as Map<Object?, Object?>?) ?? <Object?, Object?>{},
+          ),
+        );
+  }
+
+  @override
+  Stream<UvcStallEvent> get stallEvents => _stallEventController.stream;
+
+  @override
+  void enableStallDetection([
+    UvcStallDetectionConfig config = const UvcStallDetectionConfig(),
+  ]) {
+    _stallConfig = config;
+    _resetStallTracking();
+    _stallTimer?.cancel();
+    _stallTimer = Timer.periodic(config.checkInterval, (_) => _stallTick());
+  }
+
+  @override
+  void disableStallDetection() {
+    _stallConfig = null;
+    _stallTimer?.cancel();
+    _stallTimer = null;
+    _resetStallTracking();
+  }
+
+  void _resetStallTracking() {
+    _stallLastSequence = latestFrameSequence();
+    _stallLastProgress = _stallClock.elapsed;
+    _inStallEpisode = false;
+    _restartAttempts = 0;
+  }
+
+  void _stallTick() {
+    final UvcStallDetectionConfig? config = _stallConfig;
+    if (config == null || _restartInProgress) return;
+    if (!isPreviewing) {
+      _resetStallTracking();
+      return;
+    }
+
+    final int sequence = latestFrameSequence();
+    final Duration now = _stallClock.elapsed;
+    if (sequence != _stallLastSequence) {
+      _stallLastSequence = sequence;
+      _stallLastProgress = now;
+      _inStallEpisode = false;
+      _restartAttempts = 0;
+      return;
+    }
+
+    if (_inStallEpisode) return;
+    final Duration silence = now - _stallLastProgress;
+    if (silence < config.stallTimeout) return;
+
+    final _PreviewRequest? request = _lastPreviewRequest;
+    if (request == null) return;
+    _inStallEpisode = true;
+    _stallEventController.add(
+      UvcStallEvent(
+        type: UvcStallEventType.stalled,
+        mode: request.mode,
+        silence: silence,
+      ),
+    );
+    if (config.autoRestart) {
+      unawaited(_attemptStallRestart(config, request, silence));
+    }
+  }
+
+  Future<void> _attemptStallRestart(
+    UvcStallDetectionConfig config,
+    _PreviewRequest request,
+    Duration silence,
+  ) async {
+    _restartInProgress = true;
+    final int epoch = _sessionEpoch;
+    try {
+      while (_restartAttempts < config.maxRestartAttempts) {
+        _restartAttempts += 1;
+        final int attempt = _restartAttempts;
+        _stopPreviewNative();
+        final UvcPreviewStartResult result = await _startPreviewInternal(
+          request.mode,
+          policy: request.policy,
+          requiredConsecutiveValidFrames: request.consecutiveValidFrames,
+          timeout: request.timeout,
+        );
+        // The user started/stopped/closed the session while the restart was
+        // in flight; their call supersedes this recovery attempt.
+        if (_sessionEpoch != epoch || _stallConfig == null) return;
+        if (result.success) {
+          _stallLastSequence = latestFrameSequence();
+          _stallLastProgress = _stallClock.elapsed;
+          _inStallEpisode = false;
+          _restartAttempts = 0;
+          _stallEventController.add(
+            UvcStallEvent(
+              type: UvcStallEventType.restartSucceeded,
+              mode: request.mode,
+              silence: silence,
+              restartAttempt: attempt,
+              restartResult: result,
+            ),
+          );
+          return;
+        }
+        _stallEventController.add(
+          UvcStallEvent(
+            type: UvcStallEventType.restartFailed,
+            mode: request.mode,
+            silence: silence,
+            restartAttempt: attempt,
+            restartResult: result,
+          ),
+        );
+      }
+    } finally {
+      _restartInProgress = false;
+    }
   }
 
   @override

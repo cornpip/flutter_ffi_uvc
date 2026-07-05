@@ -19,6 +19,7 @@ import androidx.core.content.ContextCompat
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
@@ -47,6 +48,9 @@ class FlutterFfiUvcPlugin :
 
     // USB
     private lateinit var usbChannel: MethodChannel
+    private lateinit var deviceEventChannel: EventChannel
+    private var deviceEventSink: EventChannel.EventSink? = null
+    private var deviceEventReceiverRegistered = false
     private var appContext: Context? = null
     private var activity: Activity? = null
     private var usbManager: UsbManager? = null
@@ -81,6 +85,50 @@ class FlutterFfiUvcPlugin :
         }
     }
 
+    private val deviceEventReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            val eventType = when (intent?.action) {
+                UsbManager.ACTION_USB_DEVICE_ATTACHED -> "attached"
+                UsbManager.ACTION_USB_DEVICE_DETACHED -> "detached"
+                else -> return
+            }
+            val device: UsbDevice? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, UsbDevice::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra(UsbManager.EXTRA_DEVICE)
+            }
+            if (device == null || !isVideoDevice(device)) return
+            deviceEventSink?.success(
+                mapOf("event" to eventType, "device" to deviceToMap(device)),
+            )
+        }
+    }
+
+    private fun registerDeviceEventReceiver() {
+        val context = appContext ?: return
+        if (deviceEventReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+        }
+        // ATTACHED/DETACHED are protected system broadcasts, so an exported
+        // receiver cannot be spoofed by other apps.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(deviceEventReceiver, filter, Context.RECEIVER_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            context.registerReceiver(deviceEventReceiver, filter)
+        }
+        deviceEventReceiverRegistered = true
+    }
+
+    private fun unregisterDeviceEventReceiver() {
+        if (!deviceEventReceiverRegistered) return
+        try { appContext?.unregisterReceiver(deviceEventReceiver) } catch (_: Exception) {}
+        deviceEventReceiverRegistered = false
+    }
+
     // ── FlutterPlugin ────────────────────────────────────────────────────────
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -93,6 +141,19 @@ class FlutterFfiUvcPlugin :
 
         usbChannel = MethodChannel(binding.binaryMessenger, "flutter_ffi_uvc/usb")
         usbChannel.setMethodCallHandler(this)
+
+        deviceEventChannel = EventChannel(binding.binaryMessenger, "flutter_ffi_uvc/device_events")
+        deviceEventChannel.setStreamHandler(object : EventChannel.StreamHandler {
+            override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
+                deviceEventSink = events
+                registerDeviceEventReceiver()
+            }
+
+            override fun onCancel(arguments: Any?) {
+                unregisterDeviceEventReceiver()
+                deviceEventSink = null
+            }
+        })
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
@@ -102,6 +163,9 @@ class FlutterFfiUvcPlugin :
         textures.clear()
         textureChannel.setMethodCallHandler(null)
         usbChannel.setMethodCallHandler(null)
+        unregisterDeviceEventReceiver()
+        deviceEventChannel.setStreamHandler(null)
+        deviceEventSink = null
         closeCurrentConnection()
         appContext = null
         usbManager = null
@@ -222,18 +286,7 @@ class FlutterFfiUvcPlugin :
                 result.success(
                     manager.deviceList.values
                         .filter { isVideoDevice(it) }
-                        .map { device ->
-                            mapOf(
-                                "deviceId" to device.deviceId,
-                                "deviceName" to device.deviceName,
-                                "vendorId" to device.vendorId,
-                                "productId" to device.productId,
-                                "productName" to (device.productName ?: ""),
-                                "manufacturerName" to (device.manufacturerName ?: ""),
-                                "serialNumber" to safeSerialNumber(device),
-                                "hasPermission" to manager.hasPermission(device),
-                            )
-                        },
+                        .map { deviceToMap(it) },
                 )
             }
 
@@ -321,6 +374,20 @@ class FlutterFfiUvcPlugin :
         currentConnection = null
         currentDevice = null
     }
+
+    private fun deviceToMap(device: UsbDevice): Map<String, Any> = mapOf(
+        "deviceId" to device.deviceId,
+        "deviceName" to device.deviceName,
+        "vendorId" to device.vendorId,
+        "productId" to device.productId,
+        "productName" to (device.productName ?: ""),
+        "manufacturerName" to (device.manufacturerName ?: ""),
+        "serialNumber" to safeSerialNumber(device),
+        // hasPermission can be queried for a device that is already gone
+        // (detach events), so treat failures as "no permission".
+        "hasPermission" to runCatching { usbManager?.hasPermission(device) == true }
+            .getOrDefault(false),
+    )
 
     private fun safeSerialNumber(device: UsbDevice): String = try {
         device.serialNumber ?: ""

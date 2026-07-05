@@ -3,6 +3,30 @@ ALL_AGENTS_RULE.md
 CLAUDE.md
 SECRET_AGENTS_RULE.md
 
+# README images are resolved from the repository URL by pub.dev, so they do
+# not need to ship in the package archive.
+readme_img/
+
+# Mirror of .gitignore — a .pubignore replaces (not merges with) .gitignore
+# for pub, so anything git ignores must be repeated here.
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+*.ipr
+*.iws
+**/doc/api/
+coverage/
+.flutter-plugins-dependencies
+
 .claude/
 .codex
 .dart_tool/
