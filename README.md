@@ -272,9 +272,10 @@ dropping frame callback because previous callback is still processing
 
 #### Stream stats
 
-Use `getStreamStats()` to read cumulative native stats for the current preview
-session, including input/delivered FPS, decode failures, dropped frames,
-inter-frame gap timing, and first-frame latency.
+Use `getStreamStats()` to read a `UvcStreamStats` snapshot of cumulative
+native stats for the current preview session, including input/delivered FPS,
+decode failures, dropped frames, inter-frame gap timing, and first-frame
+latency.
 
 Stats reset when a new `startPreview()` session begins.
 
@@ -370,12 +371,14 @@ the frame counters instead.
 
 ### Controls
 
-`supportedControls()` returns the controls exposed by the currently opened
-device, including min/max/default/current values. `getControl(...)` and
-`setControl(...)` use typed `UvcControlId` values instead of raw integer IDs.  
-For device debugging, `debugBmControls()` returns the controls advertised by
-descriptor `bmControls` without `GET_CUR` probing. This is useful when a device
-reports a control bit but rejects or mishandles `GET_CUR`.
+`supportedControls()` returns the `UvcCameraControl` list exposed by the
+currently opened device, including min/max/default/current values and a
+`UvcControlKind` (integer, boolean, or enum-like) describing how the value
+behaves. `getControl(...)` and `setControl(...)` use typed `UvcControlId`
+values instead of raw integer IDs.  
+For device debugging, `debugBmControls()` returns the `UvcBmControlInfo` list
+advertised by descriptor `bmControls` without `GET_CUR` probing. This is useful
+when a device reports a control bit but rejects or mishandles `GET_CUR`.
 
 Control labels are for display only. Use `UvcControlId` to identify controls in code:
 
@@ -421,37 +424,8 @@ If you do not call `uvcCamera.setLogLevel(...)`, the package defaults to `UvcLog
 
 ## Example app
 
-The bundled example app demonstrates:
-
-- USB device discovery and permission handling
-- Preview rendering via Flutter `Texture`
-- Basic camera control interactions
-
-## Key Classes
-
-Most users will interact with these classes:
-
-- `UvcCamera`
-- `UvcStreamError`
-- `UvcUsbDevice`
-- `UvcDeviceEvent` / `UvcDeviceEventType`
-- `UvcCameraMode`
-- `UvcPreviewFrame`
-- `UvcPreviewStartResult`
-- `UvcAutoPreviewResult`
-- `UvcPreviewPolicy`
-- `UvcPreviewTransform`
-- `UvcStallDetectionConfig` / `UvcStallEvent`
-- `UvcErrorCode` / `UvcException`
-- `UvcCameraControl`
-- `UvcControlId`
-- `UvcControlKind`
-
-Useful debugging classes:
-
-- `UvcStreamStats`
-- `UvcLogLevel`
-- `UvcBmControlInfo`
+A demo app lives in the `example/` directory at the root of this
+repository.
 
 ## RoadMap
 
