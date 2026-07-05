@@ -51,6 +51,7 @@ class _FakeCamera implements UvcCamera {
   @override
   Future<UvcAutoPreviewResult> startPreviewAuto({
     List<UvcCameraMode>? candidates,
+    UvcAutoPreviewPreference preference = UvcAutoPreviewPreference.reliability,
     UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
     int consecutiveValidFrames = 3,
     Duration perModeTimeout = const Duration(seconds: 2),

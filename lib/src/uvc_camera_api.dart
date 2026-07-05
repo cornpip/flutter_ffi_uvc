@@ -1030,6 +1030,23 @@ class UvcStallEvent {
       '${restartAttempt > 0 ? ', attempt: $restartAttempt' : ''})';
 }
 
+/// Ordering strategy for the default candidate list of
+/// [UvcCamera.startPreviewAuto].
+///
+/// Both strategies try MJPEG before uncompressed formats — compressed modes
+/// are far less likely to exceed USB bandwidth on Android — and differ only in
+/// how resolutions are ordered within each format group. Ignored when an
+/// explicit `candidates` list is passed.
+enum UvcAutoPreviewPreference {
+  /// Prefer modes most likely to attach and stream: smaller resolutions and
+  /// lower frame rates first.
+  reliability,
+
+  /// Prefer the best-looking mode that works: larger resolutions and higher
+  /// frame rates first.
+  quality,
+}
+
 /// Result of [UvcCamera.startPreviewAuto].
 ///
 /// [attempts] holds the per-mode verification results in the order they were
@@ -1119,15 +1136,19 @@ abstract interface class UvcCamera {
   /// encodes the recommended fallback loop: each candidate goes through the
   /// same verification as [startPreview] and is rejected on failure.
   ///
-  /// [candidates] defaults to [supportedModes] ordered MJPEG-first (compressed
-  /// modes are far less likely to exceed USB bandwidth on Android), then by
-  /// resolution and frame rate descending, capped at [maxCandidates].
+  /// [candidates] defaults to [supportedModes] ordered by [preference] —
+  /// MJPEG-first, then by resolution and frame rate ascending for
+  /// [UvcAutoPreviewPreference.reliability] (the default) or descending for
+  /// [UvcAutoPreviewPreference.quality] — capped at [maxCandidates]. Pass an
+  /// explicit [candidates] list to control the order yourself; [preference] is
+  /// then ignored.
   ///
   /// On success the preview stream remains running in the returned
   /// [UvcAutoPreviewResult.mode]. On total failure all attempts are stopped
   /// and the per-mode results are available in [UvcAutoPreviewResult.attempts].
   Future<UvcAutoPreviewResult> startPreviewAuto({
     List<UvcCameraMode>? candidates,
+    UvcAutoPreviewPreference preference = UvcAutoPreviewPreference.reliability,
     UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
     int consecutiveValidFrames = 3,
     Duration perModeTimeout = const Duration(seconds: 2),
@@ -1184,7 +1205,12 @@ abstract interface class UvcCamera {
     UvcStallDetectionConfig config = const UvcStallDetectionConfig(),
   ]);
 
-  /// Disables stall detection and cancels any in-progress automatic restart.
+  /// Disables stall detection.
+  ///
+  /// An automatic restart attempt that is already in flight completes its
+  /// current verification (bounded by the restart timeout) before it notices
+  /// detection is disabled; no further attempts follow and no more events are
+  /// emitted. If that attempt happens to succeed, the preview keeps running.
   void disableStallDetection();
 
   /// Stream of stall detection and recovery events.

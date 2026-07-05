@@ -50,7 +50,10 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   Timer? _stallTimer;
   int _sessionEpoch = 0;
   int _stallLastSequence = 0;
-  DateTime _stallLastProgress = DateTime.now();
+  // Monotonic clock for stall timing so wall-clock adjustments (NTP, manual
+  // time changes) can neither fake nor mask a stall.
+  final Stopwatch _stallClock = Stopwatch()..start();
+  Duration _stallLastProgress = Duration.zero;
   bool _inStallEpisode = false;
   bool _restartInProgress = false;
   int _restartAttempts = 0;
@@ -129,8 +132,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
         );
       }
 
-      final DateTime deadline = DateTime.now().add(timeout);
-      while (DateTime.now().isBefore(deadline)) {
+      while (stopwatch.elapsed < timeout) {
         if (policy == UvcPreviewPolicy.sequenceOnly) {
           final int latestSequence = latestFrameSequence();
           if (latestSequence > 0) {
@@ -375,6 +377,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   @override
   Future<UvcAutoPreviewResult> startPreviewAuto({
     List<UvcCameraMode>? candidates,
+    UvcAutoPreviewPreference preference = UvcAutoPreviewPreference.reliability,
     UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
     int consecutiveValidFrames = 3,
     Duration perModeTimeout = const Duration(seconds: 2),
@@ -387,8 +390,10 @@ class _FlutterFfiUvcCamera implements UvcCamera {
         'Must be greater than 0.',
       );
     }
-    final List<UvcCameraMode> modes =
-        (candidates ?? _defaultAutoCandidates()).take(maxCandidates).toList();
+    final List<UvcCameraMode> modes = (candidates ??
+            _defaultAutoCandidates(preference))
+        .take(maxCandidates)
+        .toList();
     final List<UvcPreviewStartResult> attempts = <UvcPreviewStartResult>[];
     for (final UvcCameraMode mode in modes) {
       final UvcPreviewStartResult result = await startPreview(
@@ -403,18 +408,24 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     return UvcAutoPreviewResult(attempts: attempts);
   }
 
-  /// Orders descriptor-reported modes by streaming reliability preference:
-  /// MJPEG before uncompressed formats, then larger resolution, then higher
-  /// frame rate.
-  List<UvcCameraMode> _defaultAutoCandidates() {
+  /// Orders descriptor-reported modes MJPEG before uncompressed formats, then
+  /// by resolution and frame rate — ascending for
+  /// [UvcAutoPreviewPreference.reliability], descending for
+  /// [UvcAutoPreviewPreference.quality].
+  List<UvcCameraMode> _defaultAutoCandidates(
+    UvcAutoPreviewPreference preference,
+  ) {
     int formatRank(UvcCameraMode mode) => mode.formatName == 'MJPEG' ? 0 : 1;
+    final int direction =
+        preference == UvcAutoPreviewPreference.reliability ? 1 : -1;
     final List<UvcCameraMode> modes = supportedModes();
     modes.sort((UvcCameraMode a, UvcCameraMode b) {
       final int byFormat = formatRank(a).compareTo(formatRank(b));
       if (byFormat != 0) return byFormat;
-      final int byArea = (b.width * b.height).compareTo(a.width * a.height);
+      final int byArea =
+          direction * (a.width * a.height).compareTo(b.width * b.height);
       if (byArea != 0) return byArea;
-      return b.fps.compareTo(a.fps);
+      return direction * a.fps.compareTo(b.fps);
     });
     return modes;
   }
@@ -489,7 +500,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   void _resetStallTracking() {
     _stallLastSequence = latestFrameSequence();
-    _stallLastProgress = DateTime.now();
+    _stallLastProgress = _stallClock.elapsed;
     _inStallEpisode = false;
     _restartAttempts = 0;
   }
@@ -503,7 +514,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     }
 
     final int sequence = latestFrameSequence();
-    final DateTime now = DateTime.now();
+    final Duration now = _stallClock.elapsed;
     if (sequence != _stallLastSequence) {
       _stallLastSequence = sequence;
       _stallLastProgress = now;
@@ -513,7 +524,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     }
 
     if (_inStallEpisode) return;
-    final Duration silence = now.difference(_stallLastProgress);
+    final Duration silence = now - _stallLastProgress;
     if (silence < config.stallTimeout) return;
 
     final _PreviewRequest? request = _lastPreviewRequest;
@@ -554,7 +565,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
         if (_sessionEpoch != epoch || _stallConfig == null) return;
         if (result.success) {
           _stallLastSequence = latestFrameSequence();
-          _stallLastProgress = DateTime.now();
+          _stallLastProgress = _stallClock.elapsed;
           _inStallEpisode = false;
           _restartAttempts = 0;
           _stallEventController.add(

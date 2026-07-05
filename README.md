@@ -180,8 +180,21 @@ if (result.success) {
 
 By default candidates come from `supportedModes()` ordered MJPEG-first
 (compressed modes are far less likely to exceed USB bandwidth), then by
-resolution and frame rate descending, capped at `maxCandidates` (default 8).
-Pass `candidates` to control the order yourself.
+resolution and frame rate according to `preference`, capped at
+`maxCandidates` (default 8):
+
+- `UvcAutoPreviewPreference.reliability` (default) — smaller resolutions
+  first; attaches fastest and is least likely to hit bandwidth limits.
+- `UvcAutoPreviewPreference.quality` — larger resolutions first; picks the
+  best-looking mode that actually streams.
+
+```dart
+final UvcAutoPreviewResult result = await uvcCamera.startPreviewAuto(
+  preference: UvcAutoPreviewPreference.quality,
+);
+```
+
+Pass `candidates` to control the order yourself; `preference` is then ignored.
 
 #### Preview transform
 
