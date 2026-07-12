@@ -31,7 +31,7 @@ class _FakeCamera implements UvcCamera {
   @override
   Future<void> closeUsbDevice() async {}
   @override
-  Future<int> switchDevice(int deviceId) async => -1;
+  Future<int> switchUsbDevice(int deviceId) async => -1;
   @override
   int openFd(int fd) => -1;
   @override

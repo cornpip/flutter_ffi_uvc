@@ -1117,7 +1117,7 @@ abstract interface class UvcCamera {
   /// Returns 0 on success, or a negative native error code from the open.
   /// Throws [PlatformException] if the USB layer fails (e.g. permission denied,
   /// device not found), same as [openUsbDevice].
-  Future<int> switchDevice(int deviceId);
+  Future<int> switchUsbDevice(int deviceId);
 
   /// Opens a UVC device using an already acquired platform file descriptor.
   int openFd(int fd);
