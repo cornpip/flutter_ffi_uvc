@@ -314,6 +314,16 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   @override
+  Future<int> switchDevice(int deviceId) async {
+    _ensureAndroid();
+    if (isPreviewing) {
+      stopPreview();
+    }
+    await closeUsbDevice();
+    return openUsbDevice(deviceId);
+  }
+
+  @override
   int openFd(int fd) {
     final int result = _bindings.uvc_open_fd(fd);
     if (result == 0) {

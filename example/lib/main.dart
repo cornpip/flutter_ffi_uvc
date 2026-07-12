@@ -188,9 +188,11 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
 
     try {
       await _ensurePreviewTexture();
+      // _stopCurrentPreview() does app-level UI teardown (stats timer, FPS,
+      // image); switchDevice() owns the native session lifecycle. Both are
+      // needed — they clean up different layers.
       await _stopCurrentPreview();
-      await _camera.closeUsbDevice();
-      final int openResult = await _camera.openUsbDevice(device.deviceId);
+      final int openResult = await _camera.switchDevice(device.deviceId);
       if (openResult != 0) {
         throw Exception('uvc_open_fd failed: ${_camera.lastError}');
       }

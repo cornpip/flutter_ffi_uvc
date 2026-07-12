@@ -1105,6 +1105,20 @@ abstract interface class UvcCamera {
   /// Closes the active USB device connection. Android only.
   Future<void> closeUsbDevice();
 
+  /// Safely tears down the current session and opens [deviceId]. Android only.
+  ///
+  /// Stops any running preview, closes the active USB device, then opens the
+  /// device identified by [deviceId] — the correct teardown order for moving
+  /// the shared native session from one device to another.
+  ///
+  /// Mode selection and preview start are intentionally left to the caller:
+  /// follow a successful switch with [startPreviewAuto] or [startPreview].
+  ///
+  /// Returns 0 on success, or a negative native error code from the open.
+  /// Throws [PlatformException] if the USB layer fails (e.g. permission denied,
+  /// device not found), same as [openUsbDevice].
+  Future<int> switchDevice(int deviceId);
+
   /// Opens a UVC device using an already acquired platform file descriptor.
   int openFd(int fd);
 
