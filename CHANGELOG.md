@@ -1,3 +1,18 @@
+## 0.7.0
+
+### Changed
+
+* `openUsbDevice()` now safely tears down any existing session first — stopping a running preview and closing the previous device — so switching cameras is just another `openUsbDevice` call, with no manual `closeUsbDevice` needed in between. On any failure nothing is left open: a partially opened device is closed before the error is reported.
+* `supportedModes()` no longer returns duplicate modes. A device can report the same format/resolution/fps combination more than once (e.g. two frame intervals rounding to the same integer fps); the returned list now contains each mode only once.
+
+### Added
+
+* `UvcCameraMode` now implements value-based equality (`==`/`hashCode`) over format, resolution, and fps.
+
+### Fixed
+
+* Fixed a crash when a mode returned by `startPreviewAuto()` was used as the selected value of a `DropdownButton` built from `supportedModes()` — the same mode from the two calls did not compare equal.
+
 ## 0.6.0
 
 ### Added
