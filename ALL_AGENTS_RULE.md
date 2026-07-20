@@ -6,7 +6,7 @@
 
 - Treat this repository as an Android-only Flutter FFI package for general UVC camera support.
 - Keep the package general-purpose. Do not turn it into a single-device integration.
-- Do not expand scope to USB enumeration or Android permission handling unless explicitly requested.
+- Keep the existing USB enumeration and Android permission surface minimal — it exists only to open a UVC camera (list devices, acquire permission, hand a file descriptor to the native layer). Do not grow it into general USB-stack management (hub topology, reconnection policies, vendor-specific USB parsing, per-device permission state machines) unless explicitly requested. Session-lifecycle behavior over the existing surface (e.g. openUsbDevice safely tearing down the previous session before switching devices) is in scope; new USB infrastructure is not.
 - Assume the public Dart API wraps a single shared native camera session unless the architecture is intentionally redesigned.
 
 ## Native And Preview Strategy

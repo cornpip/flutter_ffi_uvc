@@ -294,13 +294,30 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   @override
   Future<int> openUsbDevice(int deviceId) async {
     _ensureAndroid();
+    // Tear down any existing session first: the package wraps a single shared
+    // native session, so opening a device always means making it the active
+    // one. Both calls are safe no-ops when nothing is open.
+    if (isPreviewing) {
+      stopPreview();
+    }
+    await closeUsbDevice();
     final Map<Object?, Object?>? result = await _usbChannel
         .invokeMapMethod<Object?, Object?>(
       'openUsbDevice',
       <String, Object?>{'deviceId': deviceId},
     );
     final int fd = result?['fileDescriptor'] as int? ?? -1;
-    return openFd(fd);
+    final int openResult = openFd(fd);
+    if (openResult != 0) {
+      // The Android USB connection is open but the native session failed to
+      // attach to it; close it so any failure leaves nothing open.
+      try {
+        await closeUsbDevice();
+      } catch (_) {
+        // Cleanup failure must not mask the original open error.
+      }
+    }
+    return openResult;
   }
 
   @override
@@ -330,11 +347,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     // Requests recorded by startPreview for the same mode are kept so their
     // policy/timeout parameters survive.
     final _PreviewRequest? existing = _lastPreviewRequest;
-    final bool sameMode = existing != null &&
-        existing.mode.frameFormat == mode.frameFormat &&
-        existing.mode.width == mode.width &&
-        existing.mode.height == mode.height &&
-        existing.mode.fps == mode.fps;
+    final bool sameMode = existing != null && existing.mode == mode;
     if (!sameMode) {
       _lastPreviewRequest = _PreviewRequest(
         mode: mode,
@@ -934,11 +947,15 @@ class _FlutterFfiUvcCamera implements UvcCamera {
         length: copiedBytes,
       );
       final List<dynamic> decoded = jsonDecode(jsonString) as List<dynamic>;
+      // The native layer emits one entry per descriptor interval, and integer
+      // fps truncation can collapse distinct intervals into identical mode
+      // tuples — dedupe so consumers never see duplicates.
       return decoded
           .map(
             (dynamic item) =>
                 UvcCameraMode.fromJson(item as Map<String, dynamic>),
           )
+          .toSet()
           .toList();
     } finally {
       calloc.free(nativeBuffer);

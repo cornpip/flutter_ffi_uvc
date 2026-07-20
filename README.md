@@ -77,6 +77,11 @@ descriptor, then passes it to libusb to open the session. It throws a
 `PlatformException` if the Android layer fails, and returns a non-zero code if
 libusb/libuvc fails to initialize.
 
+If another device is already open, `openUsbDevice` safely tears down the current
+session first (stopping any running preview and closing the previous device), so
+switching between cameras is just another `openUsbDevice` call — no manual
+`closeUsbDevice` needed in between.
+
 To close and release the USB connection:
 
 ```dart

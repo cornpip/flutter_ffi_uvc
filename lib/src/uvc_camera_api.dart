@@ -350,6 +350,20 @@ class UvcCameraMode {
 
   String get label => '$formatName ${width}x$height @ ${fps}fps';
 
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UvcCameraMode &&
+          other.frameFormat == frameFormat &&
+          other.formatName == formatName &&
+          other.width == width &&
+          other.height == height &&
+          other.fps == fps;
+
+  @override
+  int get hashCode =>
+      Object.hash(frameFormat, formatName, width, height, fps);
+
   Map<String, Object?> toJson() {
     return <String, Object?>{
       'format': frameFormat,
@@ -1097,6 +1111,15 @@ abstract interface class UvcCamera {
   /// Opens a USB device by [deviceId], acquiring USB permission if needed,
   /// then passes the resulting file descriptor to the native UVC layer.
   ///
+  /// If another device is already open, the shared native session is safely
+  /// torn down first — any running preview is stopped and the previous device
+  /// is closed — so calling this again is also how you switch between devices.
+  /// On any failure nothing is left open: the previous session's teardown is
+  /// not rolled back, and a partially opened new device is closed before the
+  /// error is reported. Mode selection and preview start are left to the
+  /// caller: follow a successful open with [startPreviewAuto] or
+  /// [startPreview].
+  ///
   /// Returns 0 on success, or a negative native error code.
   /// Throws [PlatformException] if the USB layer fails (e.g. permission denied,
   /// device not found).
@@ -1285,6 +1308,9 @@ abstract interface class UvcCamera {
   int setRegionOfInterestControl(UvcRegionOfInterestControl value);
 
   /// Returns the camera modes reported by the currently opened device.
+  ///
+  /// Descriptor entries that collapse into identical mode tuples are
+  /// deduplicated; each returned mode is unique by [UvcCameraMode] equality.
   List<UvcCameraMode> supportedModes();
 
   // ---------------------------------------------------------------------------
