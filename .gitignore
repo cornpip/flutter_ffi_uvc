@@ -17,7 +17,8 @@ migrate_working_dir/
 *.ipr
 *.iws
 .idea/
-.claude/
+/.claude/*
+!/.claude/skills/
 .codex
 
 # The .vscode folder contains launch configuration and tasks you configure in
