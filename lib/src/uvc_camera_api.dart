@@ -350,6 +350,20 @@ class UvcCameraMode {
 
   String get label => '$formatName ${width}x$height @ ${fps}fps';
 
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UvcCameraMode &&
+          other.frameFormat == frameFormat &&
+          other.formatName == formatName &&
+          other.width == width &&
+          other.height == height &&
+          other.fps == fps;
+
+  @override
+  int get hashCode =>
+      Object.hash(frameFormat, formatName, width, height, fps);
+
   Map<String, Object?> toJson() {
     return <String, Object?>{
       'format': frameFormat,

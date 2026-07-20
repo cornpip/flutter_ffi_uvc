@@ -197,7 +197,11 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         throw Exception('uvc_open_fd failed: ${_camera.lastError}');
       }
 
-      final List<UvcCameraMode> libuvcModes = _camera.supportedModes();
+      // Descriptors can repeat identical mode tuples; duplicates would trip
+      // the mode dropdown's unique-value assertion now that UvcCameraMode
+      // has value equality.
+      final List<UvcCameraMode> libuvcModes =
+          _camera.supportedModes().toSet().toList();
       final List<UvcCameraControl> controls = _camera.supportedControls();
       _log(
         'Controls: ${controls.map((UvcCameraControl c) => '${c.name}(id=${c.id.nativeValue},cur=${c.cur})').join(', ')}',

@@ -340,11 +340,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     // Requests recorded by startPreview for the same mode are kept so their
     // policy/timeout parameters survive.
     final _PreviewRequest? existing = _lastPreviewRequest;
-    final bool sameMode = existing != null &&
-        existing.mode.frameFormat == mode.frameFormat &&
-        existing.mode.width == mode.width &&
-        existing.mode.height == mode.height &&
-        existing.mode.fps == mode.fps;
+    final bool sameMode = existing != null && existing.mode == mode;
     if (!sameMode) {
       _lastPreviewRequest = _PreviewRequest(
         mode: mode,
