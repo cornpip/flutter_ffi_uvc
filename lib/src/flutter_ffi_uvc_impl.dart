@@ -294,6 +294,13 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   @override
   Future<int> openUsbDevice(int deviceId) async {
     _ensureAndroid();
+    // Tear down any existing session first: the package wraps a single shared
+    // native session, so opening a device always means making it the active
+    // one. Both calls are safe no-ops when nothing is open.
+    if (isPreviewing) {
+      stopPreview();
+    }
+    await closeUsbDevice();
     final Map<Object?, Object?>? result = await _usbChannel
         .invokeMapMethod<Object?, Object?>(
       'openUsbDevice',
@@ -311,16 +318,6 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     _tearDownNativeErrorListener();
     _bindings.uvc_close_device();
     await _usbChannel.invokeMethod<void>('closeUsbDevice');
-  }
-
-  @override
-  Future<int> switchUsbDevice(int deviceId) async {
-    _ensureAndroid();
-    if (isPreviewing) {
-      stopPreview();
-    }
-    await closeUsbDevice();
-    return openUsbDevice(deviceId);
   }
 
   @override
