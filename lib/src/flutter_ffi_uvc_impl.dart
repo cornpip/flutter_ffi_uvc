@@ -307,7 +307,17 @@ class _FlutterFfiUvcCamera implements UvcCamera {
       <String, Object?>{'deviceId': deviceId},
     );
     final int fd = result?['fileDescriptor'] as int? ?? -1;
-    return openFd(fd);
+    final int openResult = openFd(fd);
+    if (openResult != 0) {
+      // The Android USB connection is open but the native session failed to
+      // attach to it; close it so any failure leaves nothing open.
+      try {
+        await closeUsbDevice();
+      } catch (_) {
+        // Cleanup failure must not mask the original open error.
+      }
+    }
+    return openResult;
   }
 
   @override

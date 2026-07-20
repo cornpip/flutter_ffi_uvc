@@ -1114,8 +1114,11 @@ abstract interface class UvcCamera {
   /// If another device is already open, the shared native session is safely
   /// torn down first — any running preview is stopped and the previous device
   /// is closed — so calling this again is also how you switch between devices.
-  /// Mode selection and preview start are left to the caller: follow a
-  /// successful open with [startPreviewAuto] or [startPreview].
+  /// On any failure nothing is left open: the previous session's teardown is
+  /// not rolled back, and a partially opened new device is closed before the
+  /// error is reported. Mode selection and preview start are left to the
+  /// caller: follow a successful open with [startPreviewAuto] or
+  /// [startPreview].
   ///
   /// Returns 0 on success, or a negative native error code.
   /// Throws [PlatformException] if the USB layer fails (e.g. permission denied,
