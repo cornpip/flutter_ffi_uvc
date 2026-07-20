@@ -937,11 +937,15 @@ class _FlutterFfiUvcCamera implements UvcCamera {
         length: copiedBytes,
       );
       final List<dynamic> decoded = jsonDecode(jsonString) as List<dynamic>;
+      // The native layer emits one entry per descriptor interval, and integer
+      // fps truncation can collapse distinct intervals into identical mode
+      // tuples — dedupe so consumers never see duplicates.
       return decoded
           .map(
             (dynamic item) =>
                 UvcCameraMode.fromJson(item as Map<String, dynamic>),
           )
+          .toSet()
           .toList();
     } finally {
       calloc.free(nativeBuffer);

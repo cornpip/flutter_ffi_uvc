@@ -1305,6 +1305,9 @@ abstract interface class UvcCamera {
   int setRegionOfInterestControl(UvcRegionOfInterestControl value);
 
   /// Returns the camera modes reported by the currently opened device.
+  ///
+  /// Descriptor entries that collapse into identical mode tuples are
+  /// deduplicated; each returned mode is unique by [UvcCameraMode] equality.
   List<UvcCameraMode> supportedModes();
 
   // ---------------------------------------------------------------------------
