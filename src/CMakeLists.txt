@@ -11,7 +11,7 @@ set(BUILD_TEST OFF CACHE BOOL "" FORCE)
 set(CMAKE_BUILD_TARGET Static CACHE STRING "" FORCE)
 
 if(ANDROID AND NOT TARGET LibUSB::LibUSB)
-  set(LIBUSB_ANDROID_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libusb-android")
+  set(LIBUSB_ANDROID_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/backend_libuvc/third_party/libusb-android")
   set(LIBUSB_ANDROID_INCLUDE_DIR "${LIBUSB_ANDROID_ROOT}/include")
   set(LIBUSB_ANDROID_LIBRARY "${LIBUSB_ANDROID_ROOT}/${ANDROID_ABI}/libusb1.0.so")
 
@@ -31,14 +31,14 @@ if(ANDROID AND NOT TARGET LibUSB::LibUSB)
     message(FATAL_ERROR
       "libuvc needs libusb on Android. Provide -DLIBUSB_INCLUDE_DIR and "
       "-DLIBUSB_LIBRARY to CMake, or vendor a prebuilt at "
-      "src/third_party/libusb-android/<abi>/libusb1.0.so with headers in "
-      "src/third_party/libusb-android/include."
+      "src/backend_libuvc/third_party/libusb-android/<abi>/libusb1.0.so with "
+      "headers in src/backend_libuvc/third_party/libusb-android/include."
     )
   endif()
 endif()
 
 if(ANDROID AND NOT TARGET JPEG::JPEG)
-  set(JPEG_TURBO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/libjpeg-turbo")
+  set(JPEG_TURBO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/backend_libuvc/third_party/libjpeg-turbo")
   set(JPEG_TURBO_COMMON_INCLUDE_DIR "${JPEG_TURBO_ROOT}/include")
 
   if(ANDROID_ABI STREQUAL "arm64-v8a")
@@ -69,22 +69,23 @@ if(ANDROID AND NOT TARGET JPEG::JPEG)
   endif()
 endif()
 
-add_subdirectory(libuvc)
+add_subdirectory(backend_libuvc/libuvc)
 
 add_library(flutter_ffi_uvc SHARED
-  "flutter_ffi_uvc.c"
+  "backend_libuvc/flutter_ffi_uvc.c"
 )
 
 set_target_properties(flutter_ffi_uvc PROPERTIES
-  PUBLIC_HEADER flutter_ffi_uvc.h
+  PUBLIC_HEADER include/flutter_ffi_uvc.h
   OUTPUT_NAME "flutter_ffi_uvc"
 )
 
 target_compile_definitions(flutter_ffi_uvc PUBLIC DART_SHARED_LIB)
 target_link_libraries(flutter_ffi_uvc PRIVATE LibUVC::UVCStatic)
 target_include_directories(flutter_ffi_uvc PRIVATE
-  "${CMAKE_CURRENT_SOURCE_DIR}/libuvc/include"
-  "${CMAKE_CURRENT_BINARY_DIR}/libuvc/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/include"
+  "${CMAKE_CURRENT_SOURCE_DIR}/backend_libuvc/libuvc/include"
+  "${CMAKE_CURRENT_BINARY_DIR}/backend_libuvc/libuvc/include"
 )
 
 if (ANDROID)

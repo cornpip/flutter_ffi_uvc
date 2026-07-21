@@ -4,17 +4,21 @@
 
 ## Scope
 
-- Treat this repository as an Android-only Flutter FFI package for general UVC camera support.
+- Treat this repository as a Flutter FFI package for general UVC camera support on Android and Windows.
+- The public Dart API (`UvcCamera` and its data types) is one platform-neutral surface. Platform differences live in the native backends behind the shared C ABI (`src/include/flutter_ffi_uvc.h`) and the shared MethodChannel contracts; do not fork the Dart API per platform.
+- Members that only make sense on one platform (e.g. `openFd`/`closeFd`, `debugBmControls`) stay in the API, documented as platform-specific, and fail with `UnsupportedError` or an empty/`notSupported` result elsewhere.
 - Keep the package general-purpose. Do not turn it into a single-device integration.
 - Keep the existing USB enumeration and Android permission surface minimal — it exists only to open a UVC camera (list devices, acquire permission, hand a file descriptor to the native layer). Do not grow it into general USB-stack management (hub topology, reconnection policies, vendor-specific USB parsing, per-device permission state machines) unless explicitly requested. Session-lifecycle behavior over the existing surface (e.g. openUsbDevice safely tearing down the previous session before switching devices) is in scope; new USB infrastructure is not.
 - Assume the public Dart API wraps a single shared native camera session unless the architecture is intentionally redesigned.
 
 ## Native And Preview Strategy
 
-- Keep `libuvc` as the default native preview path.
+- Android: keep `libuvc` as the default native preview path, and treat `libuvc` stream transport handling as the source of truth there.
+- Windows: the native backend is Media Foundation (`windows/uvc_mf_backend.cpp`). Do not introduce libusb/WinUSB paths on Windows — they require replacing the in-box `usbvideo.sys` driver and are out of scope.
+- H264 native types are deliberately excluded from the Windows mode list; do not re-add them as preview modes (rationale: `doc/windows-backend.md`).
+- Both backends implement the same exported C ABI and emit byte-compatible JSON (modes, controls, stream stats) so the Dart layer stays backend-agnostic. When the ABI or a JSON contract changes, change both backends together.
 - Keep MJPEG decode in the native path unless there is a strong reason to move it.
-- Prefer improving the existing native path over adding parallel preview pipelines or Dart-side format-specific workarounds.
-- Treat `libuvc` stream transport handling as the source of truth.
+- Prefer improving the existing native paths over adding parallel preview pipelines or Dart-side format-specific workarounds.
 
 ## Generated Files
 

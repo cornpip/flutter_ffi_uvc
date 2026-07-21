@@ -275,14 +275,14 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   @override
   Future<bool> ensureCameraPermission() async {
-    _ensureAndroid();
+    _ensureSupportedPlatform();
     return await _usbChannel.invokeMethod<bool>('ensureCameraPermission') ??
         false;
   }
 
   @override
   Future<List<UvcUsbDevice>> listUsbDevices() async {
-    _ensureAndroid();
+    _ensureSupportedPlatform();
     final List<Object?>? raw =
         await _usbChannel.invokeListMethod<Object?>('listUsbDevices');
     return (raw ?? <Object?>[])
@@ -293,7 +293,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   @override
   Future<int> openUsbDevice(int deviceId) async {
-    _ensureAndroid();
+    _ensureSupportedPlatform();
     // Tear down any existing session first: the package wraps a single shared
     // native session, so opening a device always means making it the active
     // one. Both calls are safe no-ops when nothing is open.
@@ -307,10 +307,10 @@ class _FlutterFfiUvcCamera implements UvcCamera {
       <String, Object?>{'deviceId': deviceId},
     );
     final int fd = result?['fileDescriptor'] as int? ?? -1;
-    final int openResult = openFd(fd);
+    final int openResult = _openFdNative(fd);
     if (openResult != 0) {
-      // The Android USB connection is open but the native session failed to
-      // attach to it; close it so any failure leaves nothing open.
+      // The platform-side open succeeded but the native session failed to
+      // attach; close it so any failure leaves nothing open.
       try {
         await closeUsbDevice();
       } catch (_) {
@@ -322,7 +322,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   @override
   Future<void> closeUsbDevice() async {
-    _ensureAndroid();
+    _ensureSupportedPlatform();
     _sessionEpoch += 1;
     _resetStallTracking();
     _tearDownNativeErrorListener();
@@ -332,6 +332,15 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   @override
   int openFd(int fd) {
+    _ensureAndroidOnlyApi('openFd');
+    return _openFdNative(fd);
+  }
+
+  /// Shared native-open step. On Android the value is a real file descriptor;
+  /// on Windows the native layer interprets it as the enumeration device id
+  /// handed back by the openUsbDevice platform channel. That mapping is an
+  /// internal detail — the public [openFd] stays Android-only.
+  int _openFdNative(int fd) {
     final int result = _bindings.uvc_open_fd(fd);
     if (result == 0) {
       _setupNativeErrorListener();
@@ -457,6 +466,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   @override
   void closeFd() {
+    _ensureAndroidOnlyApi('closeFd');
     _sessionEpoch += 1;
     _resetStallTracking();
     _tearDownNativeErrorListener();
@@ -480,7 +490,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   @override
   Stream<UvcDeviceEvent> get deviceEvents {
-    _ensureAndroid();
+    _ensureSupportedPlatform();
     return _deviceEventStream ??= _deviceEventChannel
         .receiveBroadcastStream()
         .map(
@@ -670,7 +680,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   @override
   Future<int> createPreviewTexture() async {
-    _ensureAndroid();
+    _ensureSupportedPlatform();
     final int? textureId = await _textureChannel.invokeMethod<int>(
       'createPreviewTexture',
     );
@@ -685,7 +695,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   @override
   Future<void> disposePreviewTexture(int textureId) async {
-    _ensureAndroid();
+    _ensureSupportedPlatform();
     await _textureChannel.invokeMethod<void>(
       'disposePreviewTexture',
       <String, Object?>{'textureId': textureId},
@@ -698,7 +708,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     int? width,
     int? height,
   }) async {
-    _ensureAndroid();
+    _ensureSupportedPlatform();
     await _textureChannel.invokeMethod<void>(
       'attachPreviewTexture',
       <String, Object?>{
@@ -969,13 +979,31 @@ DynamicLibrary? _cachedDylib;
 FlutterFfiUvcBindings? _cachedBindings;
 
 DynamicLibrary get _dylib {
-  _ensureAndroid();
-  return _cachedDylib ??= DynamicLibrary.open('lib$_libName.so');
+  _ensureSupportedPlatform();
+  return _cachedDylib ??= DynamicLibrary.open(
+    // On Windows the FFI symbols are exported from the plugin DLL, which also
+    // hosts the Media Foundation backend and the platform channels.
+    Platform.isWindows ? '${_libName}_plugin.dll' : 'lib$_libName.so',
+  );
 }
 
-void _ensureAndroid() {
+void _ensureSupportedPlatform() {
+  if (!Platform.isAndroid && !Platform.isWindows) {
+    throw UnsupportedError(
+      'flutter_ffi_uvc is supported only on Android and Windows.',
+    );
+  }
+}
+
+/// Guard for fd-based APIs, which only mean something on Android. Failing
+/// fast here keeps callers from depending on what the native layer happens to
+/// do with the value elsewhere.
+void _ensureAndroidOnlyApi(String apiName) {
+  _ensureSupportedPlatform();
   if (!Platform.isAndroid) {
-    throw UnsupportedError('flutter_ffi_uvc is supported only on Android.');
+    throw UnsupportedError(
+      '$apiName is Android-only. Use openUsbDevice/closeUsbDevice on Windows.',
+    );
   }
 }
 

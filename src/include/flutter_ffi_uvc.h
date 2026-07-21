@@ -16,6 +16,12 @@
 #define FFI_PLUGIN_EXPORT
 #endif
 
+// The Windows backend implements this ABI in C++; the unmangled C names are
+// what Dart FFI looks up in the plugin DLL.
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // A very short-lived native function.
 //
 // For very short-lived functions, it is fine to call them on the main isolate.
@@ -151,3 +157,7 @@ FFI_PLUGIN_EXPORT int uvc_set_region_of_interest_values(
     uint16_t roi_bottom,
     uint16_t roi_right,
     uint16_t auto_controls);
+
+#ifdef __cplusplus
+}
+#endif

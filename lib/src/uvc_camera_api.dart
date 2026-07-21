@@ -884,7 +884,7 @@ class UvcPreviewTransform {
       'flipH: $flipHorizontal, flipV: $flipVertical)';
 }
 
-/// Information about a UVC-capable USB device discovered on Android.
+/// Information about a discovered UVC-capable USB device.
 class UvcUsbDevice {
   const UvcUsbDevice({
     required this.deviceId,
@@ -945,7 +945,7 @@ enum UvcDeviceEventType {
   detached,
 }
 
-/// A USB attach/detach event for a UVC-capable device. Android only.
+/// A USB attach/detach event for a UVC-capable device.
 ///
 /// Detach events for the currently opened device mean the native session has
 /// lost its transport; call [UvcCamera.closeUsbDevice] (or [UvcCamera.closeFd])
@@ -1048,7 +1048,7 @@ class UvcStallEvent {
 /// [UvcCamera.startPreviewAuto].
 ///
 /// Both strategies try MJPEG before uncompressed formats — compressed modes
-/// are far less likely to exceed USB bandwidth on Android — and differ only in
+/// are far less likely to exceed USB bandwidth — and differ only in
 /// how resolutions are ordered within each format group. Ignored when an
 /// explicit `candidates` list is passed.
 enum UvcAutoPreviewPreference {
@@ -1092,24 +1092,34 @@ abstract interface class UvcCamera {
   /// active. The setting applies to the shared native camera session.
   void setLogLevel(UvcLogLevel level);
 
-  /// Requests the CAMERA permission. Android only.
+  /// Requests the CAMERA permission.
   ///
   /// Returns true if the permission is already granted or the user grants it.
+  /// On Windows there is no runtime permission dialog; this returns true and
+  /// OS-level camera privacy settings surface as open/stream failures instead.
   Future<bool> ensureCameraPermission();
 
-  /// Lists USB devices that expose a UVC video interface. Android only.
+  /// Lists USB devices that expose a UVC video interface.
+  ///
+  /// On Windows, devices are enumerated through Media Foundation;
+  /// [UvcUsbDevice.hasPermission] is always true there.
   Future<List<UvcUsbDevice>> listUsbDevices();
 
-  /// Stream of USB attach/detach events for UVC-capable devices. Android only.
+  /// Stream of USB attach/detach events for UVC-capable devices.
   ///
-  /// This is a broadcast stream; the underlying Android receiver is registered
-  /// while at least one listener is subscribed. When the currently opened
+  /// This is a broadcast stream; the underlying platform listener (an Android
+  /// broadcast receiver / Windows device notifications) is registered while at
+  /// least one listener is subscribed. When the currently opened
   /// device reports [UvcDeviceEventType.detached], the native session has lost
   /// its transport — stop the preview and call [closeUsbDevice] or [closeFd].
   Stream<UvcDeviceEvent> get deviceEvents;
 
-  /// Opens a USB device by [deviceId], acquiring USB permission if needed,
-  /// then passes the resulting file descriptor to the native UVC layer.
+  /// Opens a USB device by [deviceId].
+  ///
+  /// On Android this acquires USB permission if needed and passes the
+  /// resulting file descriptor to the native UVC layer. On Windows the native
+  /// Media Foundation backend opens the device directly; no permission flow
+  /// is involved.
   ///
   /// If another device is already open, the shared native session is safely
   /// torn down first — any running preview is stopped and the previous device
@@ -1125,10 +1135,12 @@ abstract interface class UvcCamera {
   /// device not found).
   Future<int> openUsbDevice(int deviceId);
 
-  /// Closes the active USB device connection. Android only.
+  /// Closes the active USB device connection.
   Future<void> closeUsbDevice();
 
   /// Opens a UVC device using an already acquired platform file descriptor.
+  /// Android only — Windows has no file-descriptor concept; use
+  /// [openUsbDevice] there. Throws [UnsupportedError] on other platforms.
   int openFd(int fd);
 
   /// Starts the native preview stream for [mode] without frame verification.
@@ -1189,6 +1201,7 @@ abstract interface class UvcCamera {
   ///
   /// If the device was opened with [openUsbDevice], use [closeUsbDevice]
   /// instead — it closes both the native session and the USB connection.
+  /// Android only, like [openFd]; throws [UnsupportedError] elsewhere.
   void closeFd();
 
   /// Closes the active native device/session.
@@ -1281,7 +1294,8 @@ abstract interface class UvcCamera {
   /// Returns controls present in descriptor bmControls without GET_* probing.
   ///
   /// Intended for debugging device quirks where descriptor exposure and
-  /// readable/writable behavior differ.
+  /// readable/writable behavior differ. Android only — the Windows backend has
+  /// no raw descriptor access and returns an empty list.
   List<UvcBmControlInfo> debugBmControls();
 
   /// Returns the current value for a specific UVC control.

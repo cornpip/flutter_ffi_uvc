@@ -10,7 +10,7 @@ Their licenses remain in force for those components.
 
 ## libuvc
 
-- Path: `src/libuvc`
+- Path: `src/backend_libuvc/libuvc`
 - Upstream: `https://github.com/libuvc/libuvc`
 - Upstream source base revision:
   `047920bcdfb1dac42424c90de5cc77dfc9fba04d`
@@ -19,14 +19,14 @@ Their licenses remain in force for those components.
 `libuvc` is redistributed in source form in this repository. The full upstream
 license text is kept in:
 
-- `src/libuvc/LICENSE.txt`
+- `src/backend_libuvc/libuvc/LICENSE.txt`
 
 The vendored `libuvc` source in this repository started from the upstream
 revision above and has been modified locally to fit `flutter_ffi_uvc`.
 
 ## libusb
 
-- Path: `src/third_party/libusb-android`
+- Path: `src/backend_libuvc/third_party/libusb-android`
 - Upstream: `https://github.com/libusb/libusb`
 - Upstream revision for vendored headers and prebuilt binaries:
   `2101df11b92272eebf0355818f84c12fd040e2ff`
@@ -40,11 +40,11 @@ terms for that library and any modifications to it.
 
 For convenience, the standard LGPL 2.1 text is provided in:
 
-- `src/third_party/libusb-android/COPYING`
+- `src/backend_libuvc/third_party/libusb-android/COPYING`
 
 ## libjpeg-turbo
 
-- Path: `src/third_party/libjpeg-turbo`
+- Path: `src/backend_libuvc/third_party/libjpeg-turbo`
 - Upstream: `https://github.com/libjpeg-turbo/libjpeg-turbo`
 - Upstream revision for vendored headers and prebuilt binaries:
   `96c5446cd661b1329ce5c97b297a924c2e2b5c63`
@@ -61,8 +61,8 @@ Modified BSD license for the TurboJPEG API library and related components.
 The upstream license texts are kept in this repository as verbatim reference
 copies:
 
-- `src/third_party/libjpeg-turbo/LICENSE.md`
-- `src/third_party/libjpeg-turbo/README.ijg`
+- `src/backend_libuvc/third_party/libjpeg-turbo/LICENSE.md`
+- `src/backend_libuvc/third_party/libjpeg-turbo/README.ijg`
 
 When distributing binaries that include `libjpeg-turbo`, upstream requires the
 following documentation notice:

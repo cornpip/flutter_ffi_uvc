@@ -7,6 +7,10 @@ SECRET_AGENTS_RULE.md
 # not need to ship in the package archive.
 readme_img/
 
+# Maintainer/design documentation lives in the repository; it is not needed
+# inside the package archive.
+doc/
+
 # Mirror of .gitignore — a .pubignore replaces (not merges with) .gitignore
 # for pub, so anything git ignores must be repeated here.
 *.class
@@ -48,6 +52,7 @@ example/.dart_tool/
 example/.flutter-plugins-dependencies
 example/build/
 example/pubspec.lock
+example/windows/flutter/ephemeral/
 
 pubspec.lock
 *.apk

@@ -1,3 +1,16 @@
+## 0.8.0
+
+### Added
+
+* Windows support (x64). The same Dart API now runs on Windows through a new Media Foundation backend — no libusb, no driver replacement. Backend notes and platform differences: `doc/windows-backend.md`.
+* The example app now runs on Windows as well.
+
+### Changed
+
+* `openFd`/`closeFd` are Android-only and now throw `UnsupportedError` on Windows, so callers cannot come to depend on the internal meaning the native layer gives the value there. `debugBmControls` stays soft (empty list on Windows, diagnostics-friendly), and compound relative controls (focus/zoom/pan-tilt relative, digital window, ROI) return `notSupported` — those reflect device capability, not platform.
+* H264 native types are excluded from `supportedModes()` on Windows: inter-frame coding conflicts with the package's per-frame validation model, and the Android backend has no H264 path either (`doc/windows-backend.md`).
+* Internal: native sources reorganized to make the two-backend layout explicit — the shared C ABI header now lives at `src/include/flutter_ffi_uvc.h`, and the libuvc backend (C implementation, vendored libuvc, third-party prebuilts) under `src/backend_libuvc/`. No consumer-facing impact.
+
 ## 0.7.0
 
 ### Changed

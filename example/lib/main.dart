@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
@@ -22,6 +23,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'UVC Preview Demo',
+      debugShowCheckedModeBanner: false,
       theme: buildExampleTheme(),
       home: UvcPreviewPage(),
     );
@@ -48,6 +50,33 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
 
   List<UvcUsbDevice> _devices = const <UvcUsbDevice>[];
   List<UvcCameraMode> _cameraModes = const <UvcCameraMode>[];
+  // Format filter for the mode dropdown (null = show all formats). Useful on
+  // Windows, where Media Foundation reports every format/resolution/fps
+  // combination and the flat list gets long.
+  String? _modeFormatFilter;
+
+  /// Where desktop builds save captures. Shown in the save toggle subtitle so
+  /// the destination is visible before capturing; the write path falls back to
+  /// the working directory if this folder does not exist.
+  Directory get _desktopCaptureDirectory {
+    final String? profile =
+        Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'];
+    if (profile == null) {
+      return Directory.current;
+    }
+    return Directory('$profile${Platform.pathSeparator}Pictures');
+  }
+
+  List<String> get _modeFormatNames => _cameraModes
+      .map((UvcCameraMode mode) => mode.formatName)
+      .toSet()
+      .toList();
+
+  List<UvcCameraMode> get _filteredCameraModes => _modeFormatFilter == null
+      ? _cameraModes
+      : _cameraModes
+            .where((UvcCameraMode mode) => mode.formatName == _modeFormatFilter)
+            .toList();
   List<UvcCameraControl> _cameraControls = const <UvcCameraControl>[];
   UvcUsbDevice? _selectedDevice;
   UvcCameraMode? _selectedMode;
@@ -88,7 +117,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     WidgetsBinding.instance.addObserver(this);
     _streamErrorSub = _camera.streamErrors.listen(_onStreamError);
     // USB hot-plug notifications: attach refreshes the list, detach of the
-    // active device tears the session down. Android only.
+    // active device tears the session down.
     _deviceEventSub = _camera.deviceEvents.listen(_onDeviceEvent);
     // Watchdog: report (and, when enabled, auto-recover from) silent stalls.
     _stallEventSub = _camera.stallEvents.listen(_onStallEvent);
@@ -260,6 +289,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       setState(() {
         _selectedDevice = device;
         _cameraModes = libuvcModes;
+        _modeFormatFilter = null;
         _cameraControls = controls;
         _selectedMode = startedMode ?? sortedModes.first;
         _openingDevice = false;
@@ -304,6 +334,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         _selectedDevice = null;
         _selectedMode = null;
         _cameraModes = const <UvcCameraMode>[];
+        _modeFormatFilter = null;
         _cameraControls = const <UvcCameraControl>[];
         _previewFrozen = false;
         _transformControlsExpanded = false;
@@ -763,15 +794,30 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
             .toIso8601String()
             .replaceAll(':', '-')
             .replaceAll('.', '-');
-        final String? savedUri = await _androidBridge.saveImageToGallery(
-          pngBytes,
-          displayName: 'uvc_capture_$timestamp.png',
-        );
-        _setStatus(
-          savedUri == null || savedUri.isEmpty
-              ? 'Saved capture to gallery.'
-              : 'Saved capture to gallery: $savedUri',
-        );
+        final String fileName = 'uvc_capture_$timestamp.png';
+        if (Platform.isAndroid) {
+          final String? savedUri = await _androidBridge.saveImageToGallery(
+            pngBytes,
+            displayName: fileName,
+          );
+          _setStatus(
+            savedUri == null || savedUri.isEmpty
+                ? 'Saved capture to gallery.'
+                : 'Saved capture to gallery: $savedUri',
+          );
+        } else {
+          // Desktop platforms have no media store; write into the user's
+          // Pictures folder (falling back to the working directory).
+          final Directory targetDir = _desktopCaptureDirectory;
+          final Directory dir = await targetDir.exists()
+              ? targetDir
+              : Directory.current;
+          final File file = File(
+            '${dir.path}${Platform.pathSeparator}$fileName',
+          );
+          await file.writeAsBytes(pngBytes, flush: true);
+          _setStatus('Saved capture to ${file.path}');
+        }
       }
       await _stopCurrentPreview();
       final ui.Image? previousImage = _previewImage;
@@ -1292,6 +1338,13 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                   horizontal: 12,
                                 ),
                                 title: const Text('Save capture to gallery'),
+                                subtitle: Platform.isAndroid
+                                    ? null
+                                    : Text(
+                                        _desktopCaptureDirectory.path,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
                                 value: _saveToGallery,
                                 onChanged: (bool value) =>
                                     setState(() => _saveToGallery = value),
@@ -1309,6 +1362,36 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                 value: _stallAutoRecover,
                                 onChanged: _setStallAutoRecover,
                               ),
+                            if (_modeFormatNames.length > 1)
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(
+                                  12,
+                                  8,
+                                  12,
+                                  0,
+                                ),
+                                child: Wrap(
+                                  spacing: 8,
+                                  children: <Widget>[
+                                    ChoiceChip(
+                                      label: const Text('All'),
+                                      selected: _modeFormatFilter == null,
+                                      onSelected: (_) => setState(
+                                        () => _modeFormatFilter = null,
+                                      ),
+                                    ),
+                                    for (final String format
+                                        in _modeFormatNames)
+                                      ChoiceChip(
+                                        label: Text(format),
+                                        selected: _modeFormatFilter == format,
+                                        onSelected: (_) => setState(
+                                          () => _modeFormatFilter = format,
+                                        ),
+                                      ),
+                                  ],
+                                ),
+                              ),
                             if (_cameraModes.isNotEmpty)
                               Padding(
                                 padding: const EdgeInsets.fromLTRB(
@@ -1319,9 +1402,16 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                 ),
                                 child: DropdownButton<UvcCameraMode>(
                                   isExpanded: true,
-                                  value: _selectedMode,
+                                  // A mode outside the active format filter
+                                  // stays running; the dropdown just shows the
+                                  // hint until a filtered mode is picked.
+                                  value:
+                                      _filteredCameraModes
+                                          .contains(_selectedMode)
+                                      ? _selectedMode
+                                      : null,
                                   hint: const Text('Select preview mode'),
-                                  items: _cameraModes
+                                  items: _filteredCameraModes
                                       .map(
                                         (UvcCameraMode mode) =>
                                             DropdownMenuItem<UvcCameraMode>(

@@ -1,10 +1,25 @@
 # flutter_ffi_uvc example
 
-`example` is the Android example app for the `flutter_ffi_uvc` plugin.
+`example` is the example app for the `flutter_ffi_uvc` plugin. It runs on
+Android and Windows from the same Dart code.
 
 ## Build note
 
 The most recent Flutter version used to build this example app was `3.41.4`.
+
+## Running on Windows
+
+Requirements: Visual Studio 2022 with the "Desktop development with C++"
+workload, and Windows Developer Mode enabled (`start ms-settings:developers`)
+so the Flutter tool can create plugin symlinks.
+
+```sh
+flutter run -d windows
+```
+
+UVC cameras work out of the box on Windows through Media Foundation — no
+driver replacement is needed. Captured photos are saved to the user's
+`Pictures` folder.
 
 ## Native tests
 
