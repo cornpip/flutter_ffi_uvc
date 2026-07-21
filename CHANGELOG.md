@@ -1,131 +1,116 @@
+## 0.8.1
+
+- update changelog.md
+
 ## 0.8.0
 
-### Added
-
-* Windows support (x64). The same Dart API now runs on Windows through a new Media Foundation backend — no libusb, no driver replacement. Backend notes and platform differences: `doc/windows-backend.md`.
-* The example app now runs on Windows as well.
-
-### Changed
-
-* `openFd`/`closeFd` are Android-only and throw `UnsupportedError` on Windows; use `openUsbDevice`/`closeUsbDevice` there.
-* On Windows, `supportedModes()` excludes H264 native types (`doc/windows-backend.md`).
+- add Windows support (x64) — the same Dart API runs on Windows through a new
+  Media Foundation backend;
+  - `openFd`/`closeFd` are Android-only and throw `UnsupportedError` on
+    Windows; use `openUsbDevice`/`closeUsbDevice` there
+  - on Windows, `supportedModes()` excludes H264 native types
+- example: runs on Windows as well
 
 ## 0.7.0
 
-### Changed
-
-* `openUsbDevice()` now safely tears down any existing session first — stopping a running preview and closing the previous device — so switching cameras is just another `openUsbDevice` call, with no manual `closeUsbDevice` needed in between. On any failure nothing is left open: a partially opened device is closed before the error is reported.
-* `supportedModes()` no longer returns duplicate modes. A device can report the same format/resolution/fps combination more than once (e.g. two frame intervals rounding to the same integer fps); the returned list now contains each mode only once.
-
-### Added
-
-* `UvcCameraMode` now implements value-based equality (`==`/`hashCode`) over format, resolution, and fps.
-
-### Fixed
-
-* Fixed a crash when a mode returned by `startPreviewAuto()` was used as the selected value of a `DropdownButton` built from `supportedModes()` — the same mode from the two calls did not compare equal.
+- change `openUsbDevice()` to tear down any existing session first, so
+  switching cameras is just another `openUsbDevice` call; on failure nothing
+  is left open
+- remove duplicate modes from `supportedModes()` results
+- add value-based equality (`==`/`hashCode`) to `UvcCameraMode`
+- fix a crash when a mode returned by `startPreviewAuto()` was used as the
+  selected value of a `DropdownButton` built from `supportedModes()`
 
 ## 0.6.0
 
-### Added
-
-* `deviceEvents` (`Stream<UvcDeviceEvent>`) — USB attach/detach events for UVC-capable devices, so apps can react when a camera is plugged in or unplugged mid-session. Android only.
-* `startPreviewAuto()` / `UvcAutoPreviewResult` — tries candidate modes in order (MJPEG-first, resolution/fps descending by default) and keeps the first mode that streams and verifies successfully. Per-mode verification results are returned in `UvcAutoPreviewResult.attempts`.
-* Stall detection: `enableStallDetection(UvcStallDetectionConfig)`, `disableStallDetection()`, and `stallEvents` (`Stream<UvcStallEvent>`). Detects when frame delivery stops while previewing and can optionally stop and restart the preview automatically with the most recent `startPreview` parameters.
-* Typed errors: `UvcErrorCode` (mirrors libuvc `uvc_error_t`) and `UvcException`. `UvcPreviewStartResult` gains `nativeErrorCode` and an `errorCode` getter for stream startup failures.
+- add `deviceEvents` (`Stream<UvcDeviceEvent>`) — USB attach/detach events for
+  UVC-capable devices; Android only
+- add `startPreviewAuto()` / `UvcAutoPreviewResult` — tries candidate modes in
+  order (MJPEG-first) and keeps the first mode that streams and verifies
+  successfully
+- add stall detection: `enableStallDetection(UvcStallDetectionConfig)`,
+  `disableStallDetection()`, and `stallEvents` (`Stream<UvcStallEvent>`), with
+  optional automatic preview restart
+- add typed errors: `UvcErrorCode` (mirrors libuvc `uvc_error_t`) and
+  `UvcException`; `UvcPreviewStartResult` gains `nativeErrorCode` and an
+  `errorCode` getter
 
 ## 0.5.0
 
-### Fixed
-
-* Rebuilt bundled third-party native libraries with 16 KB page alignment.
+- rebuild bundled third-party native libraries with 16 KB page alignment
 
 ## 0.4.1
 
-### Changed
-
-* Lowered minimum Dart SDK requirement to `^3.8.1`.
-* Lowered plugin Android `compileSdk` from 36 to 35 and pinned `ndkVersion` to `26.3.11579264` to align with Flutter 3.32.x defaults.
-* Example app: set `minSdk = 24` explicitly to satisfy the plugin's minimum Android API requirement.
+- lower the minimum Dart SDK requirement to `^3.8.1`
+- lower plugin Android `compileSdk` from 36 to 35 and pin `ndkVersion` to
+  `26.3.11579264` to align with Flutter 3.32.x defaults
+- example: set `minSdk = 24` explicitly
 
 ## 0.4.0
 
-### Fixed
-
-* Improved Android isochronous UVC streaming compatibility by limiting large ISO transfers and retrying with a smaller transfer size when initial submit fails.
-* Fixed UVC stream transfer selection to use the endpoint descriptor transfer type instead of assuming interfaces with multiple altsettings are always isochronous.
-* Fixed a libuvc streaming startup path that could report success even when no USB transfers were submitted.
-* Relaxed MJPEG pre-validation so decodable frames are not rejected before libjpeg-turbo can process them.
+- improve Android isochronous UVC streaming compatibility by limiting large
+  ISO transfers and retrying with a smaller size when the initial submit fails
+- fix UVC stream transfer selection to use the endpoint descriptor transfer
+  type
+- fix a libuvc streaming startup path that could report success with no
+  submitted transfers
+- relax MJPEG pre-validation so decodable frames are not rejected early
 
 ## 0.3.2
 
-### Added
-
-* `getStreamStats()` / `UvcStreamStats` — exposes cumulative native preview session stats such as input and delivered FPS, drop counts, decode failures, frame gap timing, and first-frame latency.
+- add `getStreamStats()` / `UvcStreamStats` — cumulative native preview
+  session stats (input/delivered FPS, drops, decode failures, frame gap
+  timing, first-frame latency)
 
 ## 0.3.1
 
-### Changed
-
-* Standardized the changelog structure and migration notes.
+- docs: standardize the changelog structure and migration notes
 
 ## 0.3.0
 
-### Added
-
-* `copyLatestFrameTransformed(UvcPreviewTransform)` — copies the latest frame with rotation and flip applied to the pixel data.
-* `UvcPreviewTransform.applyToSize(int width, int height)` — returns the width and height after applying the transform, for use with `AspectRatio` when displaying the preview `Texture`.
-
-### Fixed
-
-* Example: `AspectRatio` for the preview `Texture` was not updated when rotation was 90° or 270°.
+- add `copyLatestFrameTransformed(UvcPreviewTransform)` — copies the latest
+  frame with rotation and flip applied
+- add `UvcPreviewTransform.applyToSize(int width, int height)` — returns the
+  post-transform dimensions, for use with `AspectRatio`
+- example: fix the preview `AspectRatio` not updating for 90°/270° rotation
 
 ## 0.2.0
 
-### Breaking changes
-
-* `startPreview(mode)` now returns `Future<UvcPreviewStartResult>` instead of `int` and verifies frame delivery on startup before returning.
-
-### Migration notes
-
-* Update code that uses the `int` returned by `startPreview(mode)` to use `UvcPreviewStartResult` instead.
-* Use `openPreview(mode)` instead of `startPreview(mode)` if you want the previous non-verifying startup behaviour.
-
-### Added
-
-* Preview transform: rotation (0/90/180/270°) and flip (horizontal/vertical) applied to the Flutter `Texture` output. `copyLatestFrame()` always returns the original camera orientation unaffected. See `UvcPreviewTransform`, `setPreviewTransform()`, and the convenience helpers `rotatePreviewClockwise()`, `rotatePreviewCounterClockwise()`, `togglePreviewFlipHorizontal()`, `togglePreviewFlipVertical()`.
-* Streaming error reporting: frame pipeline errors (decode failures, undersized frames, buffer allocation failures) are now delivered proactively via `UvcCamera.streamErrors` (`Stream<UvcStreamError>`).
-* `startPreview(mode, {policy, consecutiveValidFrames, timeout})` — starts the preview stream and verifies frame delivery before returning. `UvcPreviewPolicy.stableFrames` (default) verifies both frame delivery and frame validity; `UvcPreviewPolicy.sequenceOnly` verifies frame delivery only. On success the stream remains running; on failure preview is stopped. Returns `UvcPreviewStartResult`.
-
-### Fixed
-
-* USB permission intent now explicitly sets the package name, improving permission reliability on Android.
-* libuvc initialization no longer triggers libusb device discovery
+- **BREAKING**: `startPreview(mode)` now returns
+  `Future<UvcPreviewStartResult>` instead of `int` and verifies frame delivery
+  before returning
+  - update code that uses the returned `int` to read `UvcPreviewStartResult`
+  - use `openPreview(mode)` for the previous non-verifying startup behaviour
+- add preview transform: rotation (0/90/180/270°) and flip applied to the
+  `Texture` output; `copyLatestFrame()` keeps the original orientation
+  (`UvcPreviewTransform`, `setPreviewTransform()`, and the rotate/flip
+  helpers)
+- add streaming error reporting via `UvcCamera.streamErrors`
+  (`Stream<UvcStreamError>`)
+- add `startPreview` verification policies: `UvcPreviewPolicy.stableFrames`
+  (default) or `sequenceOnly`
+- fix the USB permission intent to explicitly set the package name
+- fix libuvc initialization triggering libusb device discovery
 
 ## 0.1.0
 
-### Changed
-
-* `openUsbDevice(deviceId)` is now the standard USB opening path.
-* `openFd(fd)` remains available if you need to manage the USB file descriptor yourself.
-* Flutter `Texture` is now the standard preview path.
-* `copyLatestFrame()` is recommended for capture or frame inspection.
-
-### Migration notes
-
-* Use `openUsbDevice(deviceId)` instead of `openFd(fd)`. Get the `deviceId` from `listUsbDevices()`.
-
-### Added
-
-* USB device management is now handled by the package — `UvcUsbDevice`, `ensureCameraPermission()`, `listUsbDevices()`, `openUsbDevice()`, `closeUsbDevice()`.
-* Native preview renders directly into a Flutter `Texture` via `ANativeWindow` — `createPreviewTexture()`, `attachPreviewTexture()`, `disposePreviewTexture()`.
-* `uvc_stop_preview` now waits for any in-flight frame callback to finish before returning.
+- change the standard opening path to `openUsbDevice(deviceId)`; `openFd(fd)`
+  remains for self-managed file descriptors
+  - get the `deviceId` from `listUsbDevices()`
+- change the standard preview path to the Flutter `Texture`
+- add USB device management — `UvcUsbDevice`, `ensureCameraPermission()`,
+  `listUsbDevices()`, `openUsbDevice()`, `closeUsbDevice()`
+- add native preview rendering into a Flutter `Texture` —
+  `createPreviewTexture()`, `attachPreviewTexture()`,
+  `disposePreviewTexture()`
+- change `uvc_stop_preview` to wait for in-flight frame callbacks before
+  returning
 
 ## 0.0.2
 
-* Improve README documentation, including installation, usage, and package boundary clarifications.
-* Rename the example USB device class to `AndroidUsbDeviceEntry` to better reflect its role.
+- docs: improve the README (installation, usage, package boundaries)
+- example: rename the USB device class to `AndroidUsbDeviceEntry`
 
 ## 0.0.1
 
-* Initial public release.
+- initial public release

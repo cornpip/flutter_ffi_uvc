@@ -20,6 +20,12 @@
 - Keep MJPEG decode in the native path unless there is a strong reason to move it.
 - Prefer improving the existing native paths over adding parallel preview pipelines or Dart-side format-specific workarounds.
 
+## Changelog
+
+- Follow `doc/changelog-style.md` for all `CHANGELOG.md` entries: flat
+  verb-first bullets, no Added/Changed/Fixed headings, `**BREAKING**:` only
+  when user code must change.
+
 ## Generated Files
 
 - If native declarations change, regenerate bindings with `dart run ffigen --config ffigen.yaml`.

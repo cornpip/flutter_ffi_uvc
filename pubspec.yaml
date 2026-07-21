@@ -1,6 +1,6 @@
 name: flutter_ffi_uvc
 description: USB/UVC camera plugin for Android and Windows, with live preview, frame access, and device controls.
-version: 0.8.0
+version: 0.8.1
 repository: https://github.com/cornpip/flutter_ffi_uvc
 
 environment:
