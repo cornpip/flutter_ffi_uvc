@@ -80,6 +80,24 @@ FFI_PLUGIN_EXPORT void uvc_set_log_level(int level);
 // and do not affect the shared RGBA buffer returned by copyLatestFrame.
 FFI_PLUGIN_EXPORT void uvc_set_preview_transform(int rotation, int flip_h, int flip_v);
 
+// Encodes the latest preview frame to JPEG.
+// rotation/flip semantics match uvc_copy_latest_frame_rgba_transformed and are
+// applied before encoding; quality is clamped to 1-100. Returns the number of
+// JPEG bytes written to buffer, or 0 on failure (no frame yet, buffer too
+// small, or encoder error; see uvc_last_error). out_width/out_height report
+// the encoded (post-transform) dimensions; out_sequence reports the source
+// frame sequence.
+FFI_PLUGIN_EXPORT int uvc_take_picture_jpeg(
+    uint8_t *buffer,
+    int buffer_length,
+    int quality,
+    int rotation,
+    int flip_h,
+    int flip_v,
+    int *out_width,
+    int *out_height,
+    int64_t *out_sequence);
+
 // CT/PU camera control IDs
 // PU (Processing Unit) controls: 1-19
 #define UVC_CTRL_ID_BRIGHTNESS                  1

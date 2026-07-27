@@ -43,6 +43,7 @@ target_link_libraries(${PLUGIN_NAME} PRIVATE
   oleaut32.lib
   strmiids.lib
   user32.lib
+  windowscodecs.lib
 )
 
 # List of absolute paths to libraries that should be bundled with the plugin.

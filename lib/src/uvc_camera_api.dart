@@ -322,6 +322,29 @@ class UvcPreviewFrame {
   final int sequence;
 }
 
+/// A still picture captured from the latest preview frame, encoded to JPEG in
+/// the native layer.
+class UvcStillPicture {
+  const UvcStillPicture({
+    required this.width,
+    required this.height,
+    required this.jpegBytes,
+    this.sequence = 0,
+  });
+
+  /// Encoded (post-transform) width in pixels.
+  final int width;
+
+  /// Encoded (post-transform) height in pixels.
+  final int height;
+
+  /// The JPEG-encoded picture.
+  final Uint8List jpegBytes;
+
+  /// The preview frame sequence the picture was encoded from.
+  final int sequence;
+}
+
 /// A camera mode reported by the native UVC layer.
 class UvcCameraMode {
   const UvcCameraMode({
@@ -1256,6 +1279,10 @@ abstract interface class UvcCamera {
   Stream<UvcStallEvent> get stallEvents;
 
   /// Copies the latest RGBA frame from the shared native preview buffer.
+  ///
+  /// Use this (or [copyLatestFrameTransformed]) when raw pixels are the goal,
+  /// e.g. ML inference or frame analysis. To save a picture file, prefer
+  /// [takePicture], which encodes to JPEG in the native layer.
   UvcPreviewFrame? copyLatestFrame();
 
   /// Copies the latest RGBA frame with [transform] applied to the pixel data.
@@ -1263,6 +1290,20 @@ abstract interface class UvcCamera {
   /// The returned frame's [UvcPreviewFrame.width] and [UvcPreviewFrame.height]
   /// reflect the post-transform dimensions (swapped for 90° / 270° rotation).
   UvcPreviewFrame? copyLatestFrameTransformed(UvcPreviewTransform transform);
+
+  /// Encodes the latest preview frame to JPEG in the native layer.
+  ///
+  /// Use this when the goal is a picture file; the returned
+  /// [UvcStillPicture.jpegBytes] can be written to disk as-is. For raw pixel
+  /// access use [copyLatestFrame] or [copyLatestFrameTransformed] instead.
+  ///
+  /// [transform] defaults to [previewTransform] so the capture matches what
+  /// the preview shows; pass [UvcPreviewTransform.identity] for the raw sensor
+  /// orientation. [quality] is clamped to 1-100.
+  ///
+  /// Returns `null` when no frame has been delivered yet or the native encoder
+  /// fails (details via [lastError]).
+  UvcStillPicture? takePicture({int quality = 90, UvcPreviewTransform? transform});
 
   /// Returns the latest delivered preview frame sequence.
   ///

@@ -89,6 +89,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   bool _previewFrozen = false;
   bool _savingPhoto = false;
   bool _saveToGallery = false;
+  bool _capturePng = false;
   bool _transformControlsExpanded = false;
   bool _manualFocusControlsVisible = false;
   StreamSubscription<UvcStreamError>? _streamErrorSub;
@@ -611,11 +612,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     );
   }
 
-  Future<ui.Image> _decodeRgbaFrame(UvcPreviewFrame frame) {
-    return _decodeRgbaFrameWithDescriptor(frame);
-  }
-
-  Future<ui.Image> _decodeRgbaFrameWithDescriptor(UvcPreviewFrame frame) async {
+  // Builds a ui.Image directly from raw RGBA pixels (no compressed-format
+  // decode involved) for the PNG capture path and the frozen-preview display.
+  Future<ui.Image> _decodeRgbaFrame(UvcPreviewFrame frame) async {
     final ui.ImmutableBuffer buffer = await ui.ImmutableBuffer.fromUint8List(
       frame.rgbaBytes,
     );
@@ -774,31 +773,61 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     setState(() => _savingPhoto = true);
     ui.Image? capturedImage;
     try {
-      final UvcPreviewFrame? frame = _camera.copyLatestFrameTransformed(
-        _camera.previewTransform,
-      );
-      if (frame == null) {
-        throw Exception('No preview frame available to capture.');
-      }
-      capturedImage = await _decodeRgbaFrame(frame);
-      final ByteData? pngData = await capturedImage.toByteData(
-        format: ui.ImageByteFormat.png,
-      );
-      if (pngData == null) {
-        throw Exception('Failed to encode PNG from the current preview frame.');
+      final Uint8List imageBytes;
+      final String fileExtension;
+      final String mimeType;
+      if (_capturePng) {
+        // RGBA path: copyLatestFrame* returns raw, already-decoded pixels.
+        // Raw RGBA is not a file format — the app must encode it itself.
+        // Here the pixels become a ui.Image and are PNG-encoded (lossless,
+        // but larger and slower than takePicture's native JPEG).
+        final UvcPreviewFrame? frame = _camera.copyLatestFrameTransformed(
+          _camera.previewTransform,
+        );
+        if (frame == null) {
+          throw Exception('No preview frame available to capture.');
+        }
+        capturedImage = await _decodeRgbaFrame(frame);
+        final ByteData? pngData = await capturedImage.toByteData(
+          format: ui.ImageByteFormat.png,
+        );
+        if (pngData == null) {
+          throw Exception('Failed to encode PNG from the preview frame.');
+        }
+        imageBytes = pngData.buffer.asUint8List();
+        fileExtension = 'png';
+        mimeType = 'image/png';
+      } else {
+        // JPEG path: takePicture() encodes in the native layer and defaults
+        // to previewTransform, so the capture matches what the preview shows.
+        final UvcStillPicture? picture = _camera.takePicture();
+        if (picture == null) {
+          throw Exception('No preview frame available to capture.');
+        }
+        final ui.Codec codec = await ui.instantiateImageCodec(
+          picture.jpegBytes,
+        );
+        try {
+          capturedImage = (await codec.getNextFrame()).image;
+        } finally {
+          codec.dispose();
+        }
+        imageBytes = picture.jpegBytes;
+        fileExtension = 'jpg';
+        mimeType = 'image/jpeg';
       }
 
-      final Uint8List pngBytes = pngData.buffer.asUint8List();
       if (_saveToGallery) {
         final String timestamp = DateTime.now()
             .toIso8601String()
             .replaceAll(':', '-')
             .replaceAll('.', '-');
-        final String fileName = 'uvc_capture_$timestamp.png';
+        final String fileName = 'uvc_capture_$timestamp.$fileExtension';
         if (Platform.isAndroid) {
           final String? savedUri = await _androidBridge.saveImageToGallery(
-            pngBytes,
+            imageBytes,
             displayName: fileName,
+            mimeType: mimeType,
           );
           _setStatus(
             savedUri == null || savedUri.isEmpty
@@ -815,7 +844,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
           final File file = File(
             '${dir.path}${Platform.pathSeparator}$fileName',
           );
-          await file.writeAsBytes(pngBytes, flush: true);
+          await file.writeAsBytes(imageBytes, flush: true);
           _setStatus('Saved capture to ${file.path}');
         }
       }
@@ -1348,6 +1377,20 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                 value: _saveToGallery,
                                 onChanged: (bool value) =>
                                     setState(() => _saveToGallery = value),
+                              ),
+                            if (_cameraModes.isNotEmpty)
+                              SwitchListTile(
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                ),
+                                title: const Text('Capture as lossless PNG'),
+                                subtitle: const Text(
+                                  'Encode RGBA from copyLatestFrame in Dart '
+                                  'instead of native JPEG via takePicture',
+                                ),
+                                value: _capturePng,
+                                onChanged: (bool value) =>
+                                    setState(() => _capturePng = value),
                               ),
                             if (_cameraModes.isNotEmpty)
                               SwitchListTile(

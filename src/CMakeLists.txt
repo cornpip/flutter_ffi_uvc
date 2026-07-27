@@ -82,6 +82,13 @@ set_target_properties(flutter_ffi_uvc PROPERTIES
 
 target_compile_definitions(flutter_ffi_uvc PUBLIC DART_SHARED_LIB)
 target_link_libraries(flutter_ffi_uvc PRIVATE LibUVC::UVCStatic)
+
+# JPEG::JPEG comes from the vendored Android prebuilt above, or from libuvc's
+# normal JPEG discovery on other hosts. Still capture needs the encoder side.
+if(TARGET JPEG::JPEG)
+  target_link_libraries(flutter_ffi_uvc PRIVATE JPEG::JPEG)
+  target_compile_definitions(flutter_ffi_uvc PRIVATE FFI_UVC_HAS_JPEG=1)
+endif()
 target_include_directories(flutter_ffi_uvc PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
   "${CMAKE_CURRENT_SOURCE_DIR}/backend_libuvc/libuvc/include"

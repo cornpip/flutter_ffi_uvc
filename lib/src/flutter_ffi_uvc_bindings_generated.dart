@@ -4,7 +4,7 @@
 // ignore_for_file: type=lint, unused_import
 import 'dart:ffi' as ffi;
 
-/// Bindings for `src/flutter_ffi_uvc.h`.
+/// Bindings for `src/include/flutter_ffi_uvc.h`.
 ///
 /// Regenerate bindings with `dart run ffigen --config ffigen.yaml`.
 ///
@@ -318,6 +318,68 @@ class FlutterFfiUvcBindings {
       );
   late final _uvc_set_preview_transform = _uvc_set_preview_transformPtr
       .asFunction<void Function(int, int, int)>();
+
+  /// Encodes the latest preview frame to JPEG.
+  /// rotation/flip semantics match uvc_copy_latest_frame_rgba_transformed and are
+  /// applied before encoding; quality is clamped to 1-100. Returns the number of
+  /// JPEG bytes written to buffer, or 0 on failure (no frame yet, buffer too
+  /// small, or encoder error; see uvc_last_error). out_width/out_height report
+  /// the encoded (post-transform) dimensions; out_sequence reports the source
+  /// frame sequence.
+  int uvc_take_picture_jpeg(
+    ffi.Pointer<ffi.Uint8> buffer,
+    int buffer_length,
+    int quality,
+    int rotation,
+    int flip_h,
+    int flip_v,
+    ffi.Pointer<ffi.Int> out_width,
+    ffi.Pointer<ffi.Int> out_height,
+    ffi.Pointer<ffi.Int64> out_sequence,
+  ) {
+    return _uvc_take_picture_jpeg(
+      buffer,
+      buffer_length,
+      quality,
+      rotation,
+      flip_h,
+      flip_v,
+      out_width,
+      out_height,
+      out_sequence,
+    );
+  }
+
+  late final _uvc_take_picture_jpegPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+            ffi.Pointer<ffi.Int>,
+            ffi.Pointer<ffi.Int>,
+            ffi.Pointer<ffi.Int64>,
+          )
+        >
+      >('uvc_take_picture_jpeg');
+  late final _uvc_take_picture_jpeg = _uvc_take_picture_jpegPtr
+      .asFunction<
+        int Function(
+          ffi.Pointer<ffi.Uint8>,
+          int,
+          int,
+          int,
+          int,
+          int,
+          ffi.Pointer<ffi.Int>,
+          ffi.Pointer<ffi.Int>,
+          ffi.Pointer<ffi.Int64>,
+        )
+      >();
 
   /// Returns JSON array of all controls the device supports, with min/max/def/cur/res fields.
   /// Returns number of bytes written, or 0 on failure.

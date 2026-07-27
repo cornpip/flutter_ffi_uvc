@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -7,6 +9,20 @@ void main() {
       expect(UvcControlKind.fromUiType('bool'), UvcControlKind.boolean);
       expect(UvcControlKind.fromUiType('enum'), UvcControlKind.enumLike);
       expect(UvcControlKind.fromUiType('range'), UvcControlKind.integer);
+    });
+
+    test('UvcStillPicture holds encoded picture metadata', () {
+      final UvcStillPicture picture = UvcStillPicture(
+        width: 640,
+        height: 480,
+        jpegBytes: Uint8List.fromList(<int>[0xFF, 0xD8, 0xFF, 0xD9]),
+        sequence: 42,
+      );
+
+      expect(picture.width, 640);
+      expect(picture.height, 480);
+      expect(picture.jpegBytes, hasLength(4));
+      expect(picture.sequence, 42);
     });
 
     test('UvcCameraMode.fromJson parses native mode metadata', () {

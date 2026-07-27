@@ -670,6 +670,51 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   @override
+  UvcStillPicture? takePicture({
+    int quality = 90,
+    UvcPreviewTransform? transform,
+  }) {
+    final UvcPreviewTransform effective = transform ?? _previewTransform;
+    final int srcWidth = _bindings.uvc_frame_width();
+    final int srcHeight = _bindings.uvc_frame_height();
+    if (srcWidth <= 0 || srcHeight <= 0) return null;
+
+    // RGBA size is a generous upper bound for JPEG output at any quality.
+    final int bufferLength = srcWidth * srcHeight * 4;
+    final Pointer<Uint8> nativeBuffer = calloc<Uint8>(bufferLength);
+    final Pointer<Int> nativeWidth = calloc<Int>();
+    final Pointer<Int> nativeHeight = calloc<Int>();
+    final Pointer<Int64> nativeSequence = calloc<Int64>();
+    try {
+      final int encodedBytes = _bindings.uvc_take_picture_jpeg(
+        nativeBuffer,
+        bufferLength,
+        quality,
+        effective.rotation,
+        effective.flipHorizontal ? 1 : 0,
+        effective.flipVertical ? 1 : 0,
+        nativeWidth,
+        nativeHeight,
+        nativeSequence,
+      );
+      if (encodedBytes <= 0) return null;
+      return UvcStillPicture(
+        width: nativeWidth.value,
+        height: nativeHeight.value,
+        jpegBytes: Uint8List.fromList(
+          nativeBuffer.asTypedList(encodedBytes),
+        ),
+        sequence: nativeSequence.value,
+      );
+    } finally {
+      calloc.free(nativeBuffer);
+      calloc.free(nativeWidth);
+      calloc.free(nativeHeight);
+      calloc.free(nativeSequence);
+    }
+  }
+
+  @override
   int latestFrameSequence() => _bindings.uvc_latest_frame_sequence();
 
   @override

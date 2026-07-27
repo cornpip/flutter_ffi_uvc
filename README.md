@@ -1,10 +1,9 @@
 # flutter_ffi_uvc
 
-**This package is based on `libuvc` (Android) and Media Foundation (Windows).**
-
-It provides UVC camera access on Android and Windows — live preview on a
-Flutter `Texture`, frame access from Dart, camera controls, and stream
-diagnostics.
+UVC (USB Video Class) camera plugin. Connect a USB
+camera and get live preview on a Flutter `Texture`, JPEG still capture, raw
+frame access from Dart, camera controls, and stream diagnostics.  
+Under the hood it uses `libuvc` on Android and Media Foundation on Windows.
 
 <img src="./readme_img/260430.gif" alt="app_image_2" width="300"/>
 <img src="./readme_img/11.png" alt="app_image_2" width="300"/>
@@ -22,6 +21,42 @@ diagnostics.
 flutter pub add flutter_ffi_uvc
 ```
 
+## Quick start
+
+```dart
+import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
+
+// 1. Open the first attached UVC camera
+//    (requests USB permission on Android; opens directly on Windows).
+final devices = await uvcCamera.listUsbDevices();
+await uvcCamera.openUsbDevice(devices.first.deviceId);
+
+// 2. Start preview with automatic mode selection and attach a texture.
+final int textureId = await uvcCamera.createPreviewTexture();
+final result = await uvcCamera.startPreviewAuto();
+if (result.success) {
+  await uvcCamera.attachPreviewTexture(
+    textureId,
+    width: result.mode!.width,
+    height: result.mode!.height,
+  );
+  // In your widget tree: Texture(textureId: textureId)
+}
+
+// 3-1. Take a picture — a ready-to-save JPEG.
+final UvcStillPicture? picture = uvcCamera.takePicture();
+
+// 3-2. Or grab raw RGBA pixels — for ML inference, analysis, custom encoding.
+final UvcPreviewFrame? frame = uvcCamera.copyLatestFrame();
+
+// 4. Tear down.
+uvcCamera.stopPreview();
+await uvcCamera.disposePreviewTexture(textureId);
+await uvcCamera.closeUsbDevice();
+```
+
+The sections below cover each step in detail.
+
 ## Usage
 
 ### Typical lifecycle
@@ -32,7 +67,7 @@ flutter pub add flutter_ffi_uvc
 4. Read `uvcCamera.supportedModes()`.
 5. Pick a mode and call `await uvcCamera.startPreview(mode)` — starts the stream and verifies frame delivery.
 6. On success, attach a Flutter `Texture` via `attachPreviewTexture` for live preview.
-7. Use `copyLatestFrame()` when you need frame bytes in Dart, such as for capture or inspection.
+7. Use `takePicture()` to capture a JPEG picture, or `copyLatestFrame()` when you need raw frame bytes in Dart.
 8. Call `uvcCamera.stopPreview()` when preview is no longer needed.
 9. When finished, call `uvcCamera.closeUsbDevice()`.
 
@@ -66,12 +101,10 @@ if (result != 0) {
 }
 ```
 
-On Android, `openUsbDevice` goes through the Android USB layer to acquire
-permission and a file descriptor, then passes it to libusb to open the session.
-On Windows it resolves the id to the camera's Media Foundation source and opens
-it directly — no permission flow. In both cases it throws a
-`PlatformException` if the platform layer fails, and returns a non-zero code if
-the native session fails to initialize.
+On Android, `openUsbDevice` requests USB permission if it has not been granted
+yet; on Windows it opens the camera directly with no permission flow. It
+throws a `PlatformException` if the platform layer fails, and returns a
+non-zero code if the native session fails to initialize.
 
 If another device is already open, `openUsbDevice` safely tears down the current
 session first (stopping any running preview and closing the previous device), so
@@ -102,9 +135,7 @@ _deviceEventSub = uvcCamera.deviceEvents.listen((UvcDeviceEvent event) {
 });
 ```
 
-This is a broadcast stream; the underlying platform listener (an Android
-broadcast receiver / Windows device notifications) is only registered while at
-least one listener is subscribed. Cancel the subscription on dispose.
+This is a broadcast stream; cancel the subscription on dispose.
 
 #### Alternative: opening by file descriptor (Android only)
 
@@ -183,10 +214,9 @@ if (result.success) {
 }
 ```
 
-By default candidates come from `supportedModes()` ordered MJPEG-first
-(compressed modes are far less likely to exceed USB bandwidth), then by
-resolution and frame rate according to `preference`, capped at
-`maxCandidates` (default 8):
+By default candidates come from `supportedModes()` ordered MJPEG-first (least
+likely to hit USB bandwidth limits), then by resolution and frame rate
+according to `preference`, capped at `maxCandidates` (default 8):
 
 - `UvcAutoPreviewPreference.reliability` (default) — smaller resolutions
   first; attaches fastest and is least likely to hit bandwidth limits.
@@ -261,18 +291,28 @@ final UvcPreviewFrame? frame = uvcCamera.copyLatestFrameTransformed(
 
 `frame.width` and `frame.height` reflect the post-transform dimensions.
 
+To capture a JPEG still picture without encoding RGBA yourself, call
+`takePicture()` — the JPEG is encoded in the native layer:
+
+```dart
+final UvcStillPicture? picture = uvcCamera.takePicture(quality: 90);
+if (picture != null) {
+  // picture.jpegBytes: JPEG-encoded image, ready to write to a file
+  // picture.width, picture.height: encoded (post-transform) dimensions
+}
+```
+
+`takePicture()` applies `previewTransform` by default so the capture matches
+what the preview shows; pass `transform: UvcPreviewTransform.identity` for the
+raw sensor orientation.
+
 ### Controls
 
 `supportedControls()` returns the `UvcCameraControl` list exposed by the
 currently opened device, including min/max/default/current values and a
 `UvcControlKind` (integer, boolean, or enum-like) describing how the value
 behaves. `getControl(...)` and `setControl(...)` use typed `UvcControlId`
-values instead of raw integer IDs.  
-For device debugging, `debugBmControls()` returns the `UvcBmControlInfo` list
-advertised by descriptor `bmControls` without `GET_CUR` probing. This is useful
-when a device reports a control bit but rejects or mishandles `GET_CUR`.
-(Android only — the Windows backend has no raw descriptor access and returns
-an empty list.)
+values instead of raw integer IDs.
 
 Control labels are for display only. Use `UvcControlId` to identify controls in code:
 
@@ -297,6 +337,11 @@ if (panTilt != null) {
   );
 }
 ```
+
+For device debugging, `debugBmControls()` lists the controls a device
+*advertises* without probing their values — useful when a device claims a
+control but rejects reads of it. (Android only; returns an empty list on
+Windows.)
 
 ### Diagnostics
 
@@ -389,10 +434,9 @@ once frames flow again. Detection stays enabled across preview sessions until
 
 #### Typed error codes
 
-APIs that return raw `int` codes pass through libuvc `uvc_error_t` values
-(the Windows backend maps its failures into the same code space).
-`UvcErrorCode` gives them names, and `UvcException` is available for
-throw-style handling in app code:
+APIs that return raw `int` codes use the same error-code space on both
+platforms. `UvcErrorCode` gives them names, and `UvcException` is available
+for throw-style handling in app code:
 
 ```dart
 final UvcPreviewStartResult result = await uvcCamera.startPreview(mode);
@@ -409,8 +453,8 @@ if (!result.success) {
 ```
 
 `UvcPreviewStartResult.nativeErrorCode` is non-zero only when stream startup
-itself failed; verification failures keep it at 0 — inspect `lastError` and
-the frame counters instead.
+itself failed; verification failures report through `lastError` and the frame
+counters instead.
 
 ### Logging
 

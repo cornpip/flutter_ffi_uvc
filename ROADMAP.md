@@ -19,10 +19,10 @@ done landed in the version noted next to them.
 
 ## Features under consideration
 
-- [ ] **Still capture API** — native JPEG encode of the latest frame
+- [x] **Still capture API** — native JPEG encode of the latest frame
   (`takePicture()` returning encoded bytes), so apps do not have to encode
-  RGBA themselves. Android via the bundled libjpeg-turbo; Windows via the OS
-  imaging stack (WIC or the Media Foundation JPEG encoder).
+  RGBA themselves. Android via the bundled libjpeg-turbo; Windows via WIC.
+  (0.9.0)
 - [ ] **Push-based frame stream** — `Stream<UvcPreviewFrame>` with an FPS cap
   as an alternative to polling `copyLatestFrame()`, for ML inference and
   frame-processing pipelines.
@@ -35,8 +35,8 @@ done landed in the version noted next to them.
   shared native session model.
 - [ ] **H.264 UVC format support** — needs a MediaCodec decode path on
   Android and a pass-through (no-decode) design on Windows, where H264 native
-  types are deliberately excluded from the preview mode list (see
-  `doc/windows-backend.md`); shares infrastructure with video recording.
+  types are deliberately excluded from the preview mode list; shares
+  infrastructure with video recording.
 - [ ] **Windows zero-copy preview path** — render NV12/YUY2 straight to a
   DXGI shared texture (`GpuSurfaceTexture` + D3D11) instead of the current
   CPU RGBA pixel-buffer path. Only worth doing if profiling shows CPU cost at

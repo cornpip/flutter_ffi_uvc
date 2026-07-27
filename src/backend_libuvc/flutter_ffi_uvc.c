@@ -1,10 +1,15 @@
 #include "flutter_ffi_uvc.h"
 
 #include <inttypes.h>
+#include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
+
+#if defined(FFI_UVC_HAS_JPEG)
+#include <jpeglib.h>
+#endif
 
 #if defined(__ANDROID__)
 #include <android/native_window.h>
@@ -1293,6 +1298,138 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_transformed(
   if (out_sequence != NULL) *out_sequence = g_uvc_state.latest_sequence;
   pthread_mutex_unlock(&g_uvc_state.mutex);
   return expected_bytes;
+}
+
+#if defined(FFI_UVC_HAS_JPEG)
+// libjpeg's default error handler calls exit(); route fatal errors back
+// through setjmp instead so a bad frame cannot take down the process.
+typedef struct {
+  struct jpeg_error_mgr base;
+  jmp_buf jump;
+} ffi_uvc_jpeg_error_mgr_t;
+
+static void ffi_uvc_jpeg_error_exit(j_common_ptr cinfo) {
+  ffi_uvc_jpeg_error_mgr_t *err = (ffi_uvc_jpeg_error_mgr_t *)cinfo->err;
+  longjmp(err->jump, 1);
+}
+#endif
+
+FFI_PLUGIN_EXPORT int uvc_take_picture_jpeg(
+    uint8_t *buffer,
+    int buffer_length,
+    int quality,
+    int rotation,
+    int flip_h,
+    int flip_v,
+    int *out_width,
+    int *out_height,
+    int64_t *out_sequence) {
+#if !defined(FFI_UVC_HAS_JPEG)
+  (void)buffer; (void)buffer_length; (void)quality;
+  (void)rotation; (void)flip_h; (void)flip_v;
+  (void)out_width; (void)out_height; (void)out_sequence;
+  set_last_error("JPEG encoder is not available in this build");
+  return 0;
+#else
+  if (buffer == NULL || buffer_length <= 0) {
+    return 0;
+  }
+
+  int r = rotation % 360;
+  if (r < 0) r += 360;
+  if (r != 0 && r != 90 && r != 180 && r != 270) r = 0;
+  const int fh = flip_h ? 1 : 0;
+  const int fv = flip_v ? 1 : 0;
+  int q = quality;
+  if (q < 1) q = 1;
+  if (q > 100) q = 100;
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  if (g_uvc_state.latest_rgba == NULL || g_uvc_state.latest_rgba_bytes == 0) {
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    set_last_error("No preview frame available to capture");
+    return 0;
+  }
+
+  const int src_w = g_uvc_state.frame_width;
+  const int src_h = g_uvc_state.frame_height;
+  const int dst_w = (r == 90 || r == 270) ? src_h : src_w;
+  const int dst_h = (r == 90 || r == 270) ? src_w : src_h;
+  const size_t rgba_bytes = (size_t)dst_w * (size_t)dst_h * 4u;
+
+  uint8_t *rgba = malloc(rgba_bytes);
+  if (rgba == NULL) {
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    set_last_error("Failed to allocate %zu bytes for capture frame", rgba_bytes);
+    return 0;
+  }
+
+  blit_rgba_transform(
+      (const uint32_t *)g_uvc_state.latest_rgba, src_w, src_h,
+      (uint32_t *)rgba, dst_w, r, fh, fv);
+  const int64_t sequence = g_uvc_state.latest_sequence;
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+
+  // Encode outside the state mutex so the stream callback never blocks
+  // behind JPEG compression. `out`/`out_size` are volatile because
+  // jpeg_mem_dest may rewrite them between setjmp and a longjmp.
+  struct jpeg_compress_struct cinfo;
+  ffi_uvc_jpeg_error_mgr_t err;
+  unsigned char *volatile out = buffer;
+  volatile unsigned long out_size = (unsigned long)buffer_length;
+
+  cinfo.err = jpeg_std_error(&err.base);
+  err.base.error_exit = ffi_uvc_jpeg_error_exit;
+  if (setjmp(err.jump)) {
+    char message[JMSG_LENGTH_MAX];
+    (*cinfo.err->format_message)((j_common_ptr)&cinfo, message);
+    jpeg_destroy_compress(&cinfo);
+    if (out != buffer) {
+      free(out);
+    }
+    free(rgba);
+    set_last_error("JPEG encode failed: %s", message);
+    return 0;
+  }
+
+  jpeg_create_compress(&cinfo);
+  jpeg_mem_dest(&cinfo, (unsigned char **)&out, (unsigned long *)&out_size);
+  cinfo.image_width = (JDIMENSION)dst_w;
+  cinfo.image_height = (JDIMENSION)dst_h;
+  cinfo.input_components = 4;
+  cinfo.in_color_space = JCS_EXT_RGBA;
+  jpeg_set_defaults(&cinfo);
+  jpeg_set_quality(&cinfo, q, TRUE);
+  jpeg_start_compress(&cinfo, TRUE);
+  while (cinfo.next_scanline < cinfo.image_height) {
+    JSAMPROW row = rgba + (size_t)cinfo.next_scanline * (size_t)dst_w * 4u;
+    jpeg_write_scanlines(&cinfo, &row, 1);
+  }
+  jpeg_finish_compress(&cinfo);
+  jpeg_destroy_compress(&cinfo);
+  free(rgba);
+
+  // jpeg_mem_dest grows into a fresh malloc'd buffer when the caller's buffer
+  // is too small; the result only counts if it still fits the caller's buffer.
+  if (out != buffer) {
+    const int fits = out_size <= (unsigned long)buffer_length;
+    if (fits) {
+      memcpy(buffer, out, out_size);
+    }
+    free(out);
+    if (!fits) {
+      set_last_error(
+          "JPEG output (%lu bytes) exceeds capture buffer (%d bytes)",
+          (unsigned long)out_size, buffer_length);
+      return 0;
+    }
+  }
+
+  if (out_width != NULL) *out_width = dst_w;
+  if (out_height != NULL) *out_height = dst_h;
+  if (out_sequence != NULL) *out_sequence = sequence;
+  return (int)out_size;
+#endif
 }
 
 FFI_PLUGIN_EXPORT void uvc_set_frame_listener(uvc_frame_listener_t listener) {

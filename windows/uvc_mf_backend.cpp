@@ -19,6 +19,7 @@
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <olectl.h>
+#include <wincodec.h>  // WIC JPEG encoder for still capture
 
 #include <cwctype>
 
@@ -781,6 +782,40 @@ int CtrlSetLocked(const WinCtrlInfo& info, int32_t value) {
   return kErrorNotSupported;
 }
 
+// Copies src RGBA pixels into dst applying rotation (0/90/180/270 clockwise)
+// and flips. dst must hold dst_w * dst_h * 4 bytes, where dst_w/dst_h are the
+// post-rotation dimensions.
+void TransformRgba(const uint8_t* src, int src_w, int src_h, int rotation,
+                   int flip_h, int flip_v, uint8_t* dst, int dst_w, int dst_h) {
+  for (int y = 0; y < dst_h; ++y) {
+    for (int x = 0; x < dst_w; ++x) {
+      int ox = flip_h != 0 ? dst_w - 1 - x : x;
+      int oy = flip_v != 0 ? dst_h - 1 - y : y;
+      int sx, sy;
+      switch (rotation) {
+        case 90:
+          sx = oy;
+          sy = src_h - 1 - ox;
+          break;
+        case 180:
+          sx = src_w - 1 - ox;
+          sy = src_h - 1 - oy;
+          break;
+        case 270:
+          sx = src_w - 1 - oy;
+          sy = ox;
+          break;
+        default:
+          sx = ox;
+          sy = oy;
+          break;
+      }
+      memcpy(dst + (static_cast<size_t>(y) * dst_w + x) * 4,
+             src + (static_cast<size_t>(sy) * src_w + sx) * 4, 4);
+    }
+  }
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -1056,38 +1091,142 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_transformed(
   const size_t dst_bytes = static_cast<size_t>(dst_w) * dst_h * 4;
   if (static_cast<size_t>(buffer_length) < dst_bytes) return 0;
 
-  const uint8_t* src = g.rgba.data();
-  for (int y = 0; y < dst_h; ++y) {
-    for (int x = 0; x < dst_w; ++x) {
-      int ox = flip_h != 0 ? dst_w - 1 - x : x;
-      int oy = flip_v != 0 ? dst_h - 1 - y : y;
-      int sx, sy;
-      switch (rotation) {
-        case 90:
-          sx = oy;
-          sy = src_h - 1 - ox;
-          break;
-        case 180:
-          sx = src_w - 1 - ox;
-          sy = src_h - 1 - oy;
-          break;
-        case 270:
-          sx = src_w - 1 - oy;
-          sy = ox;
-          break;
-        default:
-          sx = ox;
-          sy = oy;
-          break;
-      }
-      memcpy(buffer + (static_cast<size_t>(y) * dst_w + x) * 4,
-             src + (static_cast<size_t>(sy) * src_w + sx) * 4, 4);
-    }
-  }
+  TransformRgba(g.rgba.data(), src_w, src_h, rotation, flip_h, flip_v, buffer,
+                dst_w, dst_h);
   if (out_width != nullptr) *out_width = dst_w;
   if (out_height != nullptr) *out_height = dst_h;
   if (out_sequence != nullptr) *out_sequence = g.sequence.load();
   return static_cast<int>(dst_bytes);
+}
+
+FFI_PLUGIN_EXPORT int uvc_take_picture_jpeg(
+    uint8_t* buffer, int buffer_length, int quality, int rotation, int flip_h,
+    int flip_v, int* out_width, int* out_height, int64_t* out_sequence) {
+  if (buffer == nullptr || buffer_length <= 0) return 0;
+  if (rotation != 90 && rotation != 180 && rotation != 270) rotation = 0;
+  if (quality < 1) quality = 1;
+  if (quality > 100) quality = 100;
+
+  int dst_w = 0;
+  int dst_h = 0;
+  int64_t sequence = 0;
+  std::vector<uint8_t> rgba;
+  {
+    std::lock_guard<std::mutex> lock(g.mutex);
+    const int src_w = g.frame_w;
+    const int src_h = g.frame_h;
+    const size_t src_bytes = static_cast<size_t>(src_w) * src_h * 4;
+    if (src_w <= 0 || src_h <= 0 || g.sequence.load() <= 0 ||
+        g.rgba.size() < src_bytes) {
+      SetErrorMessage("No preview frame available to capture");
+      return 0;
+    }
+    const bool swap = rotation == 90 || rotation == 270;
+    dst_w = swap ? src_h : src_w;
+    dst_h = swap ? src_w : src_h;
+    rgba.resize(static_cast<size_t>(dst_w) * dst_h * 4);
+    TransformRgba(g.rgba.data(), src_w, src_h, rotation, flip_h, flip_v,
+                  rgba.data(), dst_w, dst_h);
+    sequence = g.sequence.load();
+  }
+
+  // Encode outside the state mutex so OnReadSample never blocks behind JPEG
+  // encoding. WIC needs COM on this thread; EnsureMediaFoundation covers
+  // standalone (test) callers, and is a no-op on the Flutter platform thread.
+  if (!EnsureMediaFoundation()) return 0;
+
+  // WIC's JPEG encoder consumes 24bpp BGR.
+  const size_t pixel_count = static_cast<size_t>(dst_w) * dst_h;
+  std::vector<uint8_t> bgr(pixel_count * 3);
+  for (size_t i = 0; i < pixel_count; ++i) {
+    bgr[i * 3 + 0] = rgba[i * 4 + 2];
+    bgr[i * 3 + 1] = rgba[i * 4 + 1];
+    bgr[i * 3 + 2] = rgba[i * 4 + 0];
+  }
+
+  IWICImagingFactory* factory = nullptr;
+  IStream* stream = nullptr;
+  IWICBitmapEncoder* encoder = nullptr;
+  IWICBitmapFrameEncode* frame = nullptr;
+  IPropertyBag2* props = nullptr;
+  int result = 0;
+
+  do {
+    HRESULT hr = CoCreateInstance(CLSID_WICImagingFactory, nullptr,
+                                  CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory));
+    if (SUCCEEDED(hr)) hr = CreateStreamOnHGlobal(nullptr, TRUE, &stream);
+    if (SUCCEEDED(hr)) {
+      hr = factory->CreateEncoder(GUID_ContainerFormatJpeg, nullptr, &encoder);
+    }
+    if (SUCCEEDED(hr)) hr = encoder->Initialize(stream, WICBitmapEncoderNoCache);
+    if (SUCCEEDED(hr)) hr = encoder->CreateNewFrame(&frame, &props);
+    if (SUCCEEDED(hr)) {
+      PROPBAG2 option = {};
+      option.pstrName = const_cast<LPOLESTR>(L"ImageQuality");
+      VARIANT value;
+      VariantInit(&value);
+      value.vt = VT_R4;
+      value.fltVal = static_cast<float>(quality) / 100.0f;
+      props->Write(1, &option, &value);  // Best effort; default quality is fine.
+      hr = frame->Initialize(props);
+    }
+    if (SUCCEEDED(hr)) hr = frame->SetSize(dst_w, dst_h);
+    WICPixelFormatGUID fmt = GUID_WICPixelFormat24bppBGR;
+    if (SUCCEEDED(hr)) hr = frame->SetPixelFormat(&fmt);
+    if (SUCCEEDED(hr) && !IsEqualGUID(fmt, GUID_WICPixelFormat24bppBGR)) {
+      SetErrorMessage("WIC JPEG encoder rejected 24bpp BGR input");
+      break;
+    }
+    const UINT stride = static_cast<UINT>(dst_w) * 3;
+    if (SUCCEEDED(hr)) {
+      hr = frame->WritePixels(dst_h, stride, stride * dst_h, bgr.data());
+    }
+    if (SUCCEEDED(hr)) hr = frame->Commit();
+    if (SUCCEEDED(hr)) hr = encoder->Commit();
+    if (FAILED(hr)) {
+      SetErrorMessage("JPEG encode failed (hr=0x%08lx)",
+                      static_cast<unsigned long>(hr));
+      break;
+    }
+
+    // The HGLOBAL stream's end position is the number of bytes written.
+    LARGE_INTEGER zero = {};
+    ULARGE_INTEGER end = {};
+    if (FAILED(stream->Seek(zero, STREAM_SEEK_END, &end)) ||
+        end.QuadPart == 0) {
+      SetErrorMessage("JPEG encode produced no output");
+      break;
+    }
+    if (end.QuadPart > static_cast<ULONGLONG>(buffer_length)) {
+      SetErrorMessage("JPEG output (%llu bytes) exceeds capture buffer (%d bytes)",
+                      end.QuadPart, buffer_length);
+      break;
+    }
+    HGLOBAL hglobal = nullptr;
+    if (FAILED(GetHGlobalFromStream(stream, &hglobal))) {
+      SetErrorMessage("Failed to read back encoded JPEG stream");
+      break;
+    }
+    void* data = GlobalLock(hglobal);
+    if (data == nullptr) {
+      SetErrorMessage("Failed to lock encoded JPEG stream memory");
+      break;
+    }
+    memcpy(buffer, data, static_cast<size_t>(end.QuadPart));
+    GlobalUnlock(hglobal);
+
+    if (out_width != nullptr) *out_width = dst_w;
+    if (out_height != nullptr) *out_height = dst_h;
+    if (out_sequence != nullptr) *out_sequence = sequence;
+    result = static_cast<int>(end.QuadPart);
+  } while (false);
+
+  if (props != nullptr) props->Release();
+  if (frame != nullptr) frame->Release();
+  if (encoder != nullptr) encoder->Release();
+  if (stream != nullptr) stream->Release();
+  if (factory != nullptr) factory->Release();
+  return result;
 }
 
 FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(void) {

@@ -1,3 +1,16 @@
+## 0.9.0
+
+- add `takePicture()` — native JPEG encode of the latest preview frame,
+  returned as a `UvcStillPicture` with ready-to-save `jpegBytes`; use it to
+  save picture files, and keep using `copyLatestFrame()` for raw-RGBA pixel access
+  - applies `previewTransform` by default; accepts an explicit `transform`
+    and a `quality` (1-100, default 90)
+  - Android encodes via the bundled libjpeg-turbo; Windows via the OS WIC
+    JPEG encoder
+- example: capture saves JPEG via `takePicture()` by default, with a
+  lossless-PNG toggle that demonstrates Dart-side encoding of RGBA from
+  `copyLatestFrameTransformed()`
+
 ## 0.8.1
 
 - update changelog.md
