@@ -13,6 +13,7 @@
 #endif
 #include <windows.h>
 
+#include <codecapi.h>  // eAVEncH264VProfile for MP4 recording
 #include <dshow.h>  // IAMCameraControl / IAMVideoProcAmp
 #include <mfapi.h>
 #include <mferror.h>
@@ -61,7 +62,9 @@ constexpr int kFormatNv12 = 17;
 
 // libuvc uvc_error_t codes used by this backend.
 constexpr int kErrorIo = -1;            // UVC_ERROR_IO
+constexpr int kErrorInvalidParam = -2;  // UVC_ERROR_INVALID_PARAM
 constexpr int kErrorNoDevice = -4;      // UVC_ERROR_NO_DEVICE
+constexpr int kErrorBusy = -6;          // UVC_ERROR_BUSY
 constexpr int kErrorNotSupported = -12; // UVC_ERROR_NOT_SUPPORTED
 constexpr int kErrorInvalidMode = -51;  // UVC_ERROR_INVALID_MODE
 constexpr int kErrorOther = -99;        // UVC_ERROR_OTHER
@@ -139,6 +142,25 @@ struct BackendState {
   char last_error[512] = {0};
 
   std::atomic<int> log_level{1};
+
+  // MP4 recording. rec_mutex serializes WriteSample against Finalize; the
+  // lock order is g.mutex -> rec_mutex (never the reverse).
+  IMFSinkWriter* sink_writer = nullptr;
+  DWORD sink_stream = 0;
+  std::atomic<bool> recording{false};
+  std::mutex rec_mutex;
+  int rec_src_w = 0, rec_src_h = 0;  // expected preview frame dimensions
+  int rec_w = 0, rec_h = 0;          // post-transform (encoded) dimensions
+  int rec_rotation = 0, rec_flip_h = 0, rec_flip_v = 0;
+  UINT32 rec_fps = 30;
+  int64_t rec_start_qpc = 0;
+  LONGLONG rec_last_ts = -1;
+  // Atomics: bumped under rec_mutex in WriteRecordingFrame but also under
+  // g.mutex in OnReadSample's dimension-mismatch path.
+  std::atomic<uint64_t> rec_frames_written{0};
+  std::atomic<uint64_t> rec_frames_dropped{0};
+  std::vector<uint8_t> rec_rgba;         // frame snapshot taken under g.mutex
+  std::vector<uint8_t> rec_transformed;  // rotated/flipped frame, when needed
 };
 
 BackendState g;
@@ -158,6 +180,21 @@ double QpcToMs(int64_t ticks) {
   return static_cast<double>(ticks) * 1000.0 /
          static_cast<double>(freq.QuadPart);
 }
+
+// Integer conversion so long recordings keep sub-microsecond precision.
+LONGLONG QpcTo100ns(int64_t ticks) {
+  static LARGE_INTEGER freq = [] {
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return f;
+  }();
+  const int64_t sec = ticks / freq.QuadPart;
+  const int64_t rem = ticks % freq.QuadPart;
+  return sec * 10000000LL + rem * 10000000LL / freq.QuadPart;
+}
+
+void WriteRecordingFrame(int64_t ts_qpc);
+int StopRecordingInternal();
 
 void SetErrorMessage(const char* fmt, ...) {
   std::lock_guard<std::mutex> lock(g.error_mutex);
@@ -438,6 +475,8 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
                             IMFSample* sample) override {
     bool delivered = false;
     bool request_next = false;
+    bool record_frame = false;
+    int64_t record_ts = 0;
     IMFSourceReader* reader = nullptr;
     int64_t sequence = 0;
     {
@@ -451,6 +490,18 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
         sequence = g.sequence.load();
       } else if (FAILED(hr_status)) {
         g.stats.decode_failure_count += 1;
+      }
+      if (delivered && g.recording.load()) {
+        if (g.frame_w == g.rec_src_w && g.frame_h == g.rec_src_h) {
+          const size_t bytes =
+              static_cast<size_t>(g.frame_w) * g.frame_h * 4;
+          if (g.rec_rgba.size() != bytes) g.rec_rgba.resize(bytes);
+          memcpy(g.rec_rgba.data(), g.rgba.data(), bytes);
+          record_frame = true;
+          record_ts = QpcNow();
+        } else {
+          g.rec_frames_dropped += 1;
+        }
       }
       bool fatal = FAILED(hr_status) ||
                    (stream_flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0 ||
@@ -478,6 +529,11 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
       }
       if (plugin_cb != nullptr) plugin_cb(plugin_ctx);
     }
+    // Encode before requesting the next sample so this callback stays the
+    // only writer of the recording snapshot buffer.
+    if (record_frame) {
+      WriteRecordingFrame(record_ts);
+    }
     if (reader != nullptr) {
       reader->ReadSample(kVideoStream, 0, nullptr, nullptr, nullptr, nullptr);
       reader->Release();
@@ -504,6 +560,7 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
 // WITHOUT g.mutex held: OnReadSample takes the mutex, and MF only completes
 // Flush after pending callbacks return.
 void StopPreviewInternal() {
+  StopRecordingInternal();
   IMFSourceReader* reader = nullptr;
   {
     std::lock_guard<std::mutex> lock(g.mutex);
@@ -814,6 +871,110 @@ void TransformRgba(const uint8_t* src, int src_w, int src_h, int rotation,
              src + (static_cast<size_t>(sy) * src_w + sx) * 4, 4);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// MP4 recording (Sink Writer)
+// ---------------------------------------------------------------------------
+
+// Feeds one RGB32 sample built from the recording snapshot to the Sink
+// Writer. Called from OnReadSample without g.mutex held; the snapshot buffer
+// has a single writer because the next ReadSample is only requested after
+// this returns.
+void WriteRecordingFrame(int64_t ts_qpc) {
+  std::lock_guard<std::mutex> lock(g.rec_mutex);
+  if (!g.recording.load() || g.sink_writer == nullptr) return;
+
+  const uint8_t* frame = g.rec_rgba.data();
+  if (g.rec_rotation != 0 || g.rec_flip_h != 0 || g.rec_flip_v != 0) {
+    const size_t bytes = static_cast<size_t>(g.rec_w) * g.rec_h * 4;
+    if (g.rec_transformed.size() != bytes) g.rec_transformed.resize(bytes);
+    TransformRgba(g.rec_rgba.data(), g.rec_src_w, g.rec_src_h, g.rec_rotation,
+                  g.rec_flip_h, g.rec_flip_v, g.rec_transformed.data(),
+                  g.rec_w, g.rec_h);
+    frame = g.rec_transformed.data();
+  }
+
+  const DWORD bytes = static_cast<DWORD>(g.rec_w) * g.rec_h * 4;
+  IMFMediaBuffer* buffer = nullptr;
+  if (FAILED(MFCreateMemoryBuffer(bytes, &buffer))) {
+    g.rec_frames_dropped += 1;
+    return;
+  }
+  BYTE* data = nullptr;
+  DWORD max_len = 0;
+  if (FAILED(buffer->Lock(&data, &max_len, nullptr)) || max_len < bytes) {
+    buffer->Release();
+    g.rec_frames_dropped += 1;
+    return;
+  }
+  // RGB32 samples without an explicit stride are bottom-up: write rows in
+  // reverse order and swap RGBA to BGRX.
+  for (int y = 0; y < g.rec_h; ++y) {
+    const uint8_t* src = frame + static_cast<size_t>(y) * g.rec_w * 4;
+    uint8_t* dst = data + static_cast<size_t>(g.rec_h - 1 - y) * g.rec_w * 4;
+    for (int x = 0; x < g.rec_w; ++x) {
+      dst[0] = src[2];
+      dst[1] = src[1];
+      dst[2] = src[0];
+      dst[3] = 0;
+      dst += 4;
+      src += 4;
+    }
+  }
+  buffer->Unlock();
+  buffer->SetCurrentLength(bytes);
+
+  IMFSample* sample = nullptr;
+  if (FAILED(MFCreateSample(&sample))) {
+    buffer->Release();
+    g.rec_frames_dropped += 1;
+    return;
+  }
+  sample->AddBuffer(buffer);
+  LONGLONG ts = QpcTo100ns(ts_qpc - g.rec_start_qpc);
+  if (ts <= g.rec_last_ts) ts = g.rec_last_ts + 1;
+  sample->SetSampleTime(ts);
+  sample->SetSampleDuration(10000000LL / (g.rec_fps > 0 ? g.rec_fps : 30));
+  const HRESULT hr = g.sink_writer->WriteSample(g.sink_stream, sample);
+  sample->Release();
+  buffer->Release();
+  if (FAILED(hr)) {
+    g.rec_frames_dropped += 1;
+    ReportError("Recording WriteSample failed: 0x%08lX",
+                static_cast<unsigned long>(hr));
+    return;
+  }
+  g.rec_last_ts = ts;
+  g.rec_frames_written += 1;
+}
+
+// Stops accepting frames, then drains and finalizes the MP4 outside
+// rec_mutex so an in-flight WriteRecordingFrame can finish first.
+int StopRecordingInternal() {
+  IMFSinkWriter* writer = nullptr;
+  uint64_t written = 0;
+  {
+    std::lock_guard<std::mutex> lock(g.rec_mutex);
+    if (!g.recording.exchange(false)) return 0;
+    writer = g.sink_writer;
+    g.sink_writer = nullptr;
+    written = g.rec_frames_written.load();
+  }
+  int result = 0;
+  if (writer != nullptr) {
+    const HRESULT hr = writer->Finalize();
+    if (FAILED(hr)) {
+      SetErrorMessage("Failed to finalize recording: 0x%08lX",
+                      static_cast<unsigned long>(hr));
+      result = kErrorIo;
+    } else if (written == 0) {
+      SetErrorMessage("Recording produced no encoded frames");
+      result = kErrorIo;
+    }
+    writer->Release();
+  }
+  return result;
 }
 
 }  // namespace
@@ -1227,6 +1388,144 @@ FFI_PLUGIN_EXPORT int uvc_take_picture_jpeg(
   if (stream != nullptr) stream->Release();
   if (factory != nullptr) factory->Release();
   return result;
+}
+
+FFI_PLUGIN_EXPORT int uvc_start_recording(
+    const char* path, int bitrate_bps, int fps_hint, int rotation, int flip_h,
+    int flip_v) {
+  if (path == nullptr || path[0] == '\0') {
+    SetErrorMessage("Recording path must not be empty");
+    return kErrorInvalidParam;
+  }
+  int r = rotation % 360;
+  if (r < 0) r += 360;
+  if (r != 90 && r != 180 && r != 270) r = 0;
+  const UINT32 fps = fps_hint > 0 ? static_cast<UINT32>(fps_hint) : 30;
+
+  std::lock_guard<std::mutex> lock(g.mutex);
+  if (g.recording.load()) {
+    SetErrorMessage("A recording is already in progress");
+    return kErrorBusy;
+  }
+  if (!g.previewing.load() || g.frame_w <= 0 || g.frame_h <= 0 ||
+      g.sequence.load() <= 0) {
+    SetErrorMessage("Recording requires an active preview with delivered frames");
+    return kErrorInvalidMode;
+  }
+  if (!EnsureMediaFoundation()) return kErrorOther;
+
+  const int src_w = g.frame_w;
+  const int src_h = g.frame_h;
+  const bool swap = r == 90 || r == 270;
+  const int out_w = swap ? src_h : src_w;
+  const int out_h = swap ? src_w : src_h;
+  if ((out_w % 2) != 0 || (out_h % 2) != 0) {
+    SetErrorMessage("Recording requires even frame dimensions, got %dx%d",
+                    out_w, out_h);
+    return kErrorInvalidParam;
+  }
+
+  UINT32 bitrate;
+  if (bitrate_bps > 0) {
+    bitrate = static_cast<UINT32>(bitrate_bps);
+  } else {
+    const int64_t heuristic = static_cast<int64_t>(out_w) * out_h * fps / 10;
+    bitrate = static_cast<UINT32>(
+        heuristic < 300000 ? 300000
+        : heuristic > 50000000 ? 50000000
+                               : heuristic);
+  }
+
+  const int wide_len = MultiByteToWideChar(CP_UTF8, 0, path, -1, nullptr, 0);
+  if (wide_len <= 0) {
+    SetErrorMessage("Invalid recording path");
+    return kErrorInvalidParam;
+  }
+  std::wstring wpath(static_cast<size_t>(wide_len), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, path, -1, &wpath[0], wide_len);
+  wpath.resize(static_cast<size_t>(wide_len) - 1);
+
+  IMFAttributes* attrs = nullptr;
+  IMFSinkWriter* writer = nullptr;
+  DWORD stream = 0;
+  HRESULT hr = MFCreateAttributes(&attrs, 2);
+  if (SUCCEEDED(hr)) {
+    attrs->SetUINT32(MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    // Force the MP4 container so the path's extension does not matter.
+    attrs->SetGUID(MF_TRANSCODE_CONTAINERTYPE, MFTranscodeContainerType_MPEG4);
+    hr = MFCreateSinkWriterFromURL(wpath.c_str(), nullptr, attrs, &writer);
+  }
+  if (attrs != nullptr) attrs->Release();
+  if (FAILED(hr) || writer == nullptr) {
+    SetErrorMessage("Failed to create MP4 writer for %s: 0x%08lX", path,
+                    static_cast<unsigned long>(hr));
+    return kErrorIo;
+  }
+
+  IMFMediaType* out_type = nullptr;
+  hr = MFCreateMediaType(&out_type);
+  if (SUCCEEDED(hr)) {
+    out_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    out_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+    out_type->SetUINT32(MF_MT_AVG_BITRATE, bitrate);
+    out_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    out_type->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_Main);
+    MFSetAttributeSize(out_type, MF_MT_FRAME_SIZE, out_w, out_h);
+    MFSetAttributeRatio(out_type, MF_MT_FRAME_RATE, fps, 1);
+    MFSetAttributeRatio(out_type, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    hr = writer->AddStream(out_type, &stream);
+    out_type->Release();
+  }
+  if (SUCCEEDED(hr)) {
+    IMFMediaType* in_type = nullptr;
+    hr = MFCreateMediaType(&in_type);
+    if (SUCCEEDED(hr)) {
+      in_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+      in_type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
+      in_type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+      MFSetAttributeSize(in_type, MF_MT_FRAME_SIZE, out_w, out_h);
+      MFSetAttributeRatio(in_type, MF_MT_FRAME_RATE, fps, 1);
+      MFSetAttributeRatio(in_type, MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+      hr = writer->SetInputMediaType(stream, in_type, nullptr);
+      in_type->Release();
+    }
+  }
+  if (SUCCEEDED(hr)) hr = writer->BeginWriting();
+  if (FAILED(hr)) {
+    writer->Release();
+    SetErrorMessage("Failed to configure H.264 recording: 0x%08lX",
+                    static_cast<unsigned long>(hr));
+    return kErrorNotSupported;
+  }
+
+  {
+    std::lock_guard<std::mutex> rec_lock(g.rec_mutex);
+    g.sink_writer = writer;
+    g.sink_stream = stream;
+    g.rec_src_w = src_w;
+    g.rec_src_h = src_h;
+    g.rec_w = out_w;
+    g.rec_h = out_h;
+    g.rec_rotation = r;
+    g.rec_flip_h = flip_h != 0 ? 1 : 0;
+    g.rec_flip_v = flip_v != 0 ? 1 : 0;
+    g.rec_fps = fps;
+    g.rec_start_qpc = QpcNow();
+    g.rec_last_ts = -1;
+    g.rec_frames_written = 0;
+    g.rec_frames_dropped = 0;
+    g.rec_rgba.clear();
+    g.recording.store(true);
+  }
+  return 0;
+}
+
+FFI_PLUGIN_EXPORT int uvc_stop_recording(void) {
+  return StopRecordingInternal();
+}
+
+FFI_PLUGIN_EXPORT int uvc_is_recording(void) {
+  return g.recording.load() ? 1 : 0;
 }
 
 FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(void) {

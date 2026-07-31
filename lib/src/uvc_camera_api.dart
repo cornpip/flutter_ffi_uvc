@@ -1305,6 +1305,42 @@ abstract interface class UvcCamera {
   /// fails (details via [lastError]).
   UvcStillPicture? takePicture({int quality = 90, UvcPreviewTransform? transform});
 
+  /// Starts MP4 (H.264) video recording of the preview stream to [path].
+  ///
+  /// Requires an active preview with delivered frames — call after a
+  /// successful [startPreview] / [startPreviewAuto]. Frames are encoded
+  /// natively (Android: MediaCodec/MediaMuxer, Windows: Media Foundation Sink
+  /// Writer); nothing crosses into Dart per frame. The preview keeps running
+  /// while recording.
+  ///
+  /// [transform] defaults to [previewTransform] so the recording matches what
+  /// the preview shows; it is captured once at start and stays fixed for the
+  /// whole recording. [bitrateBps] `<= 0` selects a default from resolution
+  /// and frame rate.
+  ///
+  /// The recording is finalized automatically when the preview stops, the
+  /// mode changes, or the device closes. Call [stopVideoRecording] to finish
+  /// normally.
+  ///
+  /// Returns 0 on success, or a negative native error code (details via
+  /// [lastError]) — for example when a recording is already in progress or no
+  /// preview is running.
+  int startVideoRecording(
+    String path, {
+    int bitrateBps = 0,
+    UvcPreviewTransform? transform,
+  });
+
+  /// Stops video recording, drains the encoder, and finalizes the MP4 file.
+  ///
+  /// Returns 0 when the file was finalized (also when no recording was in
+  /// progress), or a negative native error code — for example when no frames
+  /// were ever encoded (details via [lastError]).
+  int stopVideoRecording();
+
+  /// Whether an MP4 recording started by [startVideoRecording] is in progress.
+  bool get isRecording;
+
   /// Returns the latest delivered preview frame sequence.
   ///
   /// This is a lightweight metadata read intended for FPS counters or liveness

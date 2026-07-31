@@ -1,8 +1,9 @@
 # flutter_ffi_uvc
 
 UVC (USB Video Class) camera plugin. Connect a USB
-camera and get live preview on a Flutter `Texture`, JPEG still capture, raw
-frame access from Dart, camera controls, and stream diagnostics.  
+camera and get live preview on a Flutter `Texture`, JPEG still capture, MP4
+video recording, raw frame access from Dart, camera controls, and stream
+diagnostics.  
 Under the hood it uses `libuvc` on Android and Media Foundation on Windows.
 
 <img src="./readme_img/260430.gif" alt="app_image_2" width="300"/>
@@ -305,6 +306,37 @@ if (picture != null) {
 `takePicture()` applies `previewTransform` by default so the capture matches
 what the preview shows; pass `transform: UvcPreviewTransform.identity` for the
 raw sensor orientation.
+
+#### Video recording
+
+`startVideoRecording()` records the preview stream to an MP4 (H.264) file.
+Frames are encoded natively — Android via MediaCodec/MediaMuxer, Windows via
+the Media Foundation Sink Writer — so nothing crosses into Dart per frame,
+and the live preview keeps running while recording:
+
+```dart
+// Requires an active preview (after startPreview / startPreviewAuto).
+final int started = uvcCamera.startVideoRecording('/path/to/video.mp4');
+if (started != 0) {
+  print('Recording failed to start: ${uvcCamera.lastError}');
+}
+
+// ... later
+final int stopped = uvcCamera.stopVideoRecording();
+if (stopped == 0) {
+  // The MP4 file is finalized and ready to play or move.
+}
+```
+
+- `previewTransform` is applied by default, captured once at start; pass an
+  explicit `transform` to override. `bitrateBps` defaults to a value derived
+  from resolution and frame rate.
+- The recording is finalized automatically when the preview stops, the mode
+  changes, or the device closes — but call `stopVideoRecording()` for a
+  normal finish so you know the file is complete.
+- `isRecording` reports whether a recording is in progress. Audio is not
+  recorded: UVC is a video-only class, and camera microphones are separate
+  USB audio devices outside this package's scope.
 
 ### Controls
 

@@ -1,3 +1,19 @@
+## 0.10.0
+
+- add `startVideoRecording()` / `stopVideoRecording()` / `isRecording` — MP4
+  (H.264) video recording of the preview stream, encoded natively while the
+  live preview keeps running; Android via MediaCodec/MediaMuxer, Windows via
+  the Media Foundation Sink Writer
+  - requires an active preview; finalizes automatically when the preview
+    stops, the mode changes, or the device closes
+  - applies `previewTransform` by default, captured once at start; accepts an
+    explicit `transform` and a `bitrateBps` (default derived from resolution
+    and frame rate)
+  - video only — camera microphones are separate USB audio devices and are
+    not recorded
+- example: record button saves MP4 to the gallery on Android and the Pictures
+  folder on Windows
+
 ## 0.9.0
 
 - add `takePicture()` — native JPEG encode of the latest preview frame,

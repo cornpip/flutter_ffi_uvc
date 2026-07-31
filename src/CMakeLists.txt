@@ -98,5 +98,6 @@ target_include_directories(flutter_ffi_uvc PRIVATE
 if (ANDROID)
   # Support Android 15 16k page size
   target_link_options(flutter_ffi_uvc PRIVATE "-Wl,-z,max-page-size=16384")
-  target_link_libraries(flutter_ffi_uvc PRIVATE android log)
+  # mediandk provides AMediaCodec/AMediaMuxer for MP4 video recording.
+  target_link_libraries(flutter_ffi_uvc PRIVATE android log mediandk)
 endif()

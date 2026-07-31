@@ -85,6 +85,14 @@ class _FakeCamera implements UvcCamera {
   @override
   UvcStillPicture? takePicture({int quality = 90, UvcPreviewTransform? transform}) => null;
   @override
+  int startVideoRecording(String path,
+          {int bitrateBps = 0, UvcPreviewTransform? transform}) =>
+      -1;
+  @override
+  int stopVideoRecording() => 0;
+  @override
+  bool get isRecording => false;
+  @override
   int latestFrameSequence() => 0;
   @override
   UvcStreamStats getStreamStats() => const UvcStreamStats.zero();

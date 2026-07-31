@@ -381,6 +381,77 @@ class FlutterFfiUvcBindings {
         )
       >();
 
+  /// Video recording (MP4 / H.264).
+  ///
+  /// Records the shared preview stream to an MP4 file while the preview keeps
+  /// running. Requires an active preview: the recording locks onto the current
+  /// frame dimensions, and frames whose dimensions later stop matching (e.g.
+  /// after a mode switch) are dropped. rotation/flip semantics match
+  /// uvc_take_picture_jpeg and are captured at start; the transform stays fixed
+  /// for the whole recording. Recording is finalized automatically when the
+  /// preview stops or the device closes.
+  ///
+  /// path is UTF-8. bitrate_bps <= 0 selects a default from resolution and fps.
+  /// fps_hint <= 0 defaults to 30; it seeds encoder rate control while sample
+  /// timestamps always follow actual frame arrival times.
+  /// Returns 0 on success or a negative libuvc-style error code.
+  int uvc_start_recording(
+    ffi.Pointer<ffi.Char> path,
+    int bitrate_bps,
+    int fps_hint,
+    int rotation,
+    int flip_h,
+    int flip_v,
+  ) {
+    return _uvc_start_recording(
+      path,
+      bitrate_bps,
+      fps_hint,
+      rotation,
+      flip_h,
+      flip_v,
+    );
+  }
+
+  late final _uvc_start_recordingPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<ffi.Char>,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+          )
+        >
+      >('uvc_start_recording');
+  late final _uvc_start_recording = _uvc_start_recordingPtr
+      .asFunction<
+        int Function(ffi.Pointer<ffi.Char>, int, int, int, int, int)
+      >();
+
+  /// Stops recording, drains the encoder, and finalizes the MP4 file.
+  /// Returns 0 when the file was finalized, negative on failure. Calling with no
+  /// active recording returns 0.
+  int uvc_stop_recording() {
+    return _uvc_stop_recording();
+  }
+
+  late final _uvc_stop_recordingPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>('uvc_stop_recording');
+  late final _uvc_stop_recording = _uvc_stop_recordingPtr
+      .asFunction<int Function()>();
+
+  int uvc_is_recording() {
+    return _uvc_is_recording();
+  }
+
+  late final _uvc_is_recordingPtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function()>>('uvc_is_recording');
+  late final _uvc_is_recording = _uvc_is_recordingPtr
+      .asFunction<int Function()>();
+
   /// Returns JSON array of all controls the device supports, with min/max/def/cur/res fields.
   /// Returns number of bytes written, or 0 on failure.
   int uvc_ctrl_get_all_json(ffi.Pointer<ffi.Uint8> buffer, int buffer_length) {

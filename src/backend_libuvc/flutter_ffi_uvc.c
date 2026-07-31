@@ -14,7 +14,11 @@
 #if defined(__ANDROID__)
 #include <android/native_window.h>
 #include <android/native_window_jni.h>
+#include <fcntl.h>
 #include <jni.h>
+#include <media/NdkMediaCodec.h>
+#include <media/NdkMediaFormat.h>
+#include <media/NdkMediaMuxer.h>
 #endif
 
 #include "libuvc/libuvc.h"
@@ -54,6 +58,9 @@ typedef struct {
 typedef struct {
   pthread_mutex_t mutex;
   pthread_cond_t callback_cond;
+  // Signaled after each delivered frame while a recording consumes frames.
+  pthread_cond_t recording_cond;
+  int recording_active;
   uvc_context_t *ctx;
   uvc_device_handle_t *devh;
   uvc_frame_t *rgb_frame;
@@ -85,6 +92,7 @@ typedef struct {
 static ffi_uvc_state_t g_uvc_state = {
     .mutex = PTHREAD_MUTEX_INITIALIZER,
     .callback_cond = PTHREAD_COND_INITIALIZER,
+    .recording_cond = PTHREAD_COND_INITIALIZER,
 };
 
 static uint64_t monotonic_time_ns(void) {
@@ -688,6 +696,9 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
   g_uvc_state.stats.decode_success_count += 1;
   delivered_sequence = g_uvc_state.latest_sequence;
   frame_listener = g_uvc_state.frame_listener;
+  if (g_uvc_state.recording_active) {
+    pthread_cond_broadcast(&g_uvc_state.recording_cond);
+  }
   clear_last_error();
   finish_callback_locked();
   pthread_mutex_unlock(&g_uvc_state.mutex);
@@ -723,6 +734,8 @@ FFI_PLUGIN_EXPORT int uvc_open_fd(int fd) {
     set_last_error("Invalid file descriptor: %d", fd);
     return UVC_ERROR_INVALID_PARAM;
   }
+
+  uvc_stop_recording();
 
   uvc_device_handle_t *devh_to_stop = NULL;
   int should_stop_streaming = 0;
@@ -807,6 +820,8 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(
     int fps) {
   uvc_device_handle_t *devh_to_stop = NULL;
   int should_stop_streaming = 0;
+
+  uvc_stop_recording();
 
   pthread_mutex_lock(&g_uvc_state.mutex);
 
@@ -1102,6 +1117,7 @@ FFI_PLUGIN_EXPORT void uvc_stop_preview(void) {
   int should_stop_streaming = 0;
 
   UVC_LOGD("UVC_NATIVE", "uvc_stop_preview begin");
+  uvc_stop_recording();
   pthread_mutex_lock(&g_uvc_state.mutex);
   UVC_LOGD(
       "UVC_NATIVE",
@@ -1131,6 +1147,7 @@ FFI_PLUGIN_EXPORT void uvc_close_device(void) {
   uvc_device_handle_t *devh_to_stop = NULL;
   int should_stop_streaming = 0;
 
+  uvc_stop_recording();
   pthread_mutex_lock(&g_uvc_state.mutex);
   UVC_LOGD(
       "UVC_NATIVE",
@@ -1494,6 +1511,506 @@ FFI_PLUGIN_EXPORT void uvc_set_preview_transform(int rotation, int flip_h, int f
   g_uvc_state.preview_flip_v = flip_v ? 1 : 0;
   pthread_mutex_unlock(&g_uvc_state.mutex);
 }
+
+// ---------------------------------------------------------------------------
+// Video recording (MP4 / H.264 via AMediaCodec + AMediaMuxer)
+// ---------------------------------------------------------------------------
+
+#if defined(__ANDROID__)
+
+#include <dlfcn.h>
+
+// MediaCodecInfo.CodecCapabilities color formats. Hardware encoders almost
+// universally accept semi-planar (NV12); planar (I420) is the fallback for
+// the remainder.
+#define REC_COLOR_FORMAT_NV12 21
+#define REC_COLOR_FORMAT_I420 19
+
+typedef struct {
+  AMediaCodec *codec;
+  AMediaMuxer *muxer;
+  int fd;
+  pthread_t thread;
+  int thread_started;
+  int stop_requested;  // guarded by g_uvc_state.mutex
+  int muxer_started;
+  ssize_t video_track;
+  int src_width, src_height;  // expected preview frame dimensions
+  int out_width, out_height;  // post-transform (encoded) dimensions
+  int rotation, flip_h, flip_v;
+  int color_format;
+  int32_t enc_stride, enc_slice_height;
+  uint64_t base_ns;
+  int has_base;
+  int64_t last_sequence;
+  int64_t last_pts_us;
+  uint64_t frames_submitted;
+  uint64_t frames_dropped;
+  uint8_t *rgba_copy;         // snapshot of the shared frame
+  uint8_t *rgba_transformed;  // rotated/flipped frame, when needed
+} ffi_uvc_recording_t;
+
+static ffi_uvc_recording_t g_rec;
+
+// BT.601 limited-range RGBA -> YUV420 into the encoder input buffer, honoring
+// the encoder's stride and slice height. Dimensions must be even.
+static void rec_convert_rgba_to_yuv(
+    const uint8_t *rgba, int w, int h, uint8_t *dst) {
+  const int stride = g_rec.enc_stride;
+  const int slice = g_rec.enc_slice_height;
+  uint8_t *y_plane = dst;
+  uint8_t *chroma = dst + (size_t)stride * (size_t)slice;
+
+  for (int row = 0; row < h; ++row) {
+    const uint8_t *src = rgba + (size_t)row * (size_t)w * 4u;
+    uint8_t *y_out = y_plane + (size_t)row * (size_t)stride;
+    for (int col = 0; col < w; ++col) {
+      const int r = src[col * 4 + 0];
+      const int g = src[col * 4 + 1];
+      const int b = src[col * 4 + 2];
+      y_out[col] = (uint8_t)(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16);
+    }
+  }
+
+  for (int row = 0; row < h; row += 2) {
+    const uint8_t *src0 = rgba + (size_t)row * (size_t)w * 4u;
+    const uint8_t *src1 = src0 + (size_t)w * 4u;
+    for (int col = 0; col < w; col += 2) {
+      const int r = (src0[col * 4 + 0] + src0[col * 4 + 4] +
+                     src1[col * 4 + 0] + src1[col * 4 + 4] + 2) >> 2;
+      const int g = (src0[col * 4 + 1] + src0[col * 4 + 5] +
+                     src1[col * 4 + 1] + src1[col * 4 + 5] + 2) >> 2;
+      const int b = (src0[col * 4 + 2] + src0[col * 4 + 6] +
+                     src1[col * 4 + 2] + src1[col * 4 + 6] + 2) >> 2;
+      const uint8_t u = (uint8_t)(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
+      const uint8_t v = (uint8_t)(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+      if (g_rec.color_format == REC_COLOR_FORMAT_NV12) {
+        uint8_t *uv = chroma + (size_t)(row / 2) * (size_t)stride;
+        uv[col + 0] = u;
+        uv[col + 1] = v;
+      } else {
+        const size_t c_stride = (size_t)stride / 2;
+        uint8_t *u_plane = chroma;
+        uint8_t *v_plane = chroma + c_stride * (size_t)(slice / 2);
+        u_plane[(size_t)(row / 2) * c_stride + (size_t)(col / 2)] = u;
+        v_plane[(size_t)(row / 2) * c_stride + (size_t)(col / 2)] = v;
+      }
+    }
+  }
+}
+
+static size_t rec_yuv_frame_bytes(int h) {
+  const size_t stride = (size_t)g_rec.enc_stride;
+  const size_t chroma_offset = stride * (size_t)g_rec.enc_slice_height;
+  if (g_rec.color_format == REC_COLOR_FORMAT_NV12) {
+    return chroma_offset + stride * (size_t)(h / 2);
+  }
+  const size_t c_stride = stride / 2;
+  return chroma_offset + c_stride * (size_t)(g_rec.enc_slice_height / 2) +
+         c_stride * (size_t)(h / 2);
+}
+
+// Moves encoded output into the muxer. Returns 0 on fatal muxer failure,
+// 1 when drained, 2 when the end-of-stream sample was consumed.
+static int rec_drain_encoder(int64_t timeout_us) {
+  while (1) {
+    AMediaCodecBufferInfo info;
+    const ssize_t idx =
+        AMediaCodec_dequeueOutputBuffer(g_rec.codec, &info, timeout_us);
+    if (idx == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+      AMediaFormat *format = AMediaCodec_getOutputFormat(g_rec.codec);
+      if (format == NULL) {
+        return 0;
+      }
+      g_rec.video_track = AMediaMuxer_addTrack(g_rec.muxer, format);
+      AMediaFormat_delete(format);
+      if (g_rec.video_track < 0 ||
+          AMediaMuxer_start(g_rec.muxer) != AMEDIA_OK) {
+        return 0;
+      }
+      g_rec.muxer_started = 1;
+      continue;
+    }
+    if (idx == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) {
+      continue;
+    }
+    if (idx < 0) {
+      return 1;  // AMEDIACODEC_INFO_TRY_AGAIN_LATER or unknown: drained
+    }
+
+    size_t out_capacity = 0;
+    uint8_t *out = AMediaCodec_getOutputBuffer(g_rec.codec, idx, &out_capacity);
+    if (out != NULL && info.size > 0 && g_rec.muxer_started &&
+        (info.flags & AMEDIACODEC_BUFFER_FLAG_CODEC_CONFIG) == 0) {
+      AMediaMuxer_writeSampleData(g_rec.muxer, (size_t)g_rec.video_track, out,
+                                  &info);
+      g_rec.frames_submitted += 1;
+    }
+    const int eos = (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) != 0;
+    AMediaCodec_releaseOutputBuffer(g_rec.codec, idx, false);
+    if (eos) {
+      return 2;
+    }
+  }
+}
+
+static void rec_encode_frame(uint64_t ts_ns) {
+  const uint8_t *frame = g_rec.rgba_copy;
+  if (g_rec.rgba_transformed != NULL) {
+    blit_rgba_transform(
+        (const uint32_t *)g_rec.rgba_copy, g_rec.src_width, g_rec.src_height,
+        (uint32_t *)g_rec.rgba_transformed, g_rec.out_width,
+        g_rec.rotation, g_rec.flip_h, g_rec.flip_v);
+    frame = g_rec.rgba_transformed;
+  }
+
+  if (!g_rec.has_base) {
+    g_rec.base_ns = ts_ns;
+    g_rec.has_base = 1;
+  }
+  int64_t pts_us = (int64_t)((ts_ns - g_rec.base_ns) / 1000u);
+  if (pts_us <= g_rec.last_pts_us) {
+    pts_us = g_rec.last_pts_us + 1000;
+  }
+
+  const ssize_t idx = AMediaCodec_dequeueInputBuffer(g_rec.codec, 10000);
+  if (idx < 0) {
+    g_rec.frames_dropped += 1;
+    return;
+  }
+  size_t capacity = 0;
+  uint8_t *input = AMediaCodec_getInputBuffer(g_rec.codec, idx, &capacity);
+  const size_t needed = rec_yuv_frame_bytes(g_rec.out_height);
+  if (input == NULL || capacity < needed) {
+    AMediaCodec_queueInputBuffer(g_rec.codec, idx, 0, 0, (uint64_t)pts_us, 0);
+    g_rec.frames_dropped += 1;
+    return;
+  }
+  rec_convert_rgba_to_yuv(frame, g_rec.out_width, g_rec.out_height, input);
+  if (AMediaCodec_queueInputBuffer(g_rec.codec, idx, 0, needed,
+                                   (uint64_t)pts_us, 0) != AMEDIA_OK) {
+    g_rec.frames_dropped += 1;
+    return;
+  }
+  g_rec.last_pts_us = pts_us;
+  rec_drain_encoder(0);
+}
+
+static void *recording_thread_main(void *arg) {
+  (void)arg;
+  while (1) {
+    pthread_mutex_lock(&g_uvc_state.mutex);
+    while (!g_rec.stop_requested &&
+           (g_uvc_state.latest_rgba == NULL ||
+            g_uvc_state.latest_sequence <= g_rec.last_sequence)) {
+      pthread_cond_wait(&g_uvc_state.recording_cond, &g_uvc_state.mutex);
+    }
+    if (g_rec.stop_requested) {
+      pthread_mutex_unlock(&g_uvc_state.mutex);
+      break;
+    }
+    const int w = g_uvc_state.frame_width;
+    const int h = g_uvc_state.frame_height;
+    const uint64_t ts_ns = g_uvc_state.stats.last_delivered_monotonic_ns;
+    g_rec.last_sequence = g_uvc_state.latest_sequence;
+    const int matches = w == g_rec.src_width && h == g_rec.src_height;
+    if (matches) {
+      memcpy(g_rec.rgba_copy, g_uvc_state.latest_rgba,
+             (size_t)w * (size_t)h * 4u);
+    }
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+
+    if (!matches) {
+      g_rec.frames_dropped += 1;
+      continue;
+    }
+    rec_encode_frame(ts_ns != 0 ? ts_ns : monotonic_time_ns());
+  }
+  return NULL;
+}
+
+// Frees every recording resource. Safe to call with partially initialized
+// state; leaves g_rec zeroed.
+static void rec_release_resources(void) {
+  if (g_rec.codec != NULL) {
+    AMediaCodec_stop(g_rec.codec);
+    AMediaCodec_delete(g_rec.codec);
+  }
+  if (g_rec.muxer != NULL) {
+    AMediaMuxer_delete(g_rec.muxer);
+  }
+  if (g_rec.fd >= 0) {
+    close(g_rec.fd);
+  }
+  free(g_rec.rgba_copy);
+  free(g_rec.rgba_transformed);
+  memset(&g_rec, 0, sizeof(g_rec));
+  g_rec.fd = -1;
+  g_rec.video_track = -1;
+}
+
+// Creates and configures the H.264 encoder, trying semi-planar first. The
+// codec is recreated per attempt because a failed configure leaves it in an
+// unusable state.
+static int rec_create_encoder(int bitrate_bps, int fps) {
+  static const int color_formats[] = {REC_COLOR_FORMAT_NV12,
+                                      REC_COLOR_FORMAT_I420};
+  for (size_t i = 0; i < sizeof(color_formats) / sizeof(color_formats[0]);
+       ++i) {
+    AMediaCodec *codec = AMediaCodec_createEncoderByType("video/avc");
+    if (codec == NULL) {
+      set_last_error("No H.264 (video/avc) encoder available");
+      return 0;
+    }
+    AMediaFormat *format = AMediaFormat_new();
+    AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, "video/avc");
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, g_rec.out_width);
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, g_rec.out_height);
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_COLOR_FORMAT,
+                          color_formats[i]);
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_BIT_RATE, bitrate_bps);
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_FRAME_RATE, fps);
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 1);
+    const media_status_t configured = AMediaCodec_configure(
+        codec, format, NULL, NULL, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
+    AMediaFormat_delete(format);
+    if (configured != AMEDIA_OK) {
+      AMediaCodec_delete(codec);
+      continue;
+    }
+    if (AMediaCodec_start(codec) != AMEDIA_OK) {
+      AMediaCodec_delete(codec);
+      continue;
+    }
+    g_rec.codec = codec;
+    g_rec.color_format = color_formats[i];
+    return 1;
+  }
+  set_last_error(
+      "H.264 encoder rejected both YUV420 semi-planar and planar input");
+  return 0;
+}
+
+// The encoder may pad rows and planes; honor its reported stride and slice
+// height. AMediaCodec_getInputFormat only exists from API 28, so resolve it
+// dynamically and fall back to unpadded dimensions below.
+static void rec_query_encoder_layout(void) {
+  g_rec.enc_stride = g_rec.out_width;
+  g_rec.enc_slice_height = g_rec.out_height;
+
+  typedef AMediaFormat *(*get_input_format_fn)(AMediaCodec *);
+  const get_input_format_fn get_input_format =
+      (get_input_format_fn)dlsym(RTLD_DEFAULT, "AMediaCodec_getInputFormat");
+  if (get_input_format == NULL) {
+    return;
+  }
+  AMediaFormat *format = get_input_format(g_rec.codec);
+  if (format == NULL) {
+    return;
+  }
+  int32_t stride = 0;
+  int32_t slice_height = 0;
+  if (AMediaFormat_getInt32(format, "stride", &stride) &&
+      stride >= g_rec.out_width) {
+    g_rec.enc_stride = stride;
+  }
+  if (AMediaFormat_getInt32(format, "slice-height", &slice_height) &&
+      slice_height >= g_rec.out_height) {
+    g_rec.enc_slice_height = slice_height;
+  }
+  AMediaFormat_delete(format);
+}
+
+FFI_PLUGIN_EXPORT int uvc_start_recording(
+    const char *path,
+    int bitrate_bps,
+    int fps_hint,
+    int rotation,
+    int flip_h,
+    int flip_v) {
+  if (path == NULL || path[0] == '\0') {
+    set_last_error("Recording path must not be empty");
+    return UVC_ERROR_INVALID_PARAM;
+  }
+
+  int r = rotation % 360;
+  if (r < 0) r += 360;
+  if (r != 0 && r != 90 && r != 180 && r != 270) r = 0;
+  const int fps = fps_hint > 0 ? fps_hint : 30;
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  if (g_uvc_state.recording_active) {
+    set_last_error("A recording is already in progress");
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return UVC_ERROR_BUSY;
+  }
+  if (!g_uvc_state.previewing || g_uvc_state.latest_rgba == NULL ||
+      g_uvc_state.frame_width <= 0 || g_uvc_state.frame_height <= 0) {
+    set_last_error("Recording requires an active preview with delivered frames");
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return UVC_ERROR_INVALID_MODE;
+  }
+
+  memset(&g_rec, 0, sizeof(g_rec));
+  g_rec.fd = -1;
+  g_rec.video_track = -1;
+  g_rec.src_width = g_uvc_state.frame_width;
+  g_rec.src_height = g_uvc_state.frame_height;
+  g_rec.rotation = r;
+  g_rec.flip_h = flip_h ? 1 : 0;
+  g_rec.flip_v = flip_v ? 1 : 0;
+  g_rec.out_width = (r == 90 || r == 270) ? g_rec.src_height : g_rec.src_width;
+  g_rec.out_height = (r == 90 || r == 270) ? g_rec.src_width : g_rec.src_height;
+  g_rec.last_pts_us = -1;
+  // Start with the current frame: the thread records sequences newer than this.
+  g_rec.last_sequence = g_uvc_state.latest_sequence - 1;
+
+  if ((g_rec.out_width % 2) != 0 || (g_rec.out_height % 2) != 0) {
+    set_last_error(
+        "Recording requires even frame dimensions, got %dx%d",
+        g_rec.out_width, g_rec.out_height);
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return UVC_ERROR_INVALID_PARAM;
+  }
+
+  int bitrate = bitrate_bps;
+  if (bitrate <= 0) {
+    const int64_t heuristic =
+        (int64_t)g_rec.out_width * g_rec.out_height * fps / 10;
+    bitrate = (int)(heuristic < 300000 ? 300000
+                    : heuristic > 50000000 ? 50000000
+                                           : heuristic);
+  }
+
+  g_rec.fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+  if (g_rec.fd < 0) {
+    set_last_error("Failed to open recording file: %s", path);
+    rec_release_resources();
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return UVC_ERROR_IO;
+  }
+
+  if (!rec_create_encoder(bitrate, fps)) {
+    rec_release_resources();
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return UVC_ERROR_NOT_SUPPORTED;
+  }
+  rec_query_encoder_layout();
+
+  g_rec.muxer = AMediaMuxer_new(g_rec.fd, AMEDIAMUXER_OUTPUT_FORMAT_MPEG_4);
+  if (g_rec.muxer == NULL) {
+    set_last_error("Failed to create MP4 muxer");
+    rec_release_resources();
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return UVC_ERROR_OTHER;
+  }
+
+  const size_t src_bytes =
+      (size_t)g_rec.src_width * (size_t)g_rec.src_height * 4u;
+  g_rec.rgba_copy = malloc(src_bytes);
+  const int needs_transform = r != 0 || g_rec.flip_h || g_rec.flip_v;
+  g_rec.rgba_transformed = needs_transform ? malloc(src_bytes) : NULL;
+  if (g_rec.rgba_copy == NULL || (needs_transform && g_rec.rgba_transformed == NULL)) {
+    set_last_error("Failed to allocate recording frame buffers");
+    rec_release_resources();
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return UVC_ERROR_NO_MEM;
+  }
+
+  if (pthread_create(&g_rec.thread, NULL, recording_thread_main, NULL) != 0) {
+    set_last_error("Failed to start recording thread");
+    rec_release_resources();
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return UVC_ERROR_OTHER;
+  }
+  g_rec.thread_started = 1;
+  g_uvc_state.recording_active = 1;
+  clear_last_error();
+  UVC_LOGI(
+      "UVC_NATIVE",
+      "uvc_start_recording success path=%s size=%dx%d fps=%d bitrate=%d colorFormat=%d",
+      path, g_rec.out_width, g_rec.out_height, fps, bitrate,
+      g_rec.color_format);
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+  return UVC_SUCCESS;
+}
+
+FFI_PLUGIN_EXPORT int uvc_stop_recording(void) {
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  if (!g_uvc_state.recording_active) {
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return UVC_SUCCESS;
+  }
+  g_uvc_state.recording_active = 0;
+  g_rec.stop_requested = 1;
+  pthread_cond_broadcast(&g_uvc_state.recording_cond);
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+
+  pthread_join(g_rec.thread, NULL);
+  g_rec.thread_started = 0;
+
+  // Flush the encoder with an end-of-stream buffer and mux the tail.
+  const ssize_t eos_idx = AMediaCodec_dequeueInputBuffer(g_rec.codec, 100000);
+  if (eos_idx >= 0) {
+    AMediaCodec_queueInputBuffer(
+        g_rec.codec, eos_idx, 0, 0,
+        (uint64_t)(g_rec.last_pts_us > 0 ? g_rec.last_pts_us + 1000 : 0),
+        AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+    for (int attempt = 0; attempt < 200; ++attempt) {
+      const int drained = rec_drain_encoder(10000);
+      if (drained == 0 || drained == 2) {
+        break;
+      }
+    }
+  } else {
+    rec_drain_encoder(10000);
+  }
+
+  int result = UVC_SUCCESS;
+  if (g_rec.muxer_started) {
+    if (AMediaMuxer_stop(g_rec.muxer) != AMEDIA_OK) {
+      set_last_error("Failed to finalize MP4 file");
+      result = UVC_ERROR_IO;
+    }
+  } else {
+    set_last_error("Recording produced no encoded frames");
+    result = UVC_ERROR_IO;
+  }
+  UVC_LOGI(
+      "UVC_NATIVE",
+      "uvc_stop_recording result=%d samplesWritten=%" PRIu64 " dropped=%" PRIu64,
+      result, g_rec.frames_submitted, g_rec.frames_dropped);
+  rec_release_resources();
+  return result;
+}
+
+FFI_PLUGIN_EXPORT int uvc_is_recording(void) {
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  const int recording = g_uvc_state.recording_active;
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+  return recording;
+}
+
+#else  // !defined(__ANDROID__)
+
+FFI_PLUGIN_EXPORT int uvc_start_recording(
+    const char *path,
+    int bitrate_bps,
+    int fps_hint,
+    int rotation,
+    int flip_h,
+    int flip_v) {
+  (void)path; (void)bitrate_bps; (void)fps_hint;
+  (void)rotation; (void)flip_h; (void)flip_v;
+  set_last_error("Video recording is not available in this build");
+  return UVC_ERROR_NOT_SUPPORTED;
+}
+
+FFI_PLUGIN_EXPORT int uvc_stop_recording(void) { return UVC_SUCCESS; }
+
+FFI_PLUGIN_EXPORT int uvc_is_recording(void) { return 0; }
+
+#endif  // defined(__ANDROID__)
 
 // ---------------------------------------------------------------------------
 // CT / PU camera control helpers

@@ -20,4 +20,19 @@ class AndroidBridge {
       'mimeType': mimeType,
     });
   }
+
+  /// Moves a finished video file into the device gallery (MediaStore).
+  ///
+  /// The source file is deleted after a successful copy.
+  Future<String?> saveVideoToGallery(
+    String path, {
+    required String displayName,
+    String mimeType = 'video/mp4',
+  }) {
+    return _channel.invokeMethod<String>('saveVideoToGallery', <String, Object?>{
+      'path': path,
+      'displayName': displayName,
+      'mimeType': mimeType,
+    });
+  }
 }

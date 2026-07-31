@@ -26,8 +26,9 @@ done landed in the version noted next to them.
 - [ ] **Push-based frame stream** — `Stream<UvcPreviewFrame>` with an FPS cap
   as an alternative to polling `copyLatestFrame()`, for ML inference and
   frame-processing pipelines.
-- [ ] **Video recording** — MP4 recording of the preview stream. Android via
+- [x] **Video recording** — MP4 recording of the preview stream. Android via
   MediaCodec/MediaMuxer; Windows via the Media Foundation Sink Writer.
+  (0.10.0)
 
 ## Long-term / needs architectural decision
 

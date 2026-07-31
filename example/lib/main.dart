@@ -88,8 +88,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   bool _afTriggering = false;
   bool _previewFrozen = false;
   bool _savingPhoto = false;
+  bool _recording = false;
+  String? _recordingPath;
   bool _saveToGallery = false;
-  bool _capturePng = false;
   bool _transformControlsExpanded = false;
   bool _manualFocusControlsVisible = false;
   StreamSubscription<UvcStreamError>? _streamErrorSub;
@@ -612,31 +613,12 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     );
   }
 
-  // Builds a ui.Image directly from raw RGBA pixels (no compressed-format
-  // decode involved) for the PNG capture path and the frozen-preview display.
-  Future<ui.Image> _decodeRgbaFrame(UvcPreviewFrame frame) async {
-    final ui.ImmutableBuffer buffer = await ui.ImmutableBuffer.fromUint8List(
-      frame.rgbaBytes,
-    );
-    final ui.ImageDescriptor descriptor = ui.ImageDescriptor.raw(
-      buffer,
-      width: frame.width,
-      height: frame.height,
-      pixelFormat: ui.PixelFormat.rgba8888,
-      rowBytes: frame.width * 4,
-    );
-    final ui.Codec codec = await descriptor.instantiateCodec();
-    try {
-      final ui.FrameInfo frameInfo = await codec.getNextFrame();
-      return frameInfo.image;
-    } finally {
-      codec.dispose();
-      descriptor.dispose();
-      buffer.dispose();
-    }
-  }
-
   Future<void> _stopCurrentPreview({bool clearPreviewImage = false}) async {
+    // Stopping the preview finalizes any in-flight recording natively; go
+    // through the app-level stop first so the finished file gets saved.
+    if (_recording) {
+      await _stopRecordingAndSave();
+    }
     _previewStatsTimer?.cancel();
     _previewStatsTimer = null;
     _resetPreviewFps();
@@ -773,49 +755,25 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     setState(() => _savingPhoto = true);
     ui.Image? capturedImage;
     try {
-      final Uint8List imageBytes;
-      final String fileExtension;
-      final String mimeType;
-      if (_capturePng) {
-        // RGBA path: copyLatestFrame* returns raw, already-decoded pixels.
-        // Raw RGBA is not a file format — the app must encode it itself.
-        // Here the pixels become a ui.Image and are PNG-encoded (lossless,
-        // but larger and slower than takePicture's native JPEG).
-        final UvcPreviewFrame? frame = _camera.copyLatestFrameTransformed(
-          _camera.previewTransform,
-        );
-        if (frame == null) {
-          throw Exception('No preview frame available to capture.');
-        }
-        capturedImage = await _decodeRgbaFrame(frame);
-        final ByteData? pngData = await capturedImage.toByteData(
-          format: ui.ImageByteFormat.png,
-        );
-        if (pngData == null) {
-          throw Exception('Failed to encode PNG from the preview frame.');
-        }
-        imageBytes = pngData.buffer.asUint8List();
-        fileExtension = 'png';
-        mimeType = 'image/png';
-      } else {
-        // JPEG path: takePicture() encodes in the native layer and defaults
-        // to previewTransform, so the capture matches what the preview shows.
-        final UvcStillPicture? picture = _camera.takePicture();
-        if (picture == null) {
-          throw Exception('No preview frame available to capture.');
-        }
-        final ui.Codec codec = await ui.instantiateImageCodec(
-          picture.jpegBytes,
-        );
-        try {
-          capturedImage = (await codec.getNextFrame()).image;
-        } finally {
-          codec.dispose();
-        }
-        imageBytes = picture.jpegBytes;
-        fileExtension = 'jpg';
-        mimeType = 'image/jpeg';
+      // takePicture() encodes JPEG in the native layer and defaults to
+      // previewTransform, so the capture matches what the preview shows. For
+      // raw pixel access (ML inference, custom encoding) use
+      // copyLatestFrame() instead — see the package README.
+      final UvcStillPicture? picture = _camera.takePicture();
+      if (picture == null) {
+        throw Exception('No preview frame available to capture.');
       }
+      final ui.Codec codec = await ui.instantiateImageCodec(
+        picture.jpegBytes,
+      );
+      try {
+        capturedImage = (await codec.getNextFrame()).image;
+      } finally {
+        codec.dispose();
+      }
+      final Uint8List imageBytes = picture.jpegBytes;
+      const String fileExtension = 'jpg';
+      const String mimeType = 'image/jpeg';
 
       if (_saveToGallery) {
         final String timestamp = DateTime.now()
@@ -876,6 +834,90 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       } else {
         _savingPhoto = false;
       }
+    }
+  }
+
+  Future<void> _toggleRecording() async {
+    if (_recording) {
+      await _stopRecordingAndSave();
+      return;
+    }
+    if (!_hasLivePreview || _previewFrozen) {
+      return;
+    }
+
+    final String timestamp = DateTime.now()
+        .toIso8601String()
+        .replaceAll(':', '-')
+        .replaceAll('.', '-');
+    final String fileName = 'uvc_video_$timestamp.mp4';
+    final String path;
+    if (Platform.isAndroid) {
+      // Record into the app cache; moved to the gallery on stop.
+      path = '${Directory.systemTemp.path}/$fileName';
+    } else {
+      final Directory targetDir = _desktopCaptureDirectory;
+      final Directory dir = await targetDir.exists()
+          ? targetDir
+          : Directory.current;
+      path = '${dir.path}${Platform.pathSeparator}$fileName';
+    }
+
+    final int result = _camera.startVideoRecording(path);
+    if (result != 0) {
+      _setStatus(
+        'Failed to start recording: ${_camera.lastError} (code $result)',
+      );
+      return;
+    }
+    setState(() {
+      _recording = true;
+      _recordingPath = path;
+    });
+    _setStatus('Recording video...');
+  }
+
+  Future<void> _stopRecordingAndSave() async {
+    final String? path = _recordingPath;
+    final int result = _camera.stopVideoRecording();
+    if (mounted) {
+      setState(() {
+        _recording = false;
+        _recordingPath = null;
+      });
+    } else {
+      _recording = false;
+      _recordingPath = null;
+    }
+    if (result != 0) {
+      _setStatus(
+        'Failed to finalize recording: ${_camera.lastError} (code $result)',
+      );
+      return;
+    }
+    if (path == null) {
+      return;
+    }
+    if (Platform.isAndroid) {
+      try {
+        final String? savedUri = await _androidBridge.saveVideoToGallery(
+          path,
+          displayName: path.split('/').last,
+        );
+        _setStatus(
+          savedUri == null || savedUri.isEmpty
+              ? 'Saved recording to gallery.'
+              : 'Saved recording to gallery: $savedUri',
+        );
+      } on PlatformException catch (error) {
+        _setStatus(
+          'Recording kept at $path — gallery move failed: '
+          '${error.message ?? error.code}',
+          error: error,
+        );
+      }
+    } else {
+      _setStatus('Saved recording to $path');
     }
   }
 
@@ -1146,50 +1188,116 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                           ),
                         ),
                       ),
+                    if (_recording)
+                      Positioned(
+                        top: 16,
+                        left: 16,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.red.withValues(alpha: 0.85),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: <Widget>[
+                              Icon(
+                                Icons.fiber_manual_record,
+                                color: Colors.white,
+                                size: 14,
+                              ),
+                              SizedBox(width: 4),
+                              Text(
+                                'REC',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
                     Positioned(
                       left: 0,
                       right: 0,
                       bottom: 16,
-                      child: Center(
-                        child: FilledButton(
-                          onPressed: _savingPhoto
-                              ? null
-                              : _previewFrozen
-                              ? () => unawaited(_resumePreview())
-                              : !_hasLivePreview
-                              ? null
-                              : () => unawaited(_capturePhoto()),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: Colors.white.withValues(
-                              alpha: 0.85,
-                            ),
-                            foregroundColor: Colors.black87,
-                            minimumSize: const Size(44, 44),
-                            padding: const EdgeInsets.all(10),
-                            shape: const CircleBorder(),
-                          ),
-                          child: Tooltip(
-                            message: _savingPhoto
-                                ? 'Saving'
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: <Widget>[
+                          FilledButton(
+                            onPressed: _savingPhoto
+                                ? null
                                 : _previewFrozen
-                                ? 'Resume preview'
-                                : 'Capture',
-                            child: _savingPhoto
-                                ? const SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
+                                ? () => unawaited(_resumePreview())
+                                : !_hasLivePreview
+                                ? null
+                                : () => unawaited(_capturePhoto()),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: Colors.white.withValues(
+                                alpha: 0.85,
+                              ),
+                              foregroundColor: Colors.black87,
+                              minimumSize: const Size(44, 44),
+                              padding: const EdgeInsets.all(10),
+                              shape: const CircleBorder(),
+                            ),
+                            child: Tooltip(
+                              message: _savingPhoto
+                                  ? 'Saving'
+                                  : _previewFrozen
+                                  ? 'Resume preview'
+                                  : 'Capture',
+                              child: _savingPhoto
+                                  ? const SizedBox(
+                                      width: 20,
+                                      height: 20,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : Icon(
+                                      _previewFrozen
+                                          ? Icons.play_arrow
+                                          : Icons.camera_alt,
+                                      size: 24,
                                     ),
-                                  )
-                                : Icon(
-                                    _previewFrozen
-                                        ? Icons.play_arrow
-                                        : Icons.camera_alt,
-                                    size: 24,
-                                  ),
+                            ),
                           ),
-                        ),
+                          const SizedBox(width: 16),
+                          FilledButton(
+                            onPressed:
+                                !_hasLivePreview || _previewFrozen
+                                ? null
+                                : () => unawaited(_toggleRecording()),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: _recording
+                                  ? Colors.red.withValues(alpha: 0.85)
+                                  : Colors.white.withValues(alpha: 0.85),
+                              foregroundColor: _recording
+                                  ? Colors.white
+                                  : Colors.red,
+                              minimumSize: const Size(44, 44),
+                              padding: const EdgeInsets.all(10),
+                              shape: const CircleBorder(),
+                            ),
+                            child: Tooltip(
+                              message: _recording
+                                  ? 'Stop recording'
+                                  : 'Record video',
+                              child: Icon(
+                                _recording
+                                    ? Icons.stop
+                                    : Icons.fiber_manual_record,
+                                size: 24,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                     if (_hasLivePreview)
@@ -1377,20 +1485,6 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                 value: _saveToGallery,
                                 onChanged: (bool value) =>
                                     setState(() => _saveToGallery = value),
-                              ),
-                            if (_cameraModes.isNotEmpty)
-                              SwitchListTile(
-                                contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 12,
-                                ),
-                                title: const Text('Capture as lossless PNG'),
-                                subtitle: const Text(
-                                  'Encode RGBA from copyLatestFrame in Dart '
-                                  'instead of native JPEG via takePicture',
-                                ),
-                                value: _capturePng,
-                                onChanged: (bool value) =>
-                                    setState(() => _capturePng = value),
                               ),
                             if (_cameraModes.isNotEmpty)
                               SwitchListTile(

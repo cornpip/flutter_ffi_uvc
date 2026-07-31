@@ -43,6 +43,21 @@ class MainActivity : FlutterActivity(), MethodChannel.MethodCallHandler {
                 saveImageToGallery(bytes, displayName, mimeType, result)
             }
 
+            "saveVideoToGallery" -> {
+                val path = call.argument<String>("path")
+                val displayName = call.argument<String>("displayName")
+                val mimeType = call.argument<String>("mimeType") ?: "video/mp4"
+                if (path.isNullOrBlank()) {
+                    result.error("bad_args", "path is required", null)
+                    return
+                }
+                if (displayName.isNullOrBlank()) {
+                    result.error("bad_args", "displayName is required", null)
+                    return
+                }
+                saveVideoToGallery(path, displayName, mimeType, result)
+            }
+
             else -> result.notImplemented()
         }
     }
@@ -89,6 +104,58 @@ class MainActivity : FlutterActivity(), MethodChannel.MethodCallHandler {
         } catch (error: Exception) {
             resolver.delete(uri, null, null)
             result.error("save_failed", error.message ?: "Failed to save image", null)
+        }
+    }
+
+    private fun saveVideoToGallery(
+        path: String,
+        displayName: String,
+        mimeType: String,
+        result: MethodChannel.Result,
+    ) {
+        val source = java.io.File(path)
+        if (!source.isFile) {
+            result.error("save_failed", "Recording file not found: $path", null)
+            return
+        }
+
+        val resolver = applicationContext.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.Video.Media.DISPLAY_NAME, displayName)
+            put(MediaStore.Video.Media.MIME_TYPE, mimeType)
+            put(
+                MediaStore.Video.Media.RELATIVE_PATH,
+                Environment.DIRECTORY_MOVIES + "/flutter_ffi_uvc_example",
+            )
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Video.Media.IS_PENDING, 1)
+            }
+        }
+
+        val uri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, values)
+        if (uri == null) {
+            result.error("save_failed", "Failed to create gallery entry", null)
+            return
+        }
+
+        try {
+            resolver.openOutputStream(uri)?.use { stream ->
+                source.inputStream().use { input -> input.copyTo(stream) }
+                stream.flush()
+            } ?: throw IllegalStateException("Failed to open gallery output stream")
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                val publishValues = ContentValues().apply {
+                    put(MediaStore.Video.Media.IS_PENDING, 0)
+                }
+                resolver.update(uri, publishValues, null, null)
+            }
+
+            source.delete()
+            result.success(uri.toString())
+        } catch (error: Exception) {
+            resolver.delete(uri, null, null)
+            result.error("save_failed", error.message ?: "Failed to save video", null)
         }
     }
 }

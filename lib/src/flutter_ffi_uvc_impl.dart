@@ -715,6 +715,36 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   @override
+  int startVideoRecording(
+    String path, {
+    int bitrateBps = 0,
+    UvcPreviewTransform? transform,
+  }) {
+    final UvcPreviewTransform effective = transform ?? _previewTransform;
+    // The mode fps seeds encoder rate control; 0 lets the native layer pick.
+    final int fpsHint = _lastPreviewRequest?.mode.fps ?? 0;
+    final Pointer<Utf8> nativePath = path.toNativeUtf8(allocator: calloc);
+    try {
+      return _bindings.uvc_start_recording(
+        nativePath.cast(),
+        bitrateBps,
+        fpsHint,
+        effective.rotation,
+        effective.flipHorizontal ? 1 : 0,
+        effective.flipVertical ? 1 : 0,
+      );
+    } finally {
+      calloc.free(nativePath);
+    }
+  }
+
+  @override
+  int stopVideoRecording() => _bindings.uvc_stop_recording();
+
+  @override
+  bool get isRecording => _bindings.uvc_is_recording() != 0;
+
+  @override
   int latestFrameSequence() => _bindings.uvc_latest_frame_sequence();
 
   @override

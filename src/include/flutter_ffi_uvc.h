@@ -98,6 +98,35 @@ FFI_PLUGIN_EXPORT int uvc_take_picture_jpeg(
     int *out_height,
     int64_t *out_sequence);
 
+// Video recording (MP4 / H.264).
+//
+// Records the shared preview stream to an MP4 file while the preview keeps
+// running. Requires an active preview: the recording locks onto the current
+// frame dimensions, and frames whose dimensions later stop matching (e.g.
+// after a mode switch) are dropped. rotation/flip semantics match
+// uvc_take_picture_jpeg and are captured at start; the transform stays fixed
+// for the whole recording. Recording is finalized automatically when the
+// preview stops or the device closes.
+//
+// path is UTF-8. bitrate_bps <= 0 selects a default from resolution and fps.
+// fps_hint <= 0 defaults to 30; it seeds encoder rate control while sample
+// timestamps always follow actual frame arrival times.
+// Returns 0 on success or a negative libuvc-style error code.
+FFI_PLUGIN_EXPORT int uvc_start_recording(
+    const char *path,
+    int bitrate_bps,
+    int fps_hint,
+    int rotation,
+    int flip_h,
+    int flip_v);
+
+// Stops recording, drains the encoder, and finalizes the MP4 file.
+// Returns 0 when the file was finalized, negative on failure. Calling with no
+// active recording returns 0.
+FFI_PLUGIN_EXPORT int uvc_stop_recording(void);
+
+FFI_PLUGIN_EXPORT int uvc_is_recording(void);
+
 // CT/PU camera control IDs
 // PU (Processing Unit) controls: 1-19
 #define UVC_CTRL_ID_BRIGHTNESS                  1
