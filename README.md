@@ -336,7 +336,7 @@ if (stopped == 0) {
   normal finish so you know the file is complete.
 - `isRecording` reports whether a recording is in progress. Audio is not
   recorded: UVC is a video-only class, and camera microphones are separate
-  USB audio devices outside this package's scope.
+  USB audio devices, which this package does not currently capture.
 
 ### Controls
 

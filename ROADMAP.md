@@ -23,9 +23,6 @@ done landed in the version noted next to them.
   (`takePicture()` returning encoded bytes), so apps do not have to encode
   RGBA themselves. Android via the bundled libjpeg-turbo; Windows via WIC.
   (0.9.0)
-- [ ] **Push-based frame stream** — `Stream<UvcPreviewFrame>` with an FPS cap
-  as an alternative to polling `copyLatestFrame()`, for ML inference and
-  frame-processing pipelines.
 - [x] **Video recording** — MP4 recording of the preview stream. Android via
   MediaCodec/MediaMuxer; Windows via the Media Foundation Sink Writer.
   (0.10.0)
@@ -44,5 +41,12 @@ done landed in the version noted next to them.
   high resolutions, or together with video recording (hardware encoders
   consume NV12 directly); `copyLatestFrame()` keeps requiring an RGBA
   readback path either way.
+
+## Considered and rejected
+
+- **Push-based frame stream** (`Stream<UvcPreviewFrame>`) — frame access
+  stays pull-only via `copyLatestFrame()`; a pushed frame goes stale in the
+  event queue while a pull always gets the newest one. See
+  [doc/frame-access-design.md](doc/frame-access-design.md).
 
 Suggestions and device reports are welcome via GitHub issues.
