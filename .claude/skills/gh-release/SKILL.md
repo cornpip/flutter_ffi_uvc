@@ -6,9 +6,9 @@ disable-model-invocation: true
 ---
 
 Create a GitHub release following this repo's established format: tag and
-title are `v<version>`, the body is the CHANGELOG section for that version
-copied verbatim (subheadings and bullets only, no `## <version>` heading),
-and the tag points at the main merge commit.
+title are `v<version>`, the tag is an annotated tag on the main merge
+commit, and the body is the CHANGELOG section for that version copied
+verbatim (subheadings and bullets only, no `## <version>` heading).
 
 ## Steps
 
@@ -29,16 +29,23 @@ and the tag points at the main merge commit.
    surrounding blank lines stripped. Write it to a scratchpad file and show
    it to the user so they can spot a stale or wrong section.
 
-4. **Create the release:**
+4. **Create and push the annotated tag** (do not skip: a release created
+   without an existing tag gets a lightweight tag from GitHub):
    ```bash
-   gh release create v<version> --target main --title v<version> \
-     --notes-file <notes-file>
+   git tag -a v<version> -m "v<version>: <short feature summary>" origin/main
+   git push origin v<version>
    ```
-   Note: `--target` must be a branch name or full 40-char SHA — short SHAs
-   are rejected with HTTP 422.
+   The message summary matches the release's headline change (see existing
+   tags, e.g. `v0.10.0: MP4 video recording`).
 
-5. **Verify:** `gh release list --limit 3` — the new release must appear and
-   be marked `Latest`. Report the release URL.
+5. **Create the release** on the pushed tag:
+   ```bash
+   gh release create v<version> --title v<version> --notes-file <notes-file>
+   ```
+
+6. **Verify:** `gh release list --limit 3` — the new release must appear and
+   be marked `Latest` — and `git cat-file -t v<version>` must print `tag`
+   (annotated). Report the release URL.
 
 ## Notes
 
