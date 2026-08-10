@@ -31,10 +31,12 @@ done landed in the version noted next to them.
 
 - [ ] **Multiple simultaneous cameras** — requires redesigning the single
   shared native session model.
-- [ ] **H.264 UVC format support** — needs a MediaCodec decode path on
-  Android and a pass-through (no-decode) design on Windows, where H264 native
-  types are deliberately excluded from the preview mode list; shares
-  infrastructure with video recording.
+- [x] **H.264 UVC format support (Android)** — Android previews H.264 modes
+  through a MediaCodec decode path with NEON conversion. Windows keeps H264
+  excluded: the Camera Frame Server already exposes every advertised
+  resolution as decoded types there, so H264 unlocks nothing (a pass-through
+  recording path was built and deliberately dropped — see
+  `doc/windows-backend.md`). (0.11.0)
 - [ ] **Windows zero-copy preview path** — render NV12/YUY2 straight to a
   DXGI shared texture (`GpuSurfaceTexture` + D3D11) instead of the current
   CPU RGBA pixel-buffer path. Only worth doing if profiling shows CPU cost at

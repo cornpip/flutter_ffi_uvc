@@ -57,38 +57,31 @@ Descriptor-reported modes remain *candidates*, not guarantees — the same
 validation policy as Android applies (`startPreview` frame verification,
 `startPreviewAuto` fallback loop).
 
-## Why H264 is excluded
+## Why H264 is excluded from the preview mode list
 
 Cameras that advertise H264 native types do **not** get H264 entries in
-`supportedModes()` on Windows. This is intentional, not a limitation of Media
-Foundation (which could decode it). The reasons:
+`supportedModes()` on Windows. This is a policy choice, not a Media
+Foundation limitation. The trade is one-sided:
 
-1. **Inter-frame coding breaks the per-frame validation model.** This
-   package's core guarantees — "N consecutive decodable frames means the mode
-   is healthy", "a bad frame is dropped in isolation" — assume every frame is
-   independently decodable, which holds for MJPEG and uncompressed formats.
-   H264 frames reference each other across a GOP:
-   - Stream start cannot produce an image until a keyframe arrives, which can
-     take seconds and collides with `startPreview`'s verification timeout.
-   - A corrupted reference frame poisons every following frame until the next
-     keyframe while the decoder keeps reporting *success* — the package's
-     "decode success == valid frame" signal becomes meaningless.
-   - Stall auto-recovery gets slower: every restart rebuilds decoder state and
-     waits for a keyframe again.
-2. **No Android counterpart.** The Android backend (libuvc + libjpeg-turbo)
-   has no H264 decode path. Listing H264 only on Windows would make the same
-   app see different mode sets per platform, against the one-API design.
-3. **Fragmented exposure across devices.** UVC H264 ships in several
-   incompatible flavors (UVC 1.5 frame-based, UVC 1.1 vendor extensions,
-   H264-muxed-in-MJPEG). How `usbvideo.sys` surfaces each varies by device,
-   making "listed but never streams" modes likely.
-4. **No preview benefit.** H264 trades decode latency and pipeline complexity
-   for USB bandwidth, which MJPEG already handles for local preview. H264
-   makes sense for recording/streaming pipelines, which are out of scope for
-   this package's preview model.
+- **Cost of listing it**: inter-frame coding breaks the per-frame validation
+  model. Nothing renders until a keyframe arrives (colliding with
+  `startPreview`'s verification timeout), and a corrupted reference frame
+  poisons every following frame until the next keyframe while the decoder
+  still reports success.
+- **Benefit of listing it**: none. The Camera Frame Server already
+  advertises decoded types (NV12 and friends) covering the camera's
+  resolutions, so no capability is reachable only through H264.
 
-If a recording feature ever lands on the roadmap, H264 should return as a
-separate pass-through path (no decode), not as a preview mode.
+Android weighs the same trade the other way: there H264 often guards modes
+that exist in no other format, so the Android backend decodes it for
+preview.
+
+An H264 pass-through recording path (camera stream muxed to MP4 with no
+decode or re-encode, preview mutually excluded) was built during 0.11.0
+development and deliberately dropped: a Windows-only, preview-excluding API
+did not fit the package's surface. If demand appears, the Sink Writer
+approach is known viable (same native media type as stream and input type,
+gate on `MFSampleExtension_CleanPoint`, rebase timestamps).
 
 ## Frame pipeline
 

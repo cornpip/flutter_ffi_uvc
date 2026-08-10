@@ -1402,6 +1402,11 @@ abstract interface class UvcCamera {
   ///
   /// Descriptor entries that collapse into identical mode tuples are
   /// deduplicated; each returned mode is unique by [UvcCameraMode] equality.
+  ///
+  /// On Android this includes the device's H.264 modes (previewable via
+  /// [startPreview], decoded by the hardware decoder). On Windows H.264 is
+  /// deliberately excluded from this list (an inter-frame codec breaks the
+  /// per-frame validation model — see `doc/windows-backend.md`).
   List<UvcCameraMode> supportedModes();
 
   // ---------------------------------------------------------------------------

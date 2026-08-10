@@ -99,5 +99,7 @@ if (ANDROID)
   # Support Android 15 16k page size
   target_link_options(flutter_ffi_uvc PRIVATE "-Wl,-z,max-page-size=16384")
   # mediandk provides AMediaCodec/AMediaMuxer for MP4 video recording.
-  target_link_libraries(flutter_ffi_uvc PRIVATE android log mediandk)
+  # LibUSB is used directly to find the UVC 1.5 Encoding Unit in the raw VC
+  # descriptors (libuvc does not parse encoding units).
+  target_link_libraries(flutter_ffi_uvc PRIVATE android log mediandk LibUSB::LibUSB)
 endif()

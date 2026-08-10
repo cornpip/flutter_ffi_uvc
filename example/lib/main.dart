@@ -290,7 +290,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
 
       setState(() {
         _selectedDevice = device;
-        _cameraModes = libuvcModes;
+        _cameraModes = _sortModesForDisplay(libuvcModes);
         _modeFormatFilter = null;
         _cameraControls = controls;
         _selectedMode = startedMode ?? sortedModes.first;
@@ -386,6 +386,26 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       _status = 'Preview running: ${mode.label} / Texture';
     });
     _log('Preview mode changed: ${mode.label} / Texture');
+  }
+
+  /// Dropdown display order: highest resolution first, then fps, with the
+  /// format name as a stable tiebreak.
+  List<UvcCameraMode> _sortModesForDisplay(List<UvcCameraMode> modes) {
+    final List<UvcCameraMode> sorted = List<UvcCameraMode>.from(modes);
+    sorted.sort((UvcCameraMode a, UvcCameraMode b) {
+      final int areaCompare = (b.width * b.height).compareTo(
+        a.width * a.height,
+      );
+      if (areaCompare != 0) {
+        return areaCompare;
+      }
+      final int fpsCompare = b.fps.compareTo(a.fps);
+      if (fpsCompare != 0) {
+        return fpsCompare;
+      }
+      return a.formatName.compareTo(b.formatName);
+    });
+    return sorted;
   }
 
   List<UvcCameraMode> _sortModesByPreference(List<UvcCameraMode> modes) {

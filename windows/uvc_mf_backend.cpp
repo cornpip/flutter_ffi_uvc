@@ -359,8 +359,8 @@ void EnumerateModesLocked() {
     if (!SubtypeToFormat(subtype, &mode.format, &mode.format_name)) continue;
     if (width == 0 || height == 0) continue;
     // H264 is intentionally excluded from the mode list: an inter-frame codec
-    // breaks this package's per-frame validation model and the Android
-    // backend has no H264 path either. See doc/windows-backend.md.
+    // breaks this package's per-frame validation model. See
+    // doc/windows-backend.md.
     if (mode.format == kFormatH264) continue;
     mode.width = width;
     mode.height = height;

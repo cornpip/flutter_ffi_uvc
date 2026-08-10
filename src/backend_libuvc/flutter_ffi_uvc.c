@@ -16,9 +16,13 @@
 #include <android/native_window_jni.h>
 #include <fcntl.h>
 #include <jni.h>
+#include <libusb.h>
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
 #include <media/NdkMediaMuxer.h>
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 #endif
 
 #include "libuvc/libuvc.h"
@@ -95,6 +99,10 @@ static ffi_uvc_state_t g_uvc_state = {
     .recording_cond = PTHREAD_COND_INITIALIZER,
 };
 
+#if defined(__ANDROID__)
+static void h264_session_reset_locked(void);
+#endif
+
 static uint64_t monotonic_time_ns(void) {
   struct timespec ts;
   if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) {
@@ -142,6 +150,8 @@ static const char *frame_format_name(enum uvc_frame_format format) {
       return "BGR";
     case UVC_FRAME_FORMAT_UYVY:
       return "UYVY";
+    case UVC_FRAME_FORMAT_H264:
+      return "H264";
     case UVC_FRAME_FORMAT_GRAY8:
       return "GRAY8";
     default:
@@ -170,6 +180,9 @@ static enum uvc_frame_format format_desc_to_frame_format(const uvc_format_desc_t
       }
       if (memcmp(format_desc->fourccFormat, "BGR ", 4) == 0) {
         return UVC_FRAME_FORMAT_BGR;
+      }
+      if (memcmp(format_desc->fourccFormat, "H264", 4) == 0) {
+        return UVC_FRAME_FORMAT_H264;
       }
       return UVC_FRAME_FORMAT_UNKNOWN;
     default:
@@ -361,6 +374,9 @@ static int begin_stop_preview_locked(uvc_device_handle_t **devh_to_stop) {
 
 static void finish_stop_preview_locked(void) {
   wait_for_callbacks_locked();
+#if defined(__ANDROID__)
+  h264_session_reset_locked();
+#endif
   reset_frame_buffer_locked();
   g_uvc_state.stopping_preview = 0;
 }
@@ -368,6 +384,7 @@ static void finish_stop_preview_locked(void) {
 static void close_device_resources_locked(void) {
 #if defined(__ANDROID__)
   release_preview_window_locked();
+  h264_session_reset_locked();
 #endif
 
   if (g_uvc_state.rgb_frame != NULL) {
@@ -494,6 +511,638 @@ static int has_mjpeg_soi_marker(const uvc_frame_t *frame) {
   return data[0] == 0xFF && data[1] == 0xD8;
 }
 
+#if defined(__ANDROID__)
+
+// ---------------------------------------------------------------------------
+// H.264 preview decode (NDK AMediaCodec)
+// ---------------------------------------------------------------------------
+// libuvc delivers one H.264 access unit per frame callback; the hardware
+// decoder turns it into YUV420, which is converted straight into latest_rgba
+// so everything downstream (texture, copyLatestFrame, recording, stall
+// detection) runs unchanged. Delivery bookkeeping counts decoder *output*
+// frames, so the package's frame-verification model stays meaningful.
+
+// MediaCodecInfo.CodecCapabilities color formats reported by decoders.
+#define H264_COLOR_FORMAT_I420 19
+#define H264_COLOR_FORMAT_NV12 21
+
+// UVC 1.5 Encoding Unit: VC descriptor subtype and the control selector that
+// forces the camera to emit a sync (IDR) frame.
+#define UVC_VC_ENCODING_UNIT_SUBTYPE 0x07
+#define UVC_EU_SYNC_REF_FRAME_CONTROL 0x0B
+
+// Reactive keyframe requests (loss, decode errors) are rate-limited; the
+// periodic request bounds how long undetectable reference corruption can
+// smear the preview.
+#define H264_IDR_REQUEST_MIN_INTERVAL_NS 500000000ull
+#define H264_PERIODIC_IDR_INTERVAL_NS 2000000000ull
+
+typedef struct {
+  AMediaCodec *codec;
+  int configured_width;
+  int configured_height;
+  // Input is dropped until an IDR slice: decoding must start on a keyframe.
+  int awaiting_keyframe;
+  int error_streak;
+  // Output layout, refreshed on AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED.
+  int32_t out_color_format;
+  int32_t out_stride;
+  int32_t out_slice_height;
+  int32_t out_width;
+  int32_t out_height;
+  // UVC 1.5 Encoding Unit id (0 = the device has none); probed once per
+  // H.264 preview session and kept across decoder recreations.
+  uint8_t eu_unit_id;
+  uint64_t last_idr_request_ns;
+  // Conversion pacing: YUV->RGBA at 1080p can cost more than a frame
+  // interval, and a slow callback starves the decoder's input side, which
+  // silently drops access units and breaks the prediction chain (ghosting).
+  // Conversions self-pace to at most half the callback time; skipped outputs
+  // are released undisplayed but every access unit still reaches the decoder.
+  uint64_t last_convert_start_ns;
+  uint64_t last_convert_duration_ns;
+  uint64_t input_skip_count;    // AUs lost because no input buffer freed up
+  uint64_t display_skip_count;  // decoded outputs released without display
+  // Set while holding the mutex; the frame callback performs the actual
+  // control transfer after unlocking so USB round-trips never block API
+  // calls contending for the state mutex.
+  int keyframe_request_due;
+  // Source-sequence continuity of processed access units. A gap means an
+  // access unit was lost and every following P-frame would smear.
+  uint32_t last_au_sequence;
+  int has_last_au_sequence;
+} ffi_uvc_h264_decoder_t;
+
+static ffi_uvc_h264_decoder_t g_h264;
+
+// Releases the decoder only; the Encoding Unit state survives so mid-stream
+// decoder recreations keep the keyframe-request capability.
+static void h264_decoder_release_locked(void) {
+  if (g_h264.codec != NULL) {
+    AMediaCodec_stop(g_h264.codec);
+    AMediaCodec_delete(g_h264.codec);
+  }
+  const uint8_t eu_unit_id = g_h264.eu_unit_id;
+  const uint64_t last_idr_request_ns = g_h264.last_idr_request_ns;
+  memset(&g_h264, 0, sizeof(g_h264));
+  g_h264.eu_unit_id = eu_unit_id;
+  g_h264.last_idr_request_ns = last_idr_request_ns;
+}
+
+// Full reset at preview stop / device close.
+static void h264_session_reset_locked(void) {
+  h264_decoder_release_locked();
+  memset(&g_h264, 0, sizeof(g_h264));
+}
+
+// Finds the H.264 Encoding Unit in the VideoControl interface descriptors.
+// libuvc does not parse encoding units, so this walks the class-specific
+// descriptors from libusb's cached configuration (no USB traffic). Returns
+// the unit id, or 0 when the device has none.
+static uint8_t h264_find_encoding_unit(uvc_device_handle_t *devh) {
+  libusb_device_handle *usb_devh = uvc_get_libusb_handle(devh);
+  if (usb_devh == NULL) {
+    return 0;
+  }
+  libusb_device *usb_dev = libusb_get_device(usb_devh);
+  if (usb_dev == NULL) {
+    return 0;
+  }
+  struct libusb_config_descriptor *config = NULL;
+  if (libusb_get_active_config_descriptor(usb_dev, &config) != 0 ||
+      config == NULL) {
+    return 0;
+  }
+  uint8_t unit_id = 0;
+  for (uint8_t i = 0; i < config->bNumInterfaces && unit_id == 0; ++i) {
+    const struct libusb_interface *interface = &config->interface[i];
+    for (int a = 0; a < interface->num_altsetting && unit_id == 0; ++a) {
+      const struct libusb_interface_descriptor *alt = &interface->altsetting[a];
+      // CC_VIDEO / SC_VIDEOCONTROL
+      if (alt->bInterfaceClass != 14 || alt->bInterfaceSubClass != 1) {
+        continue;
+      }
+      const unsigned char *extra = alt->extra;
+      int remaining = alt->extra_length;
+      while (remaining >= 3) {
+        const uint8_t length = extra[0];
+        if (length < 3 || length > remaining) {
+          break;
+        }
+        // CS_INTERFACE (0x24) + VC_ENCODING_UNIT: bUnitID at offset 3.
+        if (extra[1] == 0x24 && extra[2] == UVC_VC_ENCODING_UNIT_SUBTYPE &&
+            length >= 4) {
+          unit_id = extra[3];
+          break;
+        }
+        extra += length;
+        remaining -= length;
+      }
+    }
+  }
+  libusb_free_config_descriptor(config);
+  return unit_id;
+}
+
+// Asks the camera to emit an IDR frame now (EU_SYNC_REF_FRAME). Called
+// WITHOUT the state mutex held; the stream callback thread stays alive for
+// the whole call, so devh remains valid.
+static void h264_request_keyframe(uvc_device_handle_t *devh) {
+  // bSyncFrameType=1 (IDR), wSyncFrameInterval=0 (single request),
+  // bGradualDecoderRefresh=0.
+  uint8_t payload[4] = {0x01, 0x00, 0x00, 0x00};
+  const int result = uvc_set_ctrl(devh, g_h264.eu_unit_id,
+                                  UVC_EU_SYNC_REF_FRAME_CONTROL, payload,
+                                  (int)sizeof(payload));
+  if (result != (int)sizeof(payload)) {
+    UVC_LOGD("UVC_NATIVE", "EU sync-frame request failed result=%d", result);
+  }
+}
+
+// Rate-limited scheduling of a keyframe request; the transfer itself happens
+// after the caller releases the mutex. Returns 1 when a request was queued.
+static int h264_mark_keyframe_request_locked(uint64_t now_ns,
+                                             uint64_t min_interval_ns) {
+  if (g_h264.eu_unit_id == 0) {
+    return 0;
+  }
+  if (g_h264.last_idr_request_ns != 0 &&
+      now_ns - g_h264.last_idr_request_ns < min_interval_ns) {
+    return 0;
+  }
+  g_h264.last_idr_request_ns = now_ns;
+  g_h264.keyframe_request_due = 1;
+  return 1;
+}
+
+// Scans an Annex-B elementary stream for an IDR slice (NAL type 5).
+static int h264_contains_idr(const uint8_t *data, size_t len) {
+  size_t i = 0;
+  while (i + 4 <= len) {
+    if (data[i] == 0 && data[i + 1] == 0) {
+      size_t nal_start = 0;
+      if (data[i + 2] == 1) {
+        nal_start = i + 3;
+      } else if (i + 5 <= len && data[i + 2] == 0 && data[i + 3] == 1) {
+        nal_start = i + 4;
+      }
+      if (nal_start != 0 && nal_start < len) {
+        if ((data[nal_start] & 0x1F) == 5) {
+          return 1;
+        }
+        i = nal_start;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  return 0;
+}
+
+static int h264_decoder_ensure_locked(int width, int height) {
+  if (g_h264.codec != NULL && g_h264.configured_width == width &&
+      g_h264.configured_height == height) {
+    return 1;
+  }
+  h264_decoder_release_locked();
+
+  AMediaCodec *codec = AMediaCodec_createDecoderByType("video/avc");
+  if (codec == NULL) {
+    set_last_error("No H.264 (video/avc) decoder available");
+    return 0;
+  }
+  AMediaFormat *format = AMediaFormat_new();
+  AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, "video/avc");
+  AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, width);
+  AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, height);
+  const int started =
+      AMediaCodec_configure(codec, format, NULL, NULL, 0) == AMEDIA_OK &&
+      AMediaCodec_start(codec) == AMEDIA_OK;
+  AMediaFormat_delete(format);
+  if (!started) {
+    AMediaCodec_delete(codec);
+    set_last_error("Failed to start H.264 decoder for %dx%d", width, height);
+    return 0;
+  }
+  g_h264.codec = codec;
+  g_h264.configured_width = width;
+  g_h264.configured_height = height;
+  g_h264.awaiting_keyframe = 1;
+  g_h264.out_color_format = H264_COLOR_FORMAT_NV12;
+  g_h264.out_stride = width;
+  g_h264.out_slice_height = height;
+  g_h264.out_width = width;
+  g_h264.out_height = height;
+  return 1;
+}
+
+static void h264_read_output_format_locked(void) {
+  AMediaFormat *format = AMediaCodec_getOutputFormat(g_h264.codec);
+  if (format == NULL) {
+    return;
+  }
+  int32_t value = 0;
+  if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_COLOR_FORMAT, &value)) {
+    g_h264.out_color_format = value;
+  }
+  if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_WIDTH, &value) &&
+      value > 0) {
+    g_h264.out_width = value;
+  }
+  if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_HEIGHT, &value) &&
+      value > 0) {
+    g_h264.out_height = value;
+  }
+  g_h264.out_stride = g_h264.out_width;
+  if (AMediaFormat_getInt32(format, "stride", &value) && value > 0) {
+    g_h264.out_stride = value;
+  }
+  g_h264.out_slice_height = g_h264.out_height;
+  if (AMediaFormat_getInt32(format, "slice-height", &value) && value > 0) {
+    g_h264.out_slice_height = value;
+  }
+  // The crop rect trims decoder padding. Decoders emit a 0,0 origin in
+  // practice, so only the extents are honored.
+  int32_t left = 0, top = 0, right = -1, bottom = -1;
+  if (AMediaFormat_getInt32(format, "crop-left", &left) &&
+      AMediaFormat_getInt32(format, "crop-top", &top) &&
+      AMediaFormat_getInt32(format, "crop-right", &right) &&
+      AMediaFormat_getInt32(format, "crop-bottom", &bottom) &&
+      right >= left && bottom >= top) {
+    g_h264.out_width = right - left + 1;
+    g_h264.out_height = bottom - top + 1;
+  }
+  AMediaFormat_delete(format);
+}
+
+#if defined(__aarch64__)
+// Converts 8 pixels (y offset by -16, chroma by -128, one chroma value per
+// pixel) with the same BT.601 integer math as the scalar loop. Products are
+// accumulated in 32 bits because 298 * y exceeds int16 range.
+static inline void h264_yuv8_to_rgba_neon(int16x8_t y, int16x8_t u,
+                                          int16x8_t v, uint8_t *dst) {
+  const int32x4_t bias = vdupq_n_s32(128);
+  const int16x4_t y_lo = vget_low_s16(y);
+  const int16x4_t y_hi = vget_high_s16(y);
+  const int16x4_t u_lo = vget_low_s16(u);
+  const int16x4_t u_hi = vget_high_s16(u);
+  const int16x4_t v_lo = vget_low_s16(v);
+  const int16x4_t v_hi = vget_high_s16(v);
+  const int32x4_t y298_lo = vmlal_n_s16(bias, y_lo, 298);
+  const int32x4_t y298_hi = vmlal_n_s16(bias, y_hi, 298);
+  const int32x4_t r_lo = vmlal_n_s16(y298_lo, v_lo, 409);
+  const int32x4_t r_hi = vmlal_n_s16(y298_hi, v_hi, 409);
+  const int32x4_t g_lo =
+      vmlsl_n_s16(vmlsl_n_s16(y298_lo, u_lo, 100), v_lo, 208);
+  const int32x4_t g_hi =
+      vmlsl_n_s16(vmlsl_n_s16(y298_hi, u_hi, 100), v_hi, 208);
+  const int32x4_t b_lo = vmlal_n_s16(y298_lo, u_lo, 516);
+  const int32x4_t b_hi = vmlal_n_s16(y298_hi, u_hi, 516);
+  uint8x8x4_t rgba;
+  rgba.val[0] = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(r_lo, 8)),
+                                         vqmovn_s32(vshrq_n_s32(r_hi, 8))));
+  rgba.val[1] = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(g_lo, 8)),
+                                         vqmovn_s32(vshrq_n_s32(g_hi, 8))));
+  rgba.val[2] = vqmovun_s16(vcombine_s16(vqmovn_s32(vshrq_n_s32(b_lo, 8)),
+                                         vqmovn_s32(vshrq_n_s32(b_hi, 8))));
+  rgba.val[3] = vdup_n_u8(0xFF);
+  vst4_u8(dst, rgba);
+}
+#endif
+
+// BT.601 limited-range YUV420 (NV12 semi-planar or I420 planar) -> RGBA
+// straight into latest_rgba, bypassing the RGB24 intermediate used by
+// uvc_any2rgb-based formats.
+static int h264_output_to_latest_rgba_locked(const uint8_t *buf,
+                                             size_t buf_len) {
+  const int w = g_h264.out_width;
+  const int h = g_h264.out_height;
+  const int stride = g_h264.out_stride;
+  const int slice = g_h264.out_slice_height;
+  if (w <= 0 || h <= 0 || stride < w || slice < h) {
+    set_last_error(
+        "H.264 decoder reported invalid output layout %dx%d stride=%d slice=%d",
+        w, h, stride, slice);
+    return 0;
+  }
+  const size_t luma_bytes = (size_t)stride * (size_t)slice;
+  const size_t required = luma_bytes + (size_t)stride * (size_t)(h / 2);
+  if (buf_len < required) {
+    set_last_error("H.264 decoder output too small: %zu < %zu", buf_len,
+                   required);
+    return 0;
+  }
+
+  const size_t rgba_bytes = (size_t)w * (size_t)h * 4;
+  if (g_uvc_state.latest_rgba_bytes != rgba_bytes) {
+    uint8_t *new_buffer = realloc(g_uvc_state.latest_rgba, rgba_bytes);
+    if (new_buffer == NULL) {
+      g_uvc_state.stats.buffer_allocation_failure_count += 1;
+      set_last_error("Failed to allocate %zu bytes for preview frame",
+                     rgba_bytes);
+      return 0;
+    }
+    g_uvc_state.latest_rgba = new_buffer;
+    g_uvc_state.latest_rgba_bytes = rgba_bytes;
+  }
+
+  const int nv12 = g_h264.out_color_format != H264_COLOR_FORMAT_I420;
+  const uint8_t *y_plane = buf;
+  const uint8_t *chroma = buf + luma_bytes;
+  const size_t c_stride = (size_t)stride / 2;
+  const uint8_t *u_plane = chroma;
+  const uint8_t *v_plane = chroma + c_stride * (size_t)(slice / 2);
+
+  for (int row = 0; row < h; ++row) {
+    const uint8_t *y_row = y_plane + (size_t)row * (size_t)stride;
+    uint8_t *dst = g_uvc_state.latest_rgba + (size_t)row * (size_t)w * 4u;
+    const uint8_t *uv_row = chroma + (size_t)(row / 2) * (size_t)stride;
+    const uint8_t *u_row = u_plane + (size_t)(row / 2) * c_stride;
+    const uint8_t *v_row = v_plane + (size_t)(row / 2) * c_stride;
+    int col = 0;
+#if defined(__aarch64__)
+    const int16x8_t c16 = vdupq_n_s16(16);
+    const int16x8_t c128 = vdupq_n_s16(128);
+    for (; col + 16 <= w; col += 16) {
+      const uint8x16_t y_u8 = vld1q_u8(y_row + col);
+      const int16x8_t y_lo = vsubq_s16(
+          vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(y_u8))), c16);
+      const int16x8_t y_hi = vsubq_s16(
+          vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(y_u8))), c16);
+      int16x8_t u8s, v8s;
+      if (nv12) {
+        const uint8x8x2_t uv = vld2_u8(uv_row + col);
+        u8s = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(uv.val[0])), c128);
+        v8s = vsubq_s16(vreinterpretq_s16_u16(vmovl_u8(uv.val[1])), c128);
+      } else {
+        u8s = vsubq_s16(
+            vreinterpretq_s16_u16(vmovl_u8(vld1_u8(u_row + col / 2))), c128);
+        v8s = vsubq_s16(
+            vreinterpretq_s16_u16(vmovl_u8(vld1_u8(v_row + col / 2))), c128);
+      }
+      // Zipping a vector with itself repeats each 4:2:0 chroma sample for
+      // its two pixels.
+      const int16x8x2_t u_zip = vzipq_s16(u8s, u8s);
+      const int16x8x2_t v_zip = vzipq_s16(v8s, v8s);
+      h264_yuv8_to_rgba_neon(y_lo, u_zip.val[0], v_zip.val[0],
+                             dst + (size_t)col * 4u);
+      h264_yuv8_to_rgba_neon(y_hi, u_zip.val[1], v_zip.val[1],
+                             dst + (size_t)(col + 8) * 4u);
+    }
+#endif
+    for (; col < w; ++col) {
+      const int y = (int)y_row[col] - 16;
+      int u, v;
+      if (nv12) {
+        u = (int)uv_row[col & ~1] - 128;
+        v = (int)uv_row[(col & ~1) + 1] - 128;
+      } else {
+        u = (int)u_row[col / 2] - 128;
+        v = (int)v_row[col / 2] - 128;
+      }
+      int r = (298 * y + 409 * v + 128) >> 8;
+      int g = (298 * y - 100 * u - 208 * v + 128) >> 8;
+      int b = (298 * y + 516 * u + 128) >> 8;
+      if (r < 0) r = 0; else if (r > 255) r = 255;
+      if (g < 0) g = 0; else if (g > 255) g = 255;
+      if (b < 0) b = 0; else if (b > 255) b = 255;
+      dst[col * 4 + 0] = (uint8_t)r;
+      dst[col * 4 + 1] = (uint8_t)g;
+      dst[col * 4 + 2] = (uint8_t)b;
+      dst[col * 4 + 3] = 0xFF;
+    }
+  }
+
+  g_uvc_state.frame_width = w;
+  g_uvc_state.frame_height = h;
+  g_uvc_state.latest_sequence += 1;
+  return 1;
+}
+
+// Feeds one H.264 access unit to the decoder and converts decoded output
+// into latest_rgba. Every access unit must reach the decoder — a skipped
+// one breaks the prediction chain and smears the picture — so the expensive
+// display conversion self-paces and is skipped under load, never the input.
+// Returns 1 when a frame was delivered, 0 when the input was consumed
+// without display output (keyframe gating, decoder latency, paced-out
+// conversion), -1 on a decode error (last_error set, decode_failure
+// counted).
+static int h264_process_frame_locked(const uvc_frame_t *frame) {
+  const uint64_t now_ns = monotonic_time_ns();
+
+  if (frame->data_bytes < 4) {
+    g_uvc_state.stats.undersized_frame_count += 1;
+    return 0;
+  }
+  if (!h264_decoder_ensure_locked((int)frame->width, (int)frame->height)) {
+    g_uvc_state.stats.decode_failure_count += 1;
+    return -1;
+  }
+
+  // Drain the output side FIRST: released output buffers are what keeps the
+  // decoder's input side from starving. Only the newest ready output is kept
+  // for display; older ones are released undisplayed.
+  ssize_t kept_idx = -1;
+  AMediaCodecBufferInfo kept_info;
+  memset(&kept_info, 0, sizeof(kept_info));
+  while (1) {
+    AMediaCodecBufferInfo info;
+    const ssize_t out_idx =
+        AMediaCodec_dequeueOutputBuffer(g_h264.codec, &info, 0);
+    if (out_idx == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+      h264_read_output_format_locked();
+      continue;
+    }
+    if (out_idx == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) {
+      continue;
+    }
+    if (out_idx < 0) {
+      break;  // AMEDIACODEC_INFO_TRY_AGAIN_LATER or unknown: drained.
+    }
+    if (kept_idx >= 0) {
+      AMediaCodec_releaseOutputBuffer(g_h264.codec, kept_idx, false);
+      g_h264.display_skip_count += 1;
+    }
+    kept_idx = out_idx;
+    kept_info = info;
+  }
+
+  int delivered = 0;
+  int conversion_failed = 0;
+  if (kept_idx >= 0) {
+    // Pace conversions to at most two thirds of the callback time (with a
+    // floor so the preview never fully stalls); a conversion slower than
+    // the frame interval would otherwise consume the whole callback budget
+    // and starve the decoder input.
+    const int convert_due =
+        !g_h264.awaiting_keyframe &&
+        (g_h264.last_convert_start_ns == 0 ||
+         now_ns - g_h264.last_convert_start_ns >=
+             (g_h264.last_convert_duration_ns * 3u) / 2u ||
+         now_ns - g_h264.last_convert_start_ns >= 200000000ull);
+    if (convert_due) {
+      size_t out_capacity = 0;
+      uint8_t *out = AMediaCodec_getOutputBuffer(g_h264.codec, kept_idx,
+                                                 &out_capacity);
+      if (out != NULL && kept_info.size > 0) {
+        g_h264.last_convert_start_ns = now_ns;
+        if (h264_output_to_latest_rgba_locked(out + kept_info.offset,
+                                              (size_t)kept_info.size)) {
+          delivered = 1;
+        } else {
+          conversion_failed = 1;
+          g_uvc_state.stats.conversion_failure_count += 1;
+          g_uvc_state.stats.decode_failure_count += 1;
+        }
+        g_h264.last_convert_duration_ns =
+            monotonic_time_ns() - g_h264.last_convert_start_ns;
+      }
+    } else {
+      g_h264.display_skip_count += 1;
+    }
+    AMediaCodec_releaseOutputBuffer(g_h264.codec, kept_idx, false);
+  }
+
+  // Source-sequence continuity: a gap means an access unit was lost in
+  // transport and every following P-frame would smear until the next
+  // keyframe. When the camera accepts sync-frame requests, freeze on the
+  // last good frame and ask for an IDR instead; without that capability the
+  // freeze could last a whole GOP, so decoding continues (and smears).
+  if (g_h264.has_last_au_sequence &&
+      frame->sequence != g_h264.last_au_sequence + 1 &&
+      g_h264.eu_unit_id != 0 && !g_h264.awaiting_keyframe) {
+    g_h264.awaiting_keyframe = 1;
+  }
+  g_h264.last_au_sequence = frame->sequence;
+  g_h264.has_last_au_sequence = 1;
+
+  // A payload that does not begin with an Annex-B start code lost its head in
+  // transport; never feed it to the decoder.
+  const uint8_t *payload = (const uint8_t *)frame->data;
+  const int has_start_code =
+      payload[0] == 0 && payload[1] == 0 &&
+      (payload[2] == 1 || (payload[2] == 0 && payload[3] == 1));
+  if (!has_start_code) {
+    g_uvc_state.stats.decode_failure_count += 1;
+    if (g_h264.eu_unit_id != 0) {
+      g_h264.awaiting_keyframe = 1;
+      h264_mark_keyframe_request_locked(now_ns,
+                                        H264_IDR_REQUEST_MIN_INTERVAL_NS);
+    }
+    return delivered;
+  }
+
+  if (g_h264.awaiting_keyframe) {
+    if (!h264_contains_idr(payload, frame->data_bytes)) {
+      g_uvc_state.stats.warmup_drop_count += 1;
+      h264_mark_keyframe_request_locked(now_ns,
+                                        H264_IDR_REQUEST_MIN_INTERVAL_NS);
+      return delivered;
+    }
+    g_h264.awaiting_keyframe = 0;
+  } else {
+    // Reference corruption without a decoder error is undetectable; a
+    // periodic sync-frame request bounds how long it can smear.
+    h264_mark_keyframe_request_locked(now_ns, H264_PERIODIC_IDR_INTERVAL_NS);
+  }
+
+  // Submit the access unit. The output drain above usually freed an input
+  // buffer already; the blocking retry is the last resort before the chain
+  // has to break.
+  ssize_t in_idx = AMediaCodec_dequeueInputBuffer(g_h264.codec, 0);
+  if (in_idx < 0) {
+    in_idx = AMediaCodec_dequeueInputBuffer(g_h264.codec, 10000);
+  }
+  if (in_idx < 0) {
+    g_h264.input_skip_count += 1;
+    if (g_h264.input_skip_count == 1 || g_h264.input_skip_count % 30 == 0) {
+      UVC_LOGW(
+          "UVC_NATIVE",
+          "H264 decoder input starved; dropped AU (total=%" PRIu64 ")",
+          g_h264.input_skip_count);
+    }
+    if (g_h264.eu_unit_id != 0) {
+      g_h264.awaiting_keyframe = 1;
+      h264_mark_keyframe_request_locked(now_ns,
+                                        H264_IDR_REQUEST_MIN_INTERVAL_NS);
+    }
+    return delivered;
+  }
+
+  size_t capacity = 0;
+  uint8_t *input = AMediaCodec_getInputBuffer(g_h264.codec, in_idx, &capacity);
+  if (input == NULL || capacity < frame->data_bytes) {
+    AMediaCodec_queueInputBuffer(g_h264.codec, in_idx, 0, 0, 0, 0);
+    g_uvc_state.stats.decode_failure_count += 1;
+    set_last_error("H.264 input buffer too small (%zu < %zu)", capacity,
+                   frame->data_bytes);
+    return delivered ? 1 : -1;
+  }
+  memcpy(input, frame->data, frame->data_bytes);
+  const uint64_t pts_us = now_ns / 1000u;
+  if (AMediaCodec_queueInputBuffer(g_h264.codec, in_idx, 0, frame->data_bytes,
+                                   pts_us, 0) != AMEDIA_OK) {
+    g_h264.error_streak += 1;
+    g_uvc_state.stats.decode_failure_count += 1;
+    set_last_error("H.264 decoder rejected input");
+    // A persistently failing decoder is torn down; the next frame recreates
+    // it and waits for a fresh keyframe.
+    if (g_h264.error_streak >= 3) {
+      h264_decoder_release_locked();
+    }
+    h264_mark_keyframe_request_locked(now_ns,
+                                      H264_IDR_REQUEST_MIN_INTERVAL_NS);
+    return delivered ? 1 : -1;
+  }
+  g_h264.error_streak = 0;
+
+  if (!delivered && conversion_failed) {
+    return -1;
+  }
+  return delivered;
+}
+
+#endif  // defined(__ANDROID__)
+
+// Shared bookkeeping once latest_rgba holds a new frame: preview surface
+// render, delivery stats, recording wake-up. Returns the delivered sequence;
+// the caller invokes *out_listener (if set) after releasing the mutex.
+static int64_t finish_frame_delivery_locked(
+    uint64_t callback_monotonic_ns, uvc_frame_listener_t *out_listener) {
+#if defined(__ANDROID__)
+  render_latest_rgba_to_preview_surface_locked();
+#endif
+  if (g_uvc_state.stats.start_monotonic_ns != 0) {
+    if (g_uvc_state.stats.delivered_frame_count == 0) {
+      g_uvc_state.stats.first_frame_latency_ns =
+          callback_monotonic_ns - g_uvc_state.stats.start_monotonic_ns;
+    } else if (g_uvc_state.stats.last_delivered_monotonic_ns != 0 &&
+               callback_monotonic_ns >= g_uvc_state.stats.last_delivered_monotonic_ns) {
+      const uint64_t gap_ns =
+          callback_monotonic_ns - g_uvc_state.stats.last_delivered_monotonic_ns;
+      g_uvc_state.stats.delivered_gap_sum_ns += gap_ns;
+      if (gap_ns > g_uvc_state.stats.delivered_gap_max_ns) {
+        g_uvc_state.stats.delivered_gap_max_ns = gap_ns;
+      }
+      g_uvc_state.stats.gap_ring[g_uvc_state.stats.gap_ring_next] = gap_ns;
+      g_uvc_state.stats.gap_ring_next =
+          (g_uvc_state.stats.gap_ring_next + 1u) % 256u;
+      if (g_uvc_state.stats.gap_ring_count < 256u) {
+        g_uvc_state.stats.gap_ring_count += 1u;
+      }
+    }
+  }
+  g_uvc_state.stats.last_delivered_monotonic_ns = callback_monotonic_ns;
+  g_uvc_state.stats.delivered_frame_count += 1;
+  g_uvc_state.stats.decode_success_count += 1;
+  *out_listener = g_uvc_state.frame_listener;
+  if (g_uvc_state.recording_active) {
+    pthread_cond_broadcast(&g_uvc_state.recording_cond);
+  }
+  clear_last_error();
+  return g_uvc_state.latest_sequence;
+}
+
 static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
   (void)user_ptr;
   const uint64_t callback_monotonic_ns = monotonic_time_ns();
@@ -614,6 +1263,48 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
     }
   }
 
+#if defined(__ANDROID__)
+  if (frame->frame_format == UVC_FRAME_FORMAT_H264) {
+    const int h264_result = h264_process_frame_locked(frame);
+    // The EU control transfer runs after unlock so a slow USB round-trip
+    // never blocks API calls contending for the mutex. The stream callback
+    // thread outlives this call, so devh stays valid.
+    uvc_device_handle_t *keyframe_devh = NULL;
+    if (g_h264.keyframe_request_due) {
+      g_h264.keyframe_request_due = 0;
+      keyframe_devh = g_uvc_state.devh;
+    }
+    if (h264_result <= 0) {
+      if (h264_result < 0) {
+        uint32_t _ring_idx = g_uvc_state.error_ring_next++ % 8;
+        snprintf(g_uvc_state.error_ring[_ring_idx], 256, "%s", g_uvc_state.last_error);
+        error_listener = g_uvc_state.error_listener;
+        finish_callback_locked();
+        pthread_mutex_unlock(&g_uvc_state.mutex);
+        if (keyframe_devh != NULL) h264_request_keyframe(keyframe_devh);
+        if (error_listener) error_listener(g_uvc_state.error_ring[_ring_idx]);
+        return;
+      }
+      finish_callback_locked();
+      pthread_mutex_unlock(&g_uvc_state.mutex);
+      if (keyframe_devh != NULL) h264_request_keyframe(keyframe_devh);
+      return;
+    }
+    uvc_frame_listener_t h264_listener = NULL;
+    const int64_t h264_sequence =
+        finish_frame_delivery_locked(callback_monotonic_ns, &h264_listener);
+    finish_callback_locked();
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    if (keyframe_devh != NULL) {
+      h264_request_keyframe(keyframe_devh);
+    }
+    if (h264_listener != NULL) {
+      h264_listener(h264_sequence);
+    }
+    return;
+  }
+#endif  // defined(__ANDROID__)
+
   const size_t required_rgb_bytes = (size_t)frame->width * (size_t)frame->height * 3;
 
   if (!ensure_rgb_frame_locked(required_rgb_bytes)) {
@@ -668,38 +1359,8 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
     if (error_listener) error_listener(g_uvc_state.error_ring[_ring_idx]);
     return;
   }
-#if defined(__ANDROID__)
-  render_latest_rgba_to_preview_surface_locked();
-#endif
-  if (g_uvc_state.stats.start_monotonic_ns != 0) {
-    if (g_uvc_state.stats.delivered_frame_count == 0) {
-      g_uvc_state.stats.first_frame_latency_ns =
-          callback_monotonic_ns - g_uvc_state.stats.start_monotonic_ns;
-    } else if (g_uvc_state.stats.last_delivered_monotonic_ns != 0 &&
-               callback_monotonic_ns >= g_uvc_state.stats.last_delivered_monotonic_ns) {
-      const uint64_t gap_ns =
-          callback_monotonic_ns - g_uvc_state.stats.last_delivered_monotonic_ns;
-      g_uvc_state.stats.delivered_gap_sum_ns += gap_ns;
-      if (gap_ns > g_uvc_state.stats.delivered_gap_max_ns) {
-        g_uvc_state.stats.delivered_gap_max_ns = gap_ns;
-      }
-      g_uvc_state.stats.gap_ring[g_uvc_state.stats.gap_ring_next] = gap_ns;
-      g_uvc_state.stats.gap_ring_next =
-          (g_uvc_state.stats.gap_ring_next + 1u) % 256u;
-      if (g_uvc_state.stats.gap_ring_count < 256u) {
-        g_uvc_state.stats.gap_ring_count += 1u;
-      }
-    }
-  }
-  g_uvc_state.stats.last_delivered_monotonic_ns = callback_monotonic_ns;
-  g_uvc_state.stats.delivered_frame_count += 1;
-  g_uvc_state.stats.decode_success_count += 1;
-  delivered_sequence = g_uvc_state.latest_sequence;
-  frame_listener = g_uvc_state.frame_listener;
-  if (g_uvc_state.recording_active) {
-    pthread_cond_broadcast(&g_uvc_state.recording_cond);
-  }
-  clear_last_error();
+  delivered_sequence =
+      finish_frame_delivery_locked(callback_monotonic_ns, &frame_listener);
   finish_callback_locked();
   pthread_mutex_unlock(&g_uvc_state.mutex);
 
@@ -821,6 +1482,14 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(
   uvc_device_handle_t *devh_to_stop = NULL;
   int should_stop_streaming = 0;
 
+#if !defined(__ANDROID__)
+  // The AMediaCodec decode path only exists in the Android build.
+  if (frame_format == UVC_FRAME_FORMAT_H264) {
+    set_last_error("H.264 preview requires the Android backend");
+    return UVC_ERROR_NOT_SUPPORTED;
+  }
+#endif
+
   uvc_stop_recording();
 
   pthread_mutex_lock(&g_uvc_state.mutex);
@@ -889,6 +1558,23 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(
   g_uvc_state.latest_sequence = 0;
   g_uvc_state.mjpeg_warmup_drop_remaining =
       frame_format == UVC_FRAME_FORMAT_MJPEG ? 3 : 0;
+#if defined(__ANDROID__)
+  uvc_device_handle_t *h264_keyframe_devh = NULL;
+  if (frame_format == UVC_FRAME_FORMAT_H264) {
+    // Probe the UVC 1.5 Encoding Unit once per session; with it, sync-frame
+    // requests cut the initial keyframe wait and bound corruption recovery.
+    g_h264.eu_unit_id = h264_find_encoding_unit(g_uvc_state.devh);
+    UVC_LOGI(
+        "UVC_NATIVE",
+        "H264 encoding unit %s (id=%u)",
+        g_h264.eu_unit_id != 0 ? "found" : "not present",
+        g_h264.eu_unit_id);
+    if (g_h264.eu_unit_id != 0) {
+      g_h264.last_idr_request_ns = monotonic_time_ns();
+      h264_keyframe_devh = g_uvc_state.devh;
+    }
+  }
+#endif
   clear_last_error();
   UVC_LOGI(
       "UVC_NATIVE",
@@ -898,28 +1584,22 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(
       height,
       fps);
   pthread_mutex_unlock(&g_uvc_state.mutex);
+#if defined(__ANDROID__)
+  if (h264_keyframe_devh != NULL) {
+    h264_request_keyframe(h264_keyframe_devh);
+  }
+#endif
   return UVC_SUCCESS;
 }
 
-FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uint8_t *buffer, int buffer_length) {
-  if (buffer == NULL || buffer_length <= 0) {
-    return 0;
-  }
-
-  pthread_mutex_lock(&g_uvc_state.mutex);
-  if (g_uvc_state.devh == NULL) {
-    UVC_LOGD("UVC_NATIVE", "uvc_get_supported_modes_json called without open device");
-    pthread_mutex_unlock(&g_uvc_state.mutex);
-    return 0;
-  }
-
+// Writes the descriptor-reported modes as JSON.
+static int write_modes_json_locked(uint8_t *buffer, int buffer_length) {
   char *json = (char *)buffer;
   size_t offset = 0;
   int first_mode = 1;
   const uvc_format_desc_t *format_desc = uvc_get_format_descs(g_uvc_state.devh);
 
   if (!append_json(json, (size_t)buffer_length, &offset, "[")) {
-    pthread_mutex_unlock(&g_uvc_state.mutex);
     return 0;
   }
 
@@ -968,7 +1648,6 @@ FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uint8_t *buffer, int buffer_l
                   frame_desc->wWidth,
                   frame_desc->wHeight,
                   fps)) {
-            pthread_mutex_unlock(&g_uvc_state.mutex);
             return 0;
           }
           first_mode = 0;
@@ -987,7 +1666,6 @@ FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uint8_t *buffer, int buffer_l
                 frame_desc->wWidth,
                 frame_desc->wHeight,
                 fps)) {
-          pthread_mutex_unlock(&g_uvc_state.mutex);
           return 0;
         }
         first_mode = 0;
@@ -996,13 +1674,27 @@ FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uint8_t *buffer, int buffer_l
   }
 
   if (!append_json(json, (size_t)buffer_length, &offset, "]")) {
-    pthread_mutex_unlock(&g_uvc_state.mutex);
     return 0;
   }
 
   UVC_LOGD("UVC_NATIVE", "supported modes json bytes=%zu", offset);
-  pthread_mutex_unlock(&g_uvc_state.mutex);
   return (int)offset;
+}
+
+FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uint8_t *buffer, int buffer_length) {
+  if (buffer == NULL || buffer_length <= 0) {
+    return 0;
+  }
+
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  if (g_uvc_state.devh == NULL) {
+    UVC_LOGD("UVC_NATIVE", "uvc_get_supported_modes_json called without open device");
+    pthread_mutex_unlock(&g_uvc_state.mutex);
+    return 0;
+  }
+  const int written = write_modes_json_locked(buffer, buffer_length);
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+  return written;
 }
 
 FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(void) {

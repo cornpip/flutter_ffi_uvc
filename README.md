@@ -44,10 +44,10 @@ if (result.success) {
   // In your widget tree: Texture(textureId: textureId)
 }
 
-// 3-1. Take a picture — a ready-to-save JPEG.
+// 3-1. Take a picture: a ready-to-save JPEG.
 final UvcStillPicture? picture = uvcCamera.takePicture();
 
-// 3-2. Or grab raw RGBA pixels — for ML inference, analysis, custom encoding.
+// 3-2. Or grab raw RGBA pixels for ML inference, analysis, custom encoding.
 final UvcPreviewFrame? frame = uvcCamera.copyLatestFrame();
 
 // 4. Tear down.
@@ -62,11 +62,11 @@ The sections below cover each step in detail.
 
 ### Typical lifecycle
 
-1. Call `uvcCamera.ensureCameraPermission()` if your app requires the `CAMERA` permission (always returns true on Windows — there is no runtime dialog).
+1. Call `uvcCamera.ensureCameraPermission()` if your app requires the `CAMERA` permission (always returns true on Windows, which has no runtime dialog).
 2. Call `uvcCamera.listUsbDevices()` to discover attached UVC cameras.
 3. Call `uvcCamera.openUsbDevice(deviceId)` to open the device (on Android this also requests USB permission; on Windows it opens directly).
 4. Read `uvcCamera.supportedModes()`.
-5. Pick a mode and call `await uvcCamera.startPreview(mode)` — starts the stream and verifies frame delivery.
+5. Pick a mode and call `await uvcCamera.startPreview(mode)`. This starts the stream and verifies frame delivery.
 6. On success, attach a Flutter `Texture` via `attachPreviewTexture` for live preview.
 7. Use `takePicture()` to capture a JPEG picture, or `copyLatestFrame()` when you need raw frame bytes in Dart.
 8. Call `uvcCamera.stopPreview()` when preview is no longer needed.
@@ -95,7 +95,7 @@ class UvcPreviewPage extends StatefulWidget {
 // List attached UVC cameras
 final List<UvcUsbDevice> devices = await uvcCamera.listUsbDevices();
 
-// Open a device — on Android this requests USB permission if not already granted
+// Open a device. On Android this requests USB permission if not already granted.
 final int result = await uvcCamera.openUsbDevice(devices.first.deviceId);
 if (result != 0) {
   print('Open failed: ${uvcCamera.lastError}');
@@ -109,7 +109,7 @@ non-zero code if the native session fails to initialize.
 
 If another device is already open, `openUsbDevice` safely tears down the current
 session first (stopping any running preview and closing the previous device), so
-switching between cameras is just another `openUsbDevice` call — no manual
+switching between cameras is just another `openUsbDevice` call, with no manual
 `closeUsbDevice` needed in between.
 
 To close and release the USB connection:
@@ -131,7 +131,7 @@ _deviceEventSub = uvcCamera.deviceEvents.listen((UvcDeviceEvent event) {
     uvcCamera.stopPreview();
     uvcCamera.closeUsbDevice();
   } else {
-    // A camera was plugged in — refresh the device list, offer to open it, …
+    // A camera was plugged in: refresh the device list, offer to open it, …
   }
 });
 ```
@@ -148,8 +148,8 @@ descriptor directly to skip the Android layer:
 uvcCamera.openFd(fd);
 ```
 
-`openFd`/`closeFd` throw `UnsupportedError` on Windows — there is no file
-descriptor concept there; use `openUsbDevice`/`closeUsbDevice` instead.
+`openFd`/`closeFd` throw `UnsupportedError` on Windows, which has no file
+descriptor concept; use `openUsbDevice`/`closeUsbDevice` instead.
 
 ### Preview & Capture
 
@@ -161,7 +161,7 @@ Create a texture, start preview, then attach the texture once the stream is conf
 final int textureId = await uvcCamera.createPreviewTexture();
 
 // stableFrames (default): verifies both frame delivery and frame validity.
-// sequenceOnly: verifies frame delivery only — frame validity is not checked.
+// sequenceOnly: verifies frame delivery only; frame validity is not checked.
 final UvcPreviewStartResult result = await uvcCamera.startPreview(
   mode,
   policy: UvcPreviewPolicy.stableFrames,
@@ -193,7 +193,7 @@ await uvcCamera.disposePreviewTexture(textureId);
 
 #### Automatic mode selection
 
-Descriptor-reported modes are candidates, not guaranteed-safe defaults — a mode
+Descriptor-reported modes are candidates, not guaranteed-safe defaults: a mode
 may negotiate but never deliver decodable frames. `startPreviewAuto()` encodes
 the recommended fallback loop: it tries candidate modes in order and keeps the
 first one that streams and verifies successfully.
@@ -219,14 +219,15 @@ By default candidates come from `supportedModes()` ordered MJPEG-first (least
 likely to hit USB bandwidth limits), then by resolution and frame rate
 according to `preference`, capped at `maxCandidates` (default 8):
 
-- `UvcAutoPreviewPreference.reliability` (default) — smaller resolutions
+- `UvcAutoPreviewPreference.reliability` (default): smaller resolutions
   first; attaches fastest and is least likely to hit bandwidth limits.
-- `UvcAutoPreviewPreference.quality` — larger resolutions first; picks the
+- `UvcAutoPreviewPreference.quality`: larger resolutions first; picks the
   best-looking mode that actually streams.
 
 On Windows, `supportedModes()` lists every format × resolution × fps
 combination the camera advertises (H264 native types excluded), so the
-candidate pool is larger than on Android.
+candidate pool is larger than on Android. H.264 modes are never part of the
+default auto sequence (see [H.264 camera streams](#h264-camera-streams)).
 
 ```dart
 final UvcAutoPreviewResult result = await uvcCamera.startPreviewAuto(
@@ -272,7 +273,7 @@ AspectRatio(
 
 #### Capture
 
-To get frame bytes in Dart — call `copyLatestFrame()` while preview is running:
+To get frame bytes in Dart, call `copyLatestFrame()` while preview is running:
 
 ```dart
 final UvcPreviewFrame? frame = uvcCamera.copyLatestFrame();
@@ -293,7 +294,7 @@ final UvcPreviewFrame? frame = uvcCamera.copyLatestFrameTransformed(
 `frame.width` and `frame.height` reflect the post-transform dimensions.
 
 To capture a JPEG still picture without encoding RGBA yourself, call
-`takePicture()` — the JPEG is encoded in the native layer:
+`takePicture()` encodes the JPEG in the native layer:
 
 ```dart
 final UvcStillPicture? picture = uvcCamera.takePicture(quality: 90);
@@ -310,8 +311,8 @@ raw sensor orientation.
 #### Video recording
 
 `startVideoRecording()` records the preview stream to an MP4 (H.264) file.
-Frames are encoded natively — Android via MediaCodec/MediaMuxer, Windows via
-the Media Foundation Sink Writer — so nothing crosses into Dart per frame,
+Frames are encoded natively (Android via MediaCodec/MediaMuxer, Windows via
+the Media Foundation Sink Writer), so nothing crosses into Dart per frame,
 and the live preview keeps running while recording:
 
 ```dart
@@ -332,11 +333,27 @@ if (stopped == 0) {
   explicit `transform` to override. `bitrateBps` defaults to a value derived
   from resolution and frame rate.
 - The recording is finalized automatically when the preview stops, the mode
-  changes, or the device closes — but call `stopVideoRecording()` for a
+  changes, or the device closes, but call `stopVideoRecording()` for a
   normal finish so you know the file is complete.
 - `isRecording` reports whether a recording is in progress. Audio is not
   recorded: UVC is a video-only class, and camera microphones are separate
   USB audio devices, which this package does not currently capture.
+
+#### H.264 camera streams
+
+Some cameras expose their highest resolutions and frame rates only as H.264
+modes.
+
+- Android: H.264 modes appear in `supportedModes()` and work with
+  `startPreview()` like any other format; the texture, `copyLatestFrame()`,
+  `takePicture()`, and `startVideoRecording()` all behave as usual.
+  `startPreviewAuto()` never selects an H.264 mode on its own, so opt in
+  with an explicit `startPreview()`. Decoding H.264 costs more than other
+  formats, so depending on device performance the preview may show fewer
+  frames per second than the mode's nominal rate.
+- Windows: H.264 modes are not listed; the remaining formats already
+  cover every advertised resolution (rationale:
+  [doc/windows-backend.md](doc/windows-backend.md)).
 
 ### Controls
 
@@ -371,7 +388,7 @@ if (panTilt != null) {
 ```
 
 For device debugging, `debugBmControls()` lists the controls a device
-*advertises* without probing their values — useful when a device claims a
+*advertises* without probing their values, useful when a device claims a
 control but rejects reads of it. (Android only; returns an empty list on
 Windows.)
 
@@ -380,14 +397,14 @@ Windows.)
 #### Preview state
 
 `uvcCamera.isPreviewing` returns `true` while the native stream callback is
-active — that is, after a successful `startPreview()` and before `stopPreview()`
+active, that is, after a successful `startPreview()` and before `stopPreview()`
 or device close. Use it to guard UI state or skip work when preview is not
 running.
 
 #### Frame drop behavior
 
 When the native pipeline is still processing a frame, incoming frames are
-dropped rather than queued — the preview always shows the latest frame.
+dropped rather than queued: the preview always shows the latest frame.
 Drops are visible in `getStreamStats()`.
 
 #### Stream stats
@@ -401,8 +418,8 @@ Stats reset when a new `startPreview()` session begins.
 
 #### Streaming error reporting
 
-Frame pipeline errors — decode failures, undersized frames, buffer allocation
-failures — are delivered proactively via `streamErrors` rather than being
+Frame pipeline errors (decode failures, undersized frames, buffer allocation
+failures) are delivered proactively via `streamErrors` rather than being
 silently stored in `lastError`.
 
 Subscribe once when the widget is initialised and cancel on dispose:

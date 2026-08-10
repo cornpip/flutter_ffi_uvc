@@ -1,3 +1,23 @@
+## 0.11.0
+
+- add H.264 UVC format support (Android)
+  - H.264 modes now appear in `supportedModes()` and preview with
+    `startPreview()` like any other format; decoding is hardware
+    (MediaCodec, NEON conversion on arm64) and the texture,
+    `copyLatestFrame()`, `takePicture()`, and `startVideoRecording()` all
+    work unchanged
+  - frames before the stream's first keyframe are dropped and counted as
+    warmup; under load the display frame rate adapts while decoding keeps
+    up, and on UVC 1.5 cameras with an Encoding Unit the package requests
+    sync frames to recover quickly from transport corruption
+  - `startPreviewAuto()` never auto-selects an H.264 mode; opt in with an
+    explicit `startPreview()`
+  - Windows keeps H.264 excluded from the preview mode list (rationale in
+    `doc/windows-backend.md`)
+- change the Android native build to always compile optimized
+  (RelWithDebInfo); debug app builds previously ran the frame pipeline at
+  -O0
+
 ## 0.10.0
 
 - add `startVideoRecording()` / `stopVideoRecording()` / `isRecording` — MP4

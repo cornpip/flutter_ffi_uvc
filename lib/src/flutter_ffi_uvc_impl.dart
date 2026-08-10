@@ -440,7 +440,11 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     int formatRank(UvcCameraMode mode) => mode.formatName == 'MJPEG' ? 0 : 1;
     final int direction =
         preference == UvcAutoPreviewPreference.reliability ? 1 : -1;
-    final List<UvcCameraMode> modes = supportedModes();
+    // H264 modes are opt-in via an explicit startPreview: keyframe timing and
+    // decoder behavior vary too much per device for the auto sequence.
+    final List<UvcCameraMode> modes = supportedModes()
+        .where((UvcCameraMode mode) => mode.formatName != 'H264')
+        .toList();
     modes.sort((UvcCameraMode a, UvcCameraMode b) {
       final int byFormat = formatRank(a).compareTo(formatRank(b));
       if (byFormat != 0) return byFormat;

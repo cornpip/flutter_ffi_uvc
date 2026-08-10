@@ -15,7 +15,7 @@
 
 - Android: keep `libuvc` as the default native preview path, and treat `libuvc` stream transport handling as the source of truth there. Prefer libuvc's existing descriptor parsing; any fallback parsing stays narrowly scoped (parser inputs, descriptor placement) and never replaces the libuvc data model.
 - Windows: the native backend is Media Foundation (`windows/uvc_mf_backend.cpp`). Do not introduce libusb/WinUSB paths on Windows — they require replacing the in-box `usbvideo.sys` driver and are out of scope.
-- H264 native types are deliberately excluded from the Windows mode list; do not re-add them as preview modes (rationale: `doc/windows-backend.md`).
+- H264: keep it out of the Windows mode list, never let `startPreviewAuto` select it, and do not re-add the removed Windows pass-through recording path unless explicitly requested (rationale: `doc/windows-backend.md`).
 - Both backends implement the same exported C ABI and emit byte-compatible JSON (modes, controls, stream stats) so the Dart layer stays backend-agnostic. When the ABI or a JSON contract changes, change both backends together.
 - Keep MJPEG decode in the native path unless there is a strong reason to move it.
 - Frame access from Dart is pull-only (`copyLatestFrame()`). Do not add a push-based frame stream (rationale: `doc/frame-access-design.md`).
