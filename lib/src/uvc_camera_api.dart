@@ -1118,20 +1118,24 @@ abstract interface class UvcCamera {
   /// Requests the CAMERA permission.
   ///
   /// Returns true if the permission is already granted or the user grants it.
-  /// On Windows there is no runtime permission dialog; this returns true and
-  /// OS-level camera privacy settings surface as open/stream failures instead.
+  /// On Windows and Linux there is no runtime permission dialog; this returns
+  /// true, and problems surface as open/stream failures instead (Windows
+  /// camera privacy settings, Linux device-node permissions).
   Future<bool> ensureCameraPermission();
 
   /// Lists USB devices that expose a UVC video interface.
   ///
   /// On Windows, devices are enumerated through Media Foundation;
-  /// [UvcUsbDevice.hasPermission] is always true there.
+  /// [UvcUsbDevice.hasPermission] is always true there. On Linux they are
+  /// enumerated from sysfs, and [UvcUsbDevice.hasPermission] reflects
+  /// read-write access to the device node.
   Future<List<UvcUsbDevice>> listUsbDevices();
 
   /// Stream of USB attach/detach events for UVC-capable devices.
   ///
   /// This is a broadcast stream; the underlying platform listener (an Android
-  /// broadcast receiver / Windows device notifications) is registered while at
+  /// broadcast receiver, Windows device notifications, or a Linux uevent
+  /// monitor) is registered while at
   /// least one listener is subscribed. When the currently opened
   /// device reports [UvcDeviceEventType.detached], the native session has lost
   /// its transport — stop the preview and call [closeUsbDevice] or [closeFd].
@@ -1141,8 +1145,9 @@ abstract interface class UvcCamera {
   ///
   /// On Android this acquires USB permission if needed and passes the
   /// resulting file descriptor to the native UVC layer. On Windows the native
-  /// Media Foundation backend opens the device directly; no permission flow
-  /// is involved.
+  /// Media Foundation backend opens the device directly. On Linux the device
+  /// node is opened and handed to the native UVC layer; there is no
+  /// permission flow, but the node must be accessible (usually a udev rule).
   ///
   /// If another device is already open, the shared native session is safely
   /// torn down first — any running preview is stopped and the previous device
@@ -1162,8 +1167,8 @@ abstract interface class UvcCamera {
   Future<void> closeUsbDevice();
 
   /// Opens a UVC device using an already acquired platform file descriptor.
-  /// Android only — Windows has no file-descriptor concept; use
-  /// [openUsbDevice] there. Throws [UnsupportedError] on other platforms.
+  /// Android only — use [openUsbDevice] on Windows and Linux. Throws
+  /// [UnsupportedError] on other platforms.
   int openFd(int fd);
 
   /// Starts the native preview stream for [mode] without frame verification.
@@ -1311,7 +1316,8 @@ abstract interface class UvcCamera {
   /// successful [startPreview] / [startPreviewAuto]. Frames are encoded
   /// natively (Android: MediaCodec/MediaMuxer, Windows: Media Foundation Sink
   /// Writer); nothing crosses into Dart per frame. The preview keeps running
-  /// while recording.
+  /// while recording. Not available on Linux yet: there this returns a
+  /// negative error code.
   ///
   /// [transform] defaults to [previewTransform] so the recording matches what
   /// the preview shows; it is captured once at start and stays fixed for the
@@ -1371,8 +1377,8 @@ abstract interface class UvcCamera {
   /// Returns controls present in descriptor bmControls without GET_* probing.
   ///
   /// Intended for debugging device quirks where descriptor exposure and
-  /// readable/writable behavior differ. Android only — the Windows backend has
-  /// no raw descriptor access and returns an empty list.
+  /// readable/writable behavior differ. Android and Linux only — the Windows
+  /// backend has no raw descriptor access and returns an empty list.
   List<UvcBmControlInfo> debugBmControls();
 
   /// Returns the current value for a specific UVC control.
@@ -1406,7 +1412,8 @@ abstract interface class UvcCamera {
   /// On Android this includes the device's H.264 modes (previewable via
   /// [startPreview], decoded by the hardware decoder). On Windows H.264 is
   /// deliberately excluded from this list (an inter-frame codec breaks the
-  /// per-frame validation model — see `doc/windows-backend.md`).
+  /// per-frame validation model — see `doc/windows-backend.md`); on Linux it
+  /// is excluded because the backend has no H.264 decoder yet.
   List<UvcCameraMode> supportedModes();
 
   // ---------------------------------------------------------------------------

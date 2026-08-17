@@ -398,8 +398,8 @@ if (panTilt != null) {
 
 For device debugging, `debugBmControls()` lists the controls a device
 *advertises* without probing their values, useful when a device claims a
-control but rejects reads of it. (Android only; returns an empty list on
-Windows.)
+control but rejects reads of it. (Android and Linux only; returns an empty
+list on Windows.)
 
 ### Diagnostics
 
