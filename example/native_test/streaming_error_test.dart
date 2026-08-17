@@ -6,6 +6,8 @@ import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
+import 'test_library.dart';
+
 // ---------------------------------------------------------------------------
 // Test-only bindings for uvc_trigger_test_error.
 // The function is compiled into libflutter_ffi_uvc.so but is NOT declared in
@@ -17,7 +19,7 @@ typedef _DartTriggerTestError = void Function(ffi.Pointer<ffi.Char>);
 
 class _UvcTestBindings {
   _UvcTestBindings() {
-    _lib = ffi.DynamicLibrary.open('libflutter_ffi_uvc.so');
+    _lib = openNativeTestLibrary();
     _trigger = _lib.lookupFunction<_NativeTriggerTestError, _DartTriggerTestError>(
       'uvc_trigger_test_error',
     );

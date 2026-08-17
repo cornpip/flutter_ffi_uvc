@@ -11,6 +11,8 @@
     Android and Windows only)
   - H.264 modes are not listed and `startVideoRecording()` is not yet
     available on Linux; `openFd`/`closeFd` stay Android-only
+- example: hide the record button on Linux, where recording is not
+  available yet
 - add a `NOTICES` file so `showLicensePage()` in a consuming app lists the
   bundled `libuvc`, `libusb`, and `libjpeg-turbo` notices, not just this
   package's BSD-3 license

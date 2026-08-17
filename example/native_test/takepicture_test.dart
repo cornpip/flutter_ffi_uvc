@@ -7,6 +7,8 @@ import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
+import 'test_library.dart';
+
 // ---------------------------------------------------------------------------
 // Test-only bindings for uvc_inject_test_frame_rgba.
 // Not declared in the public header.
@@ -21,7 +23,7 @@ typedef _DartInjectFrame = void Function(ffi.Pointer<ffi.Uint8>, int, int);
 
 class _UvcTakePictureTestBindings {
   _UvcTakePictureTestBindings() {
-    _lib = ffi.DynamicLibrary.open('libflutter_ffi_uvc.so');
+    _lib = openNativeTestLibrary();
     _inject = _lib.lookupFunction<_NativeInjectFrame, _DartInjectFrame>(
       'uvc_inject_test_frame_rgba',
     );

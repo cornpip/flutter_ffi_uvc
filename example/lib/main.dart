@@ -58,6 +58,10 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   /// Where desktop builds save captures. Shown in the save toggle subtitle so
   /// the destination is visible before capturing; the write path falls back to
   /// the working directory if this folder does not exist.
+  // Video recording has no Linux backend yet; hide the record button there
+  // instead of surfacing a button that always fails.
+  bool get _platformSupportsRecording => !Platform.isLinux;
+
   Directory get _desktopCaptureDirectory {
     final String? profile =
         Platform.environment['USERPROFILE'] ?? Platform.environment['HOME'];
@@ -1288,35 +1292,37 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                     ),
                             ),
                           ),
-                          const SizedBox(width: 16),
-                          FilledButton(
-                            onPressed:
-                                !_hasLivePreview || _previewFrozen
-                                ? null
-                                : () => unawaited(_toggleRecording()),
-                            style: FilledButton.styleFrom(
-                              backgroundColor: _recording
-                                  ? Colors.red.withValues(alpha: 0.85)
-                                  : Colors.white.withValues(alpha: 0.85),
-                              foregroundColor: _recording
-                                  ? Colors.white
-                                  : Colors.red,
-                              minimumSize: const Size(44, 44),
-                              padding: const EdgeInsets.all(10),
-                              shape: const CircleBorder(),
-                            ),
-                            child: Tooltip(
-                              message: _recording
-                                  ? 'Stop recording'
-                                  : 'Record video',
-                              child: Icon(
-                                _recording
-                                    ? Icons.stop
-                                    : Icons.fiber_manual_record,
-                                size: 24,
+                          if (_platformSupportsRecording) ...<Widget>[
+                            const SizedBox(width: 16),
+                            FilledButton(
+                              onPressed:
+                                  !_hasLivePreview || _previewFrozen
+                                  ? null
+                                  : () => unawaited(_toggleRecording()),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: _recording
+                                    ? Colors.red.withValues(alpha: 0.85)
+                                    : Colors.white.withValues(alpha: 0.85),
+                                foregroundColor: _recording
+                                    ? Colors.white
+                                    : Colors.red,
+                                minimumSize: const Size(44, 44),
+                                padding: const EdgeInsets.all(10),
+                                shape: const CircleBorder(),
+                              ),
+                              child: Tooltip(
+                                message: _recording
+                                    ? 'Stop recording'
+                                    : 'Record video',
+                                child: Icon(
+                                  _recording
+                                      ? Icons.stop
+                                      : Icons.fiber_manual_record,
+                                  size: 24,
+                                ),
                               ),
                             ),
-                          ),
+                          ],
                         ],
                       ),
                     ),
