@@ -716,8 +716,11 @@ FlMethodErrorResponse* DeviceEventsListenCb(FlEventChannel* /*channel*/,
                                             gpointer user_data) {
   FlutterFfiUvcPlugin* self = FLUTTER_FFI_UVC_PLUGIN(user_data);
   self->device_events_listening = TRUE;
-  SeedKnownVideoDevices(self);
+  // Monitor first: the netlink socket queues events from the moment it is
+  // bound, so a device that appears during the sysfs seed scan below is not
+  // lost. A device both seeded and queued dedupes by deviceId in UeventIdle.
   StartDeviceNotifications(self);
+  SeedKnownVideoDevices(self);
   return nullptr;
 }
 
