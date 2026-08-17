@@ -1,8 +1,19 @@
-## 0.11.1-wip
+## 0.12.0-wip
 
+- add Linux support (x64): the same Dart API runs on Linux desktop through
+  the bundled libuvc backend
+  - libusb and libjpeg-turbo are bundled and built with the plugin, so no
+    system libraries are needed; `nasm` is optional (x86_64 SIMD, faster
+    MJPEG decode)
+  - the app needs read-write access to the camera's `/dev/bus/usb` node,
+    which usually means a udev rule
+  - `deviceEvents` reports attach/detach on Linux as well (previously
+    Android and Windows only)
+  - H.264 modes are not listed and `startVideoRecording()` is not yet
+    available on Linux; `openFd`/`closeFd` stay Android-only
 - add a `NOTICES` file so `showLicensePage()` in a consuming app lists the
   bundled `libuvc`, `libusb`, and `libjpeg-turbo` notices, not just this
-  package's BSD-3 license.
+  package's BSD-3 license
 
 ## 0.11.0
 

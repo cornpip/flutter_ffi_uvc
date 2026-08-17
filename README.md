@@ -4,7 +4,8 @@ UVC (USB Video Class) camera plugin. Connect a USB
 camera and get live preview on a Flutter `Texture`, JPEG still capture, MP4
 video recording, raw frame access from Dart, camera controls, and stream
 diagnostics.  
-Under the hood it uses `libuvc` on Android and Media Foundation on Windows.
+Under the hood it uses `libuvc` on Android and Linux, and Media Foundation
+on Windows.
 
 <img src="./readme_img/260430.gif" alt="app_image_2" width="300"/>
 <img src="./readme_img/11.png" alt="app_image_2" width="300"/>
@@ -13,6 +14,7 @@ Under the hood it uses `libuvc` on Android and Media Foundation on Windows.
 
 - Android(arm64-v8a, x86_64, armeabi-v7a)
 - Windows(x64)
+- Linux(x64): see [Linux setup](#linux-setup) for camera access
 - Dart SDK: `>=3.8.1 <4.0.0`
 - Android minSdk: `24`
 
@@ -28,7 +30,7 @@ flutter pub add flutter_ffi_uvc
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 
 // 1. Open the first attached UVC camera
-//    (requests USB permission on Android; opens directly on Windows).
+//    (requests USB permission on Android; opens directly elsewhere).
 final devices = await uvcCamera.listUsbDevices();
 await uvcCamera.openUsbDevice(devices.first.deviceId);
 
@@ -62,9 +64,9 @@ The sections below cover each step in detail.
 
 ### Typical lifecycle
 
-1. Call `uvcCamera.ensureCameraPermission()` if your app requires the `CAMERA` permission (always returns true on Windows, which has no runtime dialog).
+1. Call `uvcCamera.ensureCameraPermission()` if your app requires the `CAMERA` permission (always returns true on Windows and Linux, which have no runtime dialog).
 2. Call `uvcCamera.listUsbDevices()` to discover attached UVC cameras.
-3. Call `uvcCamera.openUsbDevice(deviceId)` to open the device (on Android this also requests USB permission; on Windows it opens directly).
+3. Call `uvcCamera.openUsbDevice(deviceId)` to open the device (on Android this also requests USB permission; on Windows and Linux it opens directly).
 4. Read `uvcCamera.supportedModes()`.
 5. Pick a mode and call `await uvcCamera.startPreview(mode)`. This starts the stream and verifies frame delivery.
 6. On success, attach a Flutter `Texture` via `attachPreviewTexture` for live preview.
@@ -103,7 +105,9 @@ if (result != 0) {
 ```
 
 On Android, `openUsbDevice` requests USB permission if it has not been granted
-yet; on Windows it opens the camera directly with no permission flow. It
+yet; on Windows and Linux it opens the camera directly with no permission
+flow (on Linux the device node must be accessible, see
+[Linux setup](#linux-setup)). It
 throws a `PlatformException` if the platform layer fails, and returns a
 non-zero code if the native session fails to initialize.
 
@@ -148,8 +152,8 @@ descriptor directly to skip the Android layer:
 uvcCamera.openFd(fd);
 ```
 
-`openFd`/`closeFd` throw `UnsupportedError` on Windows, which has no file
-descriptor concept; use `openUsbDevice`/`closeUsbDevice` instead.
+`openFd`/`closeFd` are Android-only and throw `UnsupportedError` elsewhere;
+use `openUsbDevice`/`closeUsbDevice` on Windows and Linux.
 
 ### Preview & Capture
 
@@ -338,6 +342,9 @@ if (stopped == 0) {
 - `isRecording` reports whether a recording is in progress. Audio is not
   recorded: UVC is a video-only class, and camera microphones are separate
   USB audio devices, which this package does not currently capture.
+- Recording is available on Android and Windows. On Linux
+  `startVideoRecording()` returns a non-zero code (no native encoder is
+  wired up yet); use `takePicture()` and `copyLatestFrame()` there.
 
 #### H.264 camera streams
 
@@ -354,6 +361,8 @@ modes.
 - Windows: H.264 modes are not listed; the remaining formats already
   cover every advertised resolution (rationale:
   [doc/windows-backend.md](doc/windows-backend.md)).
+- Linux: H.264 modes are not listed; the backend has no H.264 decoder yet,
+  and the other formats cover every advertised resolution.
 
 ### Controls
 
@@ -522,8 +531,25 @@ Available levels are:
 - `UvcLogLevel.trace`
 
 If you do not call `uvcCamera.setLogLevel(...)`, the package defaults to `UvcLogLevel.info`.
-Native logs are emitted on Android (logcat); the Windows backend reports
-problems through `streamErrors` and `lastError` instead of log output.
+Native logs are emitted on Android (logcat) and Linux (stderr); the Windows
+backend reports problems through `streamErrors` and `lastError` instead of
+log output.
+
+## Linux setup
+
+The app opens the camera's `/dev/bus/usb` node directly, so it needs
+read-write access. Grant it with a udev rule (vendor and product ids from
+`lsusb`); without it, `openUsbDevice` fails with a `PlatformException`
+naming the device node:
+
+```sh
+echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="xxxx", ATTRS{idProduct}=="xxxx", MODE="0666"' \
+  | sudo tee /etc/udev/rules.d/99-uvc.rules
+sudo udevadm control --reload-rules
+```
+
+Optional: install `nasm` before building for faster MJPEG decode
+(libjpeg-turbo x86_64 SIMD).
 
 ## Example app
 

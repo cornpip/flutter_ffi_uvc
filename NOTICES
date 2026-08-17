@@ -75,7 +75,9 @@ libusb
 libusb. Upstream: https://github.com/libusb/libusb
 Prebuilt Android libusb1.0.so shared libraries and the public header,
 from upstream revision 2101df11b92272eebf0355818f84c12fd040e2ff, are
-bundled unmodified. libusb is linked as a shared library, so it can be
+bundled unmodified. On Linux, unmodified sources from upstream release
+1.0.29 are bundled and built as libusb1.0.so during the app build. On
+both platforms libusb is linked as a shared library, so it can be
 replaced by the user. Licensed under the GNU Lesser General Public
 License, version 2.1 or later:
 
@@ -587,7 +589,8 @@ libjpeg-turbo
 libjpeg-turbo. Upstream: https://github.com/libjpeg-turbo/libjpeg-turbo
 Prebuilt Android libjpeg.so shared libraries and the public headers,
 from upstream revision 96c5446cd661b1329ce5c97b297a924c2e2b5c63, are
-bundled unmodified.
+bundled unmodified. On Linux, unmodified sources from upstream release
+3.2.0 are bundled and built as a static library during the app build.
 
 This software is based in part on the work of the Independent JPEG Group.
 

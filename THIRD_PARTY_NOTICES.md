@@ -3,8 +3,10 @@
 This package includes:
 
 - vendored third-party source code for `libuvc`
-- third-party public headers and prebuilt shared libraries for `libusb`
-- third-party public headers and prebuilt shared libraries for `libjpeg-turbo`
+- for `libusb`: prebuilt shared libraries with public headers (Android) and
+  vendored source code (Linux)
+- for `libjpeg-turbo`: prebuilt shared libraries with public headers
+  (Android) and vendored source code (Linux)
 
 Their licenses remain in force for those components.
 
@@ -32,33 +34,41 @@ revision above and has been modified locally to fit `flutter_ffi_uvc`.
 
 ## libusb
 
-- Path: `src/backend_libuvc/third_party/libusb-android`
+- Paths: `src/backend_libuvc/third_party/libusb-android` (Android prebuilts),
+  `src/backend_libuvc/third_party/libusb` (Linux sources)
 - Upstream: `https://github.com/libusb/libusb`
-- Upstream revision for vendored headers and prebuilt binaries:
+- Upstream revision for the Android prebuilt binaries and headers:
   `2101df11b92272eebf0355818f84c12fd040e2ff`
+- Upstream release for the Linux vendored sources: `1.0.29`
 - License: GNU Lesser General Public License, version 2.1 or later
 
-This package vendors Android `libusb1.0.so` shared libraries and the associated
-public header. It does not vendor the full upstream `libusb` source tree.
-Because `libusb` is licensed under the LGPL, distributions that include these
-binaries must continue to preserve the LGPL notice and comply with the LGPL
-terms for that library and any modifications to it.
+For Android this package vendors `libusb1.0.so` shared libraries and the
+associated public header. For Linux it vendors the unmodified upstream
+sources reduced to the Linux/POSIX subset, built as part of the plugin (see
+`src/backend_libuvc/third_party/libusb/SOURCE.md`). Because `libusb` is
+licensed under the LGPL, distributions that include these binaries must
+continue to preserve the LGPL notice and comply with the LGPL terms for that
+library and any modifications to it.
 
 For convenience, the standard LGPL 2.1 text is provided in:
 
 - `src/backend_libuvc/third_party/libusb-android/COPYING`
+- `src/backend_libuvc/third_party/libusb/COPYING`
 
 ## libjpeg-turbo
 
-- Path: `src/backend_libuvc/third_party/libjpeg-turbo`
+- Paths: `src/backend_libuvc/third_party/libjpeg-turbo` (Android prebuilts),
+  `src/backend_libuvc/third_party/libjpeg-turbo-src` (Linux sources)
 - Upstream: `https://github.com/libjpeg-turbo/libjpeg-turbo`
-- Upstream revision for vendored headers and prebuilt binaries:
+- Upstream revision for the Android prebuilt binaries and headers:
   `96c5446cd661b1329ce5c97b297a924c2e2b5c63`
+- Upstream release for the Linux vendored sources: `3.2.0`
 - License summary: IJG License and Modified BSD (3-clause) License
 
-This package vendors Android `libjpeg.so` shared libraries and the associated
-public headers. It does not vendor the full upstream `libjpeg-turbo` source
-tree.
+For Android this package vendors `libjpeg.so` shared libraries and the
+associated public headers. For Linux it vendors the unmodified upstream
+sources reduced to what the static-library build needs, built as part of the
+plugin (see `src/backend_libuvc/third_party/libjpeg-turbo-src/SOURCE.md`).
 
 The upstream project documents `libjpeg-turbo` as being covered by two
 compatible BSD-style licenses: the IJG license for the libjpeg API code and the
@@ -69,6 +79,8 @@ copies:
 
 - `src/backend_libuvc/third_party/libjpeg-turbo/LICENSE.md`
 - `src/backend_libuvc/third_party/libjpeg-turbo/README.ijg`
+- `src/backend_libuvc/third_party/libjpeg-turbo-src/LICENSE.md`
+- `src/backend_libuvc/third_party/libjpeg-turbo-src/README.ijg`
 
 When distributing binaries that include `libjpeg-turbo`, upstream requires the
 following documentation notice:

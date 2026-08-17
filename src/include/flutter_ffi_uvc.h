@@ -13,7 +13,9 @@
 #if _WIN32
 #define FFI_PLUGIN_EXPORT __declspec(dllexport)
 #else
-#define FFI_PLUGIN_EXPORT
+// Explicit default visibility so the symbols stay exported when the host
+// library is built with -fvisibility=hidden (the Linux plugin build).
+#define FFI_PLUGIN_EXPORT __attribute__((visibility("default")))
 #endif
 
 // The Windows backend implements this ABI in C++; the unmangled C names are
@@ -79,6 +81,11 @@ FFI_PLUGIN_EXPORT void uvc_set_log_level(int level);
 // Transforms are applied during preview blit to the attached Flutter Texture
 // and do not affect the shared RGBA buffer returned by copyLatestFrame.
 FFI_PLUGIN_EXPORT void uvc_set_preview_transform(int rotation, int flip_h, int flip_v);
+
+// Reads back the current preview transform. Desktop plugin layers use this to
+// render the attached Flutter texture with the same transform the preview
+// blit applies. Null out-pointers are allowed.
+FFI_PLUGIN_EXPORT void uvc_get_preview_transform(int *rotation, int *flip_h, int *flip_v);
 
 // Encodes the latest preview frame to JPEG.
 // rotation/flip semantics match uvc_copy_latest_frame_rgba_transformed and are
