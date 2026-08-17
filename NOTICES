@@ -82,7 +82,7 @@ replaced by the user. Licensed under the GNU Lesser General Public
 License, version 2.1 or later:
 
                   GNU LESSER GENERAL PUBLIC LICENSE
-                       Version 2.1, February 1999
+		       Version 2.1, February 1999
 
  Copyright (C) 1991, 1999 Free Software Foundation, Inc.
  51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
@@ -93,7 +93,7 @@ License, version 2.1 or later:
  as the successor of the GNU Library Public License, version 2, hence
  the version number 2.1.]
 
-                            Preamble
+			    Preamble
 
   The licenses for most software are designed to take away your
 freedom to share and change it.  By contrast, the GNU General Public
@@ -195,7 +195,7 @@ modification follow.  Pay close attention to the difference between a
 former contains code derived from the library, whereas the latter must
 be combined with the library in order to run.
 
-                  GNU LESSER GENERAL PUBLIC LICENSE
+		  GNU LESSER GENERAL PUBLIC LICENSE
    TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
 
   0. This License Agreement applies to any software library or other
@@ -229,7 +229,7 @@ such a program is covered only if its contents constitute a work based
 on the Library (independent of the use of the Library in a tool for
 writing it).  Whether that is true depends on what the Library does
 and what the program that uses the Library does.
-
+  
   1. You may copy and distribute verbatim copies of the Library's
 complete source code as you receive it, in any medium, provided that
 you conspicuously and appropriately publish on each copy an
@@ -515,7 +515,7 @@ decision will be guided by the two goals of preserving the free status
 of all derivatives of our free software and of promoting the sharing
 and reuse of software generally.
 
-                            NO WARRANTY
+			    NO WARRANTY
 
   15. BECAUSE THE LIBRARY IS LICENSED FREE OF CHARGE, THERE IS NO
 WARRANTY FOR THE LIBRARY, TO THE EXTENT PERMITTED BY APPLICABLE LAW.
@@ -538,7 +538,7 @@ FAILURE OF THE LIBRARY TO OPERATE WITH ANY OTHER SOFTWARE), EVEN IF
 SUCH HOLDER OR OTHER PARTY HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
 DAMAGES.
 
-                     END OF TERMS AND CONDITIONS
+		     END OF TERMS AND CONDITIONS
 
            How to Apply These Terms to Your New Libraries
 
@@ -603,7 +603,8 @@ libjpeg-turbo is covered by two compatible BSD-style open source licenses:
   [README.ijg](README.ijg)
 
   This license applies to the libjpeg API library and associated programs,
-  including any code inherited from libjpeg and any modifications to that code.
+  including any code inherited from libjpeg and any modifications to that
+  code.
 
 - The Modified (3-clause) BSD License, which is listed below
 
@@ -633,10 +634,12 @@ satisfied.)
   [zlib License](https://spdx.org/licenses/Zlib.html), which is subsumed by the
   IJG License in the context of the cjpeg and djpeg programs and the libjpeg
   API library.
+
 - Some of the libspng source code is covered by the
   [PNG Reference Library License v2](https://spdx.org/licenses/libpng-2.0.html),
   which is subsumed by the IJG License in the context of the cjpeg and djpeg
   programs and the TurboJPEG API library.
+
 - Most of the libspng source code is covered by the
   [Simplified (2-clause) BSD License](https://spdx.org/licenses/BSD-2-Clause.html),
   which is subsumed by the Modified BSD License in the context of the cjpeg and
@@ -650,70 +653,70 @@ This section provides a roll-up of the libjpeg-turbo licensing terms, to the
 best of our understanding.  This is not a license in and of itself.  It is
 intended solely for clarification.
 
-1. If you are distributing a modified version of the libjpeg-turbo source,
-then:
+1.  If you are distributing a modified version of the libjpeg-turbo source,
+    then:
 
-  1. You cannot alter or remove any existing copyright or license notices from
-     the source.
+    1.  You cannot alter or remove any existing copyright or license notices
+        from the source.
 
-     **Origin**
-     - Clause 1 of the IJG License
-     - Clause 1 of the Modified BSD License
+        **Origin**
+        - Clause 1 of the IJG License
+        - Clause 1 of the Modified BSD License
 
-  2. You must add your own copyright notice to the header of each source file
-     you modified, so others can tell that you modified that file.  (If there
-     is not an existing copyright header in that file, then you can simply add
-     a notice stating that you modified the file.)
+    2.  You must add your own copyright notice to the header of each source
+        file you modified, so others can tell that you modified that file.  (If
+        there is not an existing copyright header in that file, then you can
+        simply add a notice stating that you modified the file.)
 
-     **Origin**
-     - Clause 1 of the IJG License
+        **Origin**
+        - Clause 1 of the IJG License
 
-  3. You must include the IJG README file, and you must not alter any of the
-     copyright or license text in that file.
+    3.  You must include the IJG README file, and you must not alter any of the
+        copyright or license text in that file.
 
-     **Origin**
-     - Clause 1 of the IJG License
+        **Origin**
+        - Clause 1 of the IJG License
 
-2. If you are distributing only libjpeg-turbo binaries without the source, or
-if you are distributing an application that statically links with libjpeg-turbo,
-then:
+2.  If you are distributing only libjpeg-turbo binaries without the source, or
+    if you are distributing an application that statically links with
+    libjpeg-turbo, then:
 
-  1. Your product documentation must include a message stating:
+    1.  Your product documentation must include a message stating:
 
-       This software is based in part on the work of the Independent JPEG
-       Group.
+        This software is based in part on the work of the Independent JPEG
+        Group.
 
-     **Origin**
-     - Clause 2 of the IJG license
+        **Origin**
+        - Clause 2 of the IJG license
 
-  2. If your binary distribution includes or uses the TurboJPEG API or
-     associated programs, cjpeg, or djpeg, then your product documentation must
-     include the text of the Modified BSD License (see below.)
+    2.  If your binary distribution includes or uses the TurboJPEG API or
+        associated programs, cjpeg, or djpeg, then your product documentation
+        must include the text of the Modified BSD License (see below.)
 
-     **Origin**
-     - Clause 2 of the Modified BSD License
+        **Origin**
+        - Clause 2 of the Modified BSD License
 
-  3. You cannot use the name of the IJG or The libjpeg-turbo Project or the
-     contributors thereof in advertising, publicity, etc.
+3.  You cannot use the name of the IJG or The libjpeg-turbo Project or the
+    contributors thereof in advertising, publicity, etc.
 
-     **Origin**
-     - IJG License
-     - Clause 3 of the Modified BSD License
+    **Origin**
+    - IJG License
+    - Clause 3 of the Modified BSD License
 
-  4. The authors and distributors do not warrant libjpeg-turbo to be free of
-     defects, nor do we accept any liability for undesirable consequences
-     resulting from your use of the software.
+4.  The authors and distributors do not warrant libjpeg-turbo to be free of
+    defects, nor do we accept any liability for undesirable consequences
+    resulting from your use of the software.
 
-     **Origin**
-     - IJG License
-     - Modified BSD License
+    **Origin**
+    - IJG License
+    - Modified BSD License
 
 
 The Modified (3-clause) BSD License
 ===================================
 
-Copyright (C) 2009-2026 D. R. Commander
-Copyright (C) 2018-2023 Randy
+Copyright (C) 2009-2026 D. R. Commander<br>
+Copyright (C) 2018-2023 Randy <randy408@protonmail.com>
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -777,17 +780,18 @@ TO DO               Plans for future IJG releases.
 Other documentation files in the distribution are:
 
 User documentation:
-  doc/usage.txt     Usage instructions for cjpeg, djpeg, jpegtran,
-                    rdjpgcom, and wrjpgcom.
-  doc/*.1           Unix-style man pages for programs (same info as usage.txt.)
-  doc/wizard.txt    Advanced usage instructions for JPEG wizards only.
-  doc/change.log    Version-to-version change highlights.
-
+  doc/usage.txt         Usage instructions for cjpeg, djpeg, jpegtran,
+                        rdjpgcom, and wrjpgcom.
+  doc/*.1               Unix-style man pages for programs (same info as
+                        usage.txt).
+  doc/wizard.txt        Advanced usage instructions for JPEG wizards only.
+  doc/change.log        Version-to-version change highlights.
 Programmer and internal documentation:
-  doc/libjpeg.txt   How to use the JPEG library in your own programs.
-  src/example.c     Sample code for calling the JPEG library.
-  doc/structure.txt Overview of the JPEG library's internal structure.
-  doc/coderules.txt Coding style rules --- please read if you contribute code.
+  doc/libjpeg.txt       How to use the JPEG library in your own programs.
+  src/example.c         Sample code for calling the JPEG library.
+  doc/structure.txt     Overview of the JPEG library's internal structure.
+  doc/coderules.txt     Coding style rules --- please read if you contribute
+                        code.
 
 Please read at least usage.txt.  Some information can also be found in the JPEG
 FAQ (Frequently Asked Questions) article.  See ARCHIVE LOCATIONS below to find
@@ -826,18 +830,20 @@ processes defined in the standard.
 We provide a set of library routines for reading and writing JPEG image files,
 plus two sample applications "cjpeg" and "djpeg", which use the library to
 perform conversion between JPEG and some other popular image file formats.
-The library is intended to be reused in other applications.  In order to
-support file conversion and viewing software, we have included considerable
-functionality beyond the bare JPEG coding/decoding capability; for example,
-the color quantization modules are not strictly part of JPEG decoding, but
-they are essential for output to colormapped file formats.  These extra
-functions can be compiled out of the library if not required for a particular
-application.
+The library is intended to be reused in other applications.
+
+In order to support file conversion and viewing software, we have included
+considerable functionality beyond the bare JPEG coding/decoding capability;
+for example, the color quantization modules are not strictly part of JPEG
+decoding, but they are essential for output to colormapped file formats.  These
+extra functions can be compiled out of the library if not required for a
+particular application.
 
 We have also included "jpegtran", a utility for lossless transcoding between
 different JPEG processes, and "rdjpgcom" and "wrjpgcom", two simple
-applications for inserting and extracting textual comments in JFIF files.  The
-emphasis in designing this software has been on achieving portability and
+applications for inserting and extracting textual comments in JFIF files.
+
+The emphasis in designing this software has been on achieving portability and
 flexibility, while also making it fast enough to be useful.  In particular,
 the software is not intended to be read as a tutorial on JPEG.  (See the
 REFERENCES section for introductory material.)  Rather, it is intended to
@@ -906,8 +912,8 @@ We recommend reading one or more of these references before trying to
 understand the innards of the JPEG software.
 
 The best short technical introduction to the JPEG compression algorithm is
- Wallace, Gregory K.  "The JPEG Still Picture Compression Standard",
- Communications of the ACM, April 1991 (vol. 34 no. 4), pp. 30-44.
+        Wallace, Gregory K.  "The JPEG Still Picture Compression Standard",
+        Communications of the ACM, April 1991 (vol. 34 no. 4), pp. 30-44.
 (Adjacent articles in that issue discuss MPEG motion picture compression,
 applications of JPEG, and related topics.)  If you don't have the CACM issue
 handy, a PDF file containing a revised version of Wallace's article is
@@ -954,21 +960,23 @@ The TIFF 6.0 file format specification can be obtained from
 http://mirrors.ctan.org/graphics/tiff/TIFF6.ps.gz.  The JPEG incorporation
 scheme found in the TIFF 6.0 spec of 3-June-92 has a number of serious
 problems.  IJG does not recommend use of the TIFF 6.0 design (TIFF Compression
-tag 6).  Instead, we recommend the JPEG design proposed by TIFF Technical
-Note #2 (Compression tag 7).  Copies of this Note can be obtained from
-http://www.ijg.org/files/.  It is expected that the next revision of the TIFF
-spec will replace the 6.0 JPEG design with the Note's design.  Although IJG's
-own code does not support TIFF/JPEG, the free libtiff library uses our library
-to implement TIFF/JPEG per the Note.
+tag 6).  Instead, we recommend the JPEG design proposed by TIFF Technical Note
+#2 (Compression tag 7).  Copies of this Note can be obtained from
+http://www.ijg.org/files/.  It is expected that the next revision
+of the TIFF spec will replace the 6.0 JPEG design with the Note's design.
+Although IJG's own code does not support TIFF/JPEG, the free libtiff library
+uses our library to implement TIFF/JPEG per the Note.
 
 
 ARCHIVE LOCATIONS
 =================
 
 The "official" archive site for this software is www.ijg.org.
-The most recent released version can always be found there in directory
-"files".  The JPEG FAQ (Frequently Asked Questions) article is a source of
-some general information about JPEG.  It is available at
+The most recent released version can always be found there in
+directory "files".
+
+The JPEG FAQ (Frequently Asked Questions) article is a source of some
+general information about JPEG.  It is available at
 http://www.faqs.org/faqs/jpeg-faq.
 
 
@@ -977,3 +985,20 @@ FILE FORMAT COMPATIBILITY
 
 This software implements ITU T.81 | ISO/IEC 10918 with some extensions from
 ITU T.871 | ISO/IEC 10918-5 (JPEG File Interchange Format-- see REFERENCES).
+Informally, the term "JPEG image" or "JPEG file" most often refers to JFIF or
+a subset thereof, but there are other formats containing the name "JPEG" that
+are incompatible with the original JPEG standard or with JFIF (for instance,
+JPEG 2000 and JPEG XR).  This software therefore does not support these
+formats.  Indeed, one of the original reasons for developing this free software
+was to help force convergence on a common, interoperable format standard for
+JPEG files.
+
+JFIF is a minimal or "low end" representation.  TIFF/JPEG (TIFF revision 6.0 as
+modified by TIFF Technical Note #2) can be used for "high end" applications
+that need to record a lot of additional data about an image.
+
+
+TO DO
+=====
+
+Please send bug reports, offers of help, etc. to jpeg-info@jpegclub.org.
