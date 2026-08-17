@@ -143,8 +143,10 @@ set_target_properties(${PLUGIN_NAME} PROPERTIES
   INSTALL_RPATH "$ORIGIN"
 )
 # Link-time only: lets the app executable's linker resolve the plugin's
-# libusb1.0.so dependency from the build tree. Nothing is embedded.
-target_link_options(${PLUGIN_NAME} INTERFACE
+# libusb1.0.so dependency from the build tree. Nothing is embedded. Passed
+# through target_link_libraries because target_link_options needs CMake 3.13
+# while this file declares a 3.10 minimum.
+target_link_libraries(${PLUGIN_NAME} INTERFACE
   "-Wl,-rpath-link,${CMAKE_CURRENT_BINARY_DIR}/libusb_build")
 
 # List of absolute paths to libraries that should be bundled with the plugin.
