@@ -1118,24 +1118,21 @@ abstract interface class UvcCamera {
   /// Requests the CAMERA permission.
   ///
   /// Returns true if the permission is already granted or the user grants it.
-  /// On Windows and Linux there is no runtime permission dialog; this returns
-  /// true, and problems surface as open/stream failures instead (Windows
-  /// camera privacy settings, Linux device-node permissions).
+  /// Desktop platforms have no runtime permission dialog; this returns true,
+  /// and problems surface as open/stream failures instead.
   Future<bool> ensureCameraPermission();
 
   /// Lists USB devices that expose a UVC video interface.
   ///
-  /// On Windows, devices are enumerated through Media Foundation;
-  /// [UvcUsbDevice.hasPermission] is always true there. On Linux they are
-  /// enumerated from sysfs, and [UvcUsbDevice.hasPermission] reflects
-  /// read-write access to the device node.
+  /// [UvcUsbDevice.hasPermission] reports whether the device can be opened
+  /// without a permission request: always true on Windows, and on Linux it
+  /// reflects read-write access to the device node.
   Future<List<UvcUsbDevice>> listUsbDevices();
 
   /// Stream of USB attach/detach events for UVC-capable devices.
   ///
-  /// This is a broadcast stream; the underlying platform listener (an Android
-  /// broadcast receiver, Windows device notifications, or a Linux uevent
-  /// monitor) is registered while at
+  /// This is a broadcast stream; the underlying platform listener is
+  /// registered while at
   /// least one listener is subscribed. When the currently opened
   /// device reports [UvcDeviceEventType.detached], the native session has lost
   /// its transport — stop the preview and call [closeUsbDevice] or [closeFd].
@@ -1143,11 +1140,9 @@ abstract interface class UvcCamera {
 
   /// Opens a USB device by [deviceId].
   ///
-  /// On Android this acquires USB permission if needed and passes the
-  /// resulting file descriptor to the native UVC layer. On Windows the native
-  /// Media Foundation backend opens the device directly. On Linux the device
-  /// node is opened and handed to the native UVC layer; there is no
-  /// permission flow, but the node must be accessible (usually a udev rule).
+  /// On Android this acquires USB permission if needed. Desktop platforms
+  /// have no permission flow; on Linux the device node must be accessible
+  /// (usually a udev rule).
   ///
   /// If another device is already open, the shared native session is safely
   /// torn down first — any running preview is stopped and the previous device
@@ -1314,8 +1309,7 @@ abstract interface class UvcCamera {
   ///
   /// Requires an active preview with delivered frames — call after a
   /// successful [startPreview] / [startPreviewAuto]. Frames are encoded
-  /// natively (Android: MediaCodec/MediaMuxer, Windows: Media Foundation Sink
-  /// Writer); nothing crosses into Dart per frame. The preview keeps running
+  /// natively; nothing crosses into Dart per frame. The preview keeps running
   /// while recording. Not available on Linux yet: there this returns a
   /// negative error code.
   ///
