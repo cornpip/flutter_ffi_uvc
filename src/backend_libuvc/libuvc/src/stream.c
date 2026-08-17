@@ -40,7 +40,7 @@
 #include "libuvc/libuvc_internal.h"
 #include "libuvc/uvc_log.h"
 
-#if defined(__ANDROID__)
+#if defined(__linux__)
 #define LIBUVC_MAX_ISO_TRANSFER_SIZE 49152u
 #endif
 #include "errno.h"
@@ -1251,22 +1251,37 @@ uvc_error_t uvc_stream_start(
         /* But keep a reasonable limit: Otherwise we start dropping data */
         if (packets_per_transfer > 32)
           packets_per_transfer = 32;
-#if defined(__ANDROID__)
+#if defined(__linux__)
+        /* Android and desktop Linux both submit through usbfs, and some host
+         * controllers mishandle large iso URBs outright (the Pi 4's VL805
+         * raises "Transfer event TRB DMA ptr not part of current TD" and the
+         * stream dies), so cap the transfer size on both. */
+        size_t max_iso_transfer_size = LIBUVC_MAX_ISO_TRANSFER_SIZE;
+#if !defined(__ANDROID__)
+        /* Tuning escape hatch for controller quirks: cap in bytes. */
+        const char *max_iso_env = getenv("FFI_UVC_MAX_ISO_BYTES");
+        if (max_iso_env != NULL) {
+          long parsed = strtol(max_iso_env, NULL, 10);
+          if (parsed > 0) {
+            max_iso_transfer_size = (size_t)parsed;
+          }
+        }
+#endif
         if (endpoint_bytes_per_packet > 0 &&
             packets_per_transfer * endpoint_bytes_per_packet >
-                LIBUVC_MAX_ISO_TRANSFER_SIZE) {
-          size_t android_packets_per_transfer =
-              LIBUVC_MAX_ISO_TRANSFER_SIZE / endpoint_bytes_per_packet;
-          if (android_packets_per_transfer == 0) {
-            android_packets_per_transfer = 1;
+                max_iso_transfer_size) {
+          size_t limited_packets_per_transfer =
+              max_iso_transfer_size / endpoint_bytes_per_packet;
+          if (limited_packets_per_transfer == 0) {
+            limited_packets_per_transfer = 1;
           }
           UVC_LOGI(
               "UVC_STREAM",
-              "limiting iso packets_per_transfer for Android from %zu to %zu packetBytes=%zu",
+              "limiting iso packets_per_transfer from %zu to %zu packetBytes=%zu",
               packets_per_transfer,
-              android_packets_per_transfer,
+              limited_packets_per_transfer,
               endpoint_bytes_per_packet);
-          packets_per_transfer = android_packets_per_transfer;
+          packets_per_transfer = limited_packets_per_transfer;
         }
 #endif
         
