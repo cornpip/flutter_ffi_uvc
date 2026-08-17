@@ -1,3 +1,9 @@
+## 0.11.1-wip
+
+- add a `NOTICES` file so `showLicensePage()` in a consuming app lists the
+  bundled `libuvc`, `libusb`, and `libjpeg-turbo` notices, not just this
+  package's BSD-3 license.
+
 ## 0.11.0
 
 - add H.264 UVC format support (Android)

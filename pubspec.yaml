@@ -1,6 +1,6 @@
 name: flutter_ffi_uvc
 description: Plug in a USB (UVC) camera and stream — texture preview, JPEG capture, MP4 recording, raw frame access, camera controls.
-version: 0.11.0
+version: 0.11.1-wip
 repository: https://github.com/cornpip/flutter_ffi_uvc
 
 environment:

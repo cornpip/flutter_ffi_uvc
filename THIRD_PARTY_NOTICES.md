@@ -8,6 +8,12 @@ This package includes:
 
 Their licenses remain in force for those components.
 
+Apps that depend on this package pick these notices up automatically. The
+`NOTICES` file in the package root carries the same attribution in the format
+Flutter's license collector reads, so `showLicensePage()` in a consuming app
+lists `libuvc`, `libusb`, and `libjpeg-turbo` alongside this package's BSD-3
+license.
+
 ## libuvc
 
 - Path: `src/backend_libuvc/libuvc`
@@ -75,7 +81,9 @@ following documentation notice:
   upstream copyright and license notices intact and add your own
   modification notice.
 - If you publish app binaries that bundle the shared libraries from this
-  package, ensure your product documentation or notices include this file.
+  package, the notices ship automatically through the package's `NOTICES`
+  file when you build with Flutter. If you surface licenses some other way,
+  make sure these notices are included.
 - Downstream app distributors that bundle `libusb1.0.so` should review the
   LGPL obligations that apply to that shared library and any modifications to
   it.

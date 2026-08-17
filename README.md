@@ -530,10 +530,6 @@ problems through `streamErrors` and `lastError` instead of log output.
 A demo app lives in the `example/` directory at the root of this
 repository.
 
-## RoadMap
-
-For upcoming work areas and current planning direction, see [ROADMAP.md](ROADMAP.md).
-
 ## Licensing
 
 This package is licensed under the BSD 3-Clause License. 
