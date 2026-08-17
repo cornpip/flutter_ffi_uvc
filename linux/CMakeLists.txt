@@ -81,9 +81,12 @@ set_target_properties(JPEG::JPEG PROPERTIES
 set(BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 set(BUILD_TEST OFF CACHE BOOL "" FORCE)
 set(CMAKE_BUILD_TARGET Static CACHE STRING "" FORCE)
+# EXCLUDE_FROM_ALL keeps libuvc's install rules out of the app bundle
+# (uvc_static still builds because the plugin links it).
 add_subdirectory(
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/backend_libuvc/libuvc"
   libuvc_build
+  EXCLUDE_FROM_ALL
 )
 # uvc_static compiles frame-mjpeg.c against the generated jconfig.h and
 # links the vendored libusb archive.
