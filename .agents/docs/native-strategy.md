@@ -7,6 +7,7 @@
 - Keep MJPEG decode in the native path unless there is a strong reason to move it.
 - Frame access from Dart is pull-only (`copyLatestFrame()`). Do not add a push-based frame stream (rationale: `doc/frame-access-design.md`).
 - Prefer improving the existing native paths over adding parallel preview pipelines or Dart-side format-specific workarounds.
+- Replacing a bundled Android third-party `.so` means rebuilding it with 16 KB page alignment (required by Android 15); the plugin's own library gets that from `-Wl,-z,max-page-size=16384` in `src/CMakeLists.txt`, the prebuilts only from how they were built.
 
 ## Validation
 

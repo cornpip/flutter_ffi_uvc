@@ -1,7 +1,9 @@
 AGENTS.md
 ALL_AGENTS_RULE.md
 CLAUDE.md
+CONTRIBUTING.md
 SECRET_AGENTS_RULE.md
+.agents/
 
 # README images are resolved from the repository URL by pub.dev, so they do
 # not need to ship in the package archive.
