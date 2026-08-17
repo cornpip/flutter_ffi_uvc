@@ -512,15 +512,23 @@ gboolean UeventIdle(gpointer user_data) {
   }
 
   if (message->attached) {
-    // Skip when already known: cameras expose several video interfaces and
-    // each one produces an add event.
-    if (g_hash_table_lookup(self->known_video_devices, message->device_name) ==
-        nullptr) {
-      char syspath[PATH_MAX];
-      snprintf(syspath, sizeof(syspath), "%s/%s", kSysUsbDevices,
-               message->device_name);
-      FlValue* device_map = DeviceMapFromSysfs(syspath);
-      if (device_map != nullptr) {
+    char syspath[PATH_MAX];
+    snprintf(syspath, sizeof(syspath), "%s/%s", kSysUsbDevices,
+             message->device_name);
+    FlValue* device_map = DeviceMapFromSysfs(syspath);
+    if (device_map != nullptr) {
+      // Cameras expose several video interfaces and each one produces an add
+      // event, so a matching remembered entry means a duplicate. Compare by
+      // deviceId rather than presence alone: a device unplugged while the
+      // monitor was stopped leaves a stale entry under the same sysfs name,
+      // and its replug arrives with a fresh devnum.
+      KnownVideoDevice* known = static_cast<KnownVideoDevice*>(
+          g_hash_table_lookup(self->known_video_devices, message->device_name));
+      const int device_id = static_cast<int>(
+          fl_value_get_int(fl_value_lookup_string(device_map, "deviceId")));
+      if (known != nullptr && known->device_id == device_id) {
+        fl_value_unref(device_map);
+      } else {
         RememberVideoDevice(self, message->device_name, device_map);
         EmitDeviceEvent(self, TRUE, device_map);
       }
