@@ -1,14 +1,30 @@
 name: linux-arm64-example
 
 # Builds the example app for Linux arm64 and uploads the runnable bundle.
-# Built inside a Debian bullseye container (glibc 2.31) so the binary runs
-# on Raspberry Pi OS from bullseye onward; building on the runner's own
-# Ubuntu would require a newer glibc than older Pi images ship.
+# Doubles as the Linux build check for PRs and main. Built inside a Debian
+# bullseye container (glibc 2.31) so the binary runs on Raspberry Pi OS from
+# bullseye onward; building on the runner's own Ubuntu would require a newer
+# glibc than older Pi images ship.
 
 on:
+  # Manual runs produce an installable bundle for on-device testing without
+  # needing a code change.
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/**"
+      - "linux/**"
+      - "lib/**"
+      - "example/**"
+      - ".github/workflows/linux-arm64-example.yml"
   push:
-    branches: [linux-support]
+    branches: [main]
+    paths:
+      - "src/**"
+      - "linux/**"
+      - "lib/**"
+      - "example/**"
+      - ".github/workflows/linux-arm64-example.yml"
 
 jobs:
   build:
