@@ -545,6 +545,7 @@ naming the device node:
 ```sh
 echo 'SUBSYSTEM=="usb", ATTRS{idVendor}=="xxxx", ATTRS{idProduct}=="xxxx", MODE="0666"' \
   | sudo tee /etc/udev/rules.d/99-uvc.rules
+
 sudo udevadm control --reload-rules
 ```
 
