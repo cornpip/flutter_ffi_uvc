@@ -330,6 +330,26 @@ void RememberVideoDevice(FlutterFfiUvcPlugin* self, const char* name,
   g_hash_table_replace(self->known_video_devices, g_strdup(name), info);
 }
 
+// Records every currently attached video device without emitting events, so
+// detach events work for devices that were attached before the listener
+// subscribed and were never enumerated through listUsbDevices.
+void SeedKnownVideoDevices(FlutterFfiUvcPlugin* self) {
+  g_autoptr(GDir) dir = g_dir_open(kSysUsbDevices, 0, nullptr);
+  if (dir == nullptr) return;
+  const gchar* name;
+  while ((name = g_dir_read_name(dir)) != nullptr) {
+    if (!g_ascii_isdigit(name[0]) || strchr(name, ':') != nullptr) continue;
+    char syspath[PATH_MAX];
+    snprintf(syspath, sizeof(syspath), "%s/%s", kSysUsbDevices, name);
+    if (!DeviceIsVideo(syspath, name)) continue;
+    FlValue* device_map = DeviceMapFromSysfs(syspath);
+    if (device_map != nullptr) {
+      RememberVideoDevice(self, name, device_map);
+      fl_value_unref(device_map);
+    }
+  }
+}
+
 FlValue* ListVideoDevices(FlutterFfiUvcPlugin* self) {
   FlValue* list = fl_value_new_list();
   g_autoptr(GDir) dir = g_dir_open(kSysUsbDevices, 0, nullptr);
@@ -696,6 +716,7 @@ FlMethodErrorResponse* DeviceEventsListenCb(FlEventChannel* /*channel*/,
                                             gpointer user_data) {
   FlutterFfiUvcPlugin* self = FLUTTER_FFI_UVC_PLUGIN(user_data);
   self->device_events_listening = TRUE;
+  SeedKnownVideoDevices(self);
   StartDeviceNotifications(self);
   return nullptr;
 }
@@ -746,6 +767,10 @@ static void flutter_ffi_uvc_plugin_dispose(GObject* object) {
     g_clear_pointer(&self->textures, g_hash_table_unref);
   }
   if (self->open_fd >= 0) {
+    // Stop the shared native session before releasing the descriptor it
+    // streams on; otherwise libuvc's transfer threads keep using a closed
+    // (and possibly reused) fd during engine teardown.
+    uvc_close_device();
     close(self->open_fd);
     self->open_fd = -1;
   }
