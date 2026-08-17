@@ -14,18 +14,18 @@ void main() {
         return;
       }
 
-      // On Windows the platform itself is supported, but the fd concept is
-      // not — openFd/closeFd must throw instead of silently reinterpreting
-      // the value (the native layer maps ints to device ids internally).
+      // On Windows and Linux the platform itself is supported, but openFd is
+      // not the supported opening path there; it must throw instead of
+      // silently reinterpreting the value.
       expect(() => uvcCamera.openFd(3), throwsA(isA<UnsupportedError>()));
       expect(() => uvcCamera.closeFd(), throwsA(isA<UnsupportedError>()));
     });
 
     test('fails explicitly on unsupported host platforms', () {
-      // Android and Windows are supported platforms: there the guard passes
-      // and native calls only work with the plugin library present, which a
-      // pure Dart test host does not provide.
-      if (Platform.isAndroid || Platform.isWindows) {
+      // Android, Windows, and Linux are supported platforms: there the guard
+      // passes and native calls only work with the plugin library present,
+      // which a pure Dart test host does not provide.
+      if (Platform.isAndroid || Platform.isWindows || Platform.isLinux) {
         return;
       }
 

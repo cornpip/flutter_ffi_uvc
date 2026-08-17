@@ -319,6 +319,36 @@ class FlutterFfiUvcBindings {
   late final _uvc_set_preview_transform = _uvc_set_preview_transformPtr
       .asFunction<void Function(int, int, int)>();
 
+  /// Reads back the current preview transform. Desktop plugin layers use this to
+  /// render the attached Flutter texture with the same transform the preview
+  /// blit applies. Null out-pointers are allowed.
+  void uvc_get_preview_transform(
+    ffi.Pointer<ffi.Int> rotation,
+    ffi.Pointer<ffi.Int> flip_h,
+    ffi.Pointer<ffi.Int> flip_v,
+  ) {
+    return _uvc_get_preview_transform(rotation, flip_h, flip_v);
+  }
+
+  late final _uvc_get_preview_transformPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Void Function(
+            ffi.Pointer<ffi.Int>,
+            ffi.Pointer<ffi.Int>,
+            ffi.Pointer<ffi.Int>,
+          )
+        >
+      >('uvc_get_preview_transform');
+  late final _uvc_get_preview_transform = _uvc_get_preview_transformPtr
+      .asFunction<
+        void Function(
+          ffi.Pointer<ffi.Int>,
+          ffi.Pointer<ffi.Int>,
+          ffi.Pointer<ffi.Int>,
+        )
+      >();
+
   /// Encodes the latest preview frame to JPEG.
   /// rotation/flip semantics match uvc_copy_latest_frame_rgba_transformed and are
   /// applied before encoding; quality is clamped to 1-100. Returns the number of

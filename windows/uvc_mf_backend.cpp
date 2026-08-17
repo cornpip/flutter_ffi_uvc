@@ -1651,6 +1651,11 @@ FFI_PLUGIN_EXPORT void uvc_set_preview_transform(int rotation, int flip_h,
   g.flip_v = flip_v != 0 ? 1 : 0;
 }
 
+FFI_PLUGIN_EXPORT void uvc_get_preview_transform(int* rotation, int* flip_h,
+                                                 int* flip_v) {
+  uvc_win::GetPreviewTransform(rotation, flip_h, flip_v);
+}
+
 FFI_PLUGIN_EXPORT int uvc_ctrl_get_all_json(uint8_t* buffer,
                                             int buffer_length) {
   if (buffer == nullptr || buffer_length <= 0) return 0;

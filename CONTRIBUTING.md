@@ -31,9 +31,9 @@ bullets for the next release.
 
 - When native declarations change, regenerate bindings with
   `dart run ffigen --config ffigen.yaml`.
-- Android and Windows implement the same exported C ABI and emit
-  byte-compatible JSON, so a change to either has to land in both backends
-  together.
+- All platforms implement the same exported C ABI and emit byte-compatible
+  JSON, so a change lands in the libuvc backend (Android/Linux) and the
+  Windows backend together.
 
 ## Tests
 

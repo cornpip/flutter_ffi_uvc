@@ -364,11 +364,9 @@ static int begin_stop_preview_locked(uvc_device_handle_t **devh_to_stop) {
     }
     g_uvc_state.previewing = 0;
     g_uvc_state.stopping_preview = 1;
-    g_uvc_state.frame_listener = NULL;
     return 1;
   }
 
-  g_uvc_state.frame_listener = NULL;
   return 0;
 }
 
@@ -413,7 +411,9 @@ static void close_device_resources_locked(void) {
   reset_frame_buffer_locked();
   g_uvc_state.previewing = 0;
   g_uvc_state.stopping_preview = 0;
-  g_uvc_state.frame_listener = NULL;
+  // The frame listener survives preview stops and device closes on purpose:
+  // desktop plugin layers register it once per texture attach, independent of
+  // the preview session lifecycle. It only changes via uvc_set_frame_listener.
   g_uvc_state.error_listener = NULL;
 }
 
@@ -1622,6 +1622,15 @@ static int write_modes_json_locked(uint8_t *buffer, int buffer_length) {
       UVC_LOGD("UVC_NATIVE", "skipping unsupported format descriptor");
       continue;
     }
+#if !defined(__ANDROID__)
+    // The AMediaCodec decode path only exists in the Android build, so H.264
+    // modes would negotiate but never render; keep them out of the list like
+    // the Windows backend does.
+    if (frame_format == UVC_FRAME_FORMAT_H264) {
+      UVC_LOGD("UVC_NATIVE", "skipping H264 format descriptor (no decoder in this build)");
+      continue;
+    }
+#endif
 
     const uvc_frame_desc_t *frame_desc = format_desc->frame_descs;
     for (; frame_desc != NULL; frame_desc = frame_desc->next) {
@@ -2201,6 +2210,14 @@ FFI_PLUGIN_EXPORT void uvc_set_preview_transform(int rotation, int flip_h, int f
   g_uvc_state.preview_rotation = r;
   g_uvc_state.preview_flip_h = flip_h ? 1 : 0;
   g_uvc_state.preview_flip_v = flip_v ? 1 : 0;
+  pthread_mutex_unlock(&g_uvc_state.mutex);
+}
+
+FFI_PLUGIN_EXPORT void uvc_get_preview_transform(int *rotation, int *flip_h, int *flip_v) {
+  pthread_mutex_lock(&g_uvc_state.mutex);
+  if (rotation != NULL) *rotation = g_uvc_state.preview_rotation;
+  if (flip_h != NULL) *flip_h = g_uvc_state.preview_flip_h;
+  if (flip_v != NULL) *flip_v = g_uvc_state.preview_flip_v;
   pthread_mutex_unlock(&g_uvc_state.mutex);
 }
 

@@ -1,8 +1,8 @@
 # Scope
 
-- Treat this repository as a Flutter FFI package for general UVC camera support on Android and Windows.
 - The public Dart API (`UvcCamera` and its data types) is one platform-neutral surface. Platform differences live in the native backends behind the shared C ABI (`src/include/flutter_ffi_uvc.h`) and the shared MethodChannel contracts; do not fork the Dart API per platform.
 - Members that only make sense on one platform (e.g. `openFd`/`closeFd`, `debugBmControls`) stay in the API, documented as platform-specific, and fail with `UnsupportedError` or an empty/`notSupported` result elsewhere.
+- API docs name a platform only where the caller must behave differently (capability gaps, permission flow, thrown errors), never to say which native stack implements a member.
 - Keep the package general-purpose. Do not turn it into a single-device integration; device-specific behavior is allowed only as a narrowly scoped quirk with clear justification.
 - Keep the existing USB enumeration and Android permission surface minimal: it exists only to open a UVC camera (list devices, acquire permission, hand a file descriptor to the native layer). Do not grow it into general USB-stack management (hub topology, reconnection policies, vendor-specific USB parsing, per-device permission state machines) unless explicitly requested. Session-lifecycle behavior over the existing surface (e.g. openUsbDevice safely tearing down the previous session before switching devices) is in scope; new USB infrastructure is not.
 - Assume the public Dart API wraps a single shared native camera session unless the architecture is intentionally redesigned.

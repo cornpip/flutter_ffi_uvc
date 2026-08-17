@@ -118,9 +118,13 @@ uvc_error_t uvc_init(uvc_context_t **pctx, struct libusb_context *usb_ctx) {
   uvc_context_t *ctx = calloc(1, sizeof(*ctx));
 
   if (usb_ctx == NULL) {
-    // This package is Android-only and opens USB devices through
-    // UsbManager.openDevice() before handing the fd to libusb/libuvc.
-    // Keep libusb device discovery disabled so init never re-scans usbfs.
+    // This package opens USB devices through the platform layer (Android
+    // UsbManager, Linux open(2) on /dev/bus/usb) before handing the fd to
+    // libusb/libuvc via uvc_wrap, so libusb device discovery is unused.
+    // Keep it disabled when the libusb headers are new enough (1.0.27+);
+    // older system libusb lacks libusb_init_context, and plain init only
+    // enables discovery this package never invokes.
+#if defined(LIBUSB_API_VERSION) && LIBUSB_API_VERSION >= 0x0100010A
     const struct libusb_init_option init_options[] = {
       {
         .option = LIBUSB_OPTION_NO_DEVICE_DISCOVERY,
@@ -131,6 +135,9 @@ uvc_error_t uvc_init(uvc_context_t **pctx, struct libusb_context *usb_ctx) {
         &ctx->usb_ctx,
         init_options,
         (int)(sizeof(init_options) / sizeof(init_options[0])));
+#else
+    ret = libusb_init(&ctx->usb_ctx);
+#endif
     ctx->own_usb_ctx = 1;
     if (ret != UVC_SUCCESS) {
       free(ctx);

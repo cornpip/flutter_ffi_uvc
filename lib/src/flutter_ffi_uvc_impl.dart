@@ -1059,17 +1059,23 @@ FlutterFfiUvcBindings? _cachedBindings;
 
 DynamicLibrary get _dylib {
   _ensureSupportedPlatform();
-  return _cachedDylib ??= DynamicLibrary.open(
-    // On Windows the FFI symbols are exported from the plugin DLL, which also
-    // hosts the Media Foundation backend and the platform channels.
-    Platform.isWindows ? '${_libName}_plugin.dll' : 'lib$_libName.so',
-  );
+  // On Windows and Linux the FFI symbols are exported from the plugin
+  // library, which also hosts the native backend and the platform channels.
+  final String libraryName;
+  if (Platform.isWindows) {
+    libraryName = '${_libName}_plugin.dll';
+  } else if (Platform.isLinux) {
+    libraryName = 'lib${_libName}_plugin.so';
+  } else {
+    libraryName = 'lib$_libName.so';
+  }
+  return _cachedDylib ??= DynamicLibrary.open(libraryName);
 }
 
 void _ensureSupportedPlatform() {
-  if (!Platform.isAndroid && !Platform.isWindows) {
+  if (!Platform.isAndroid && !Platform.isWindows && !Platform.isLinux) {
     throw UnsupportedError(
-      'flutter_ffi_uvc is supported only on Android and Windows.',
+      'flutter_ffi_uvc is supported only on Android, Windows, and Linux.',
     );
   }
 }
@@ -1081,7 +1087,8 @@ void _ensureAndroidOnlyApi(String apiName) {
   _ensureSupportedPlatform();
   if (!Platform.isAndroid) {
     throw UnsupportedError(
-      '$apiName is Android-only. Use openUsbDevice/closeUsbDevice on Windows.',
+      '$apiName is Android-only. Use openUsbDevice/closeUsbDevice on Windows '
+      'and Linux.',
     );
   }
 }
