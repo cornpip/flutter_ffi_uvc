@@ -495,10 +495,13 @@ void HandleTextureCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
 struct UeventMessage {
   FlutterFfiUvcPlugin* plugin;  // owns a ref
   gboolean attached;
+  // TRUE when the event came from a video-class usb_interface rather than
+  // the usb_device itself.
+  gboolean video_interface;
   // Attach: sysfs basename of the parent usb_device of a video interface.
   // Detach: basename of the removed device or interface parent.
   char device_name[128];
-  // Detach only, parsed from the uevent environment when present.
+  // usb_device removals only, parsed from the uevent environment.
   int vendor_id;
   int product_id;
   int busnum;
@@ -556,9 +559,21 @@ gboolean UeventIdle(gpointer user_data) {
   } else {
     KnownVideoDevice* info = static_cast<KnownVideoDevice*>(g_hash_table_lookup(
         self->known_video_devices, message->device_name));
-    if (info != nullptr) {
-      // The device is gone from sysfs; rebuild the entry from what was
-      // remembered at attach/list time plus the uevent environment.
+    if (info == nullptr) {
+      // A video-interface removal proves the vanished device was a camera
+      // even when nothing cached it (unplugged during the seed scan, before
+      // it reached this entry). Record a placeholder; the usb_device removal
+      // that ends the removal burst carries the identity and emits below.
+      if (message->video_interface) {
+        g_hash_table_replace(self->known_video_devices,
+                             g_strdup(message->device_name),
+                             g_new0(KnownVideoDevice, 1));
+      }
+    } else if (!message->video_interface) {
+      // Emit on the usb_device removal only: cameras expose several video
+      // interfaces, so emitting per interface removal would double-report
+      // one unplug. The device is gone from sysfs; rebuild the event from
+      // the cached identity plus the uevent environment.
       const int device_id = info->device_id;
       const int busnum =
           message->busnum > 0 ? message->busnum : device_id / 1000;
@@ -569,10 +584,15 @@ gboolean UeventIdle(gpointer user_data) {
       const int product_id =
           message->product_id > 0 ? message->product_id : info->product_id;
       g_hash_table_remove(self->known_video_devices, message->device_name);
-      FlValue* device_map = DeviceMapNew(busnum, devnum, vendor_id, product_id,
-                                         "", "", "");
-      EmitDeviceEvent(self, FALSE, device_map);
+      if (busnum > 0 && devnum > 0) {
+        FlValue* device_map = DeviceMapNew(busnum, devnum, vendor_id,
+                                           product_id, "", "", "");
+        EmitDeviceEvent(self, FALSE, device_map);
+      }
     }
+    // A video-interface removal with a cached entry keeps the entry: the
+    // usb_device removal emits, and a device reset (interfaces recreated,
+    // devnum unchanged) passes without a spurious detach/attach pair.
   }
 
   g_object_unref(self);
@@ -620,9 +640,11 @@ void ProcessUevent(FlutterFfiUvcPlugin* self, char* buffer, ssize_t length) {
     g_autofree gchar* name = g_path_get_basename(parent);
     message = g_new0(UeventMessage, 1);
     message->attached = is_add;
+    message->video_interface = TRUE;
     g_strlcpy(message->device_name, name, sizeof(message->device_name));
   } else if (is_remove && strcmp(devtype, "usb_device") == 0) {
-    // Fallback for cameras whose interface-remove events were missed.
+    // The usb_device removal ends the removal burst and carries the
+    // identity; UeventIdle emits the detach from it.
     g_autofree gchar* name = g_path_get_basename(devpath);
     message = g_new0(UeventMessage, 1);
     message->attached = FALSE;
