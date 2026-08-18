@@ -1,4 +1,4 @@
-## 0.12.0-wip
+## 0.12.0
 
 - add Linux support (x64): the same Dart API runs on Linux desktop through
   the bundled libuvc backend
