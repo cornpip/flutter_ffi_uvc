@@ -9,8 +9,7 @@ Commit subjects start with a type prefix:
   are part of the published package)
 - `chore`: repo-internal work (agent rules, skills, tooling)
 
-Split mixed commits so each part keeps its prefix. The version no longer
-belongs in the subject; the `-wip` changelog section carries it.
+Split mixed commits so each part keeps its prefix.
 
 ## Changelog
 

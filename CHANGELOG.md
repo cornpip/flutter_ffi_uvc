@@ -1,3 +1,9 @@
+## 0.12.1
+
+- fix the Kotlin Gradle Plugin warning Flutter reports for this package when
+  the app builds with AGP 9 or later
+- example: upgrade to Gradle 9.3.1, AGP 9.1.0, and Kotlin 2.4.0
+
 ## 0.12.0
 
 - add Linux support (x64): the same Dart API runs on Linux desktop through

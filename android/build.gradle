@@ -25,7 +25,15 @@ rootProject.allprojects {
 }
 
 apply plugin: "com.android.library"
-apply plugin: "kotlin-android"
+
+// AGP 9 ships Built-in Kotlin; applying KGP on top of it makes Flutter warn.
+// Older AGP still needs the explicit apply.
+// https://docs.flutter.dev/release/breaking-changes/migrate-to-built-in-kotlin/for-plugin-authors
+//
+// Keep the apply on this line: Flutter detects KGP by regex-scanning the file,
+// so a line starting with `apply plugin:` counts even inside a false `if`.
+def agpMajor = com.android.Version.ANDROID_GRADLE_PLUGIN_VERSION.tokenize('.')[0] as int
+if (agpMajor < 9) { apply plugin: "kotlin-android" }
 
 android {
     namespace = "com.cornpip.flutter_ffi_uvc"
@@ -56,10 +64,6 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_17.toString()
-    }
-
     defaultConfig {
         minSdk = 24
         ndk {
@@ -78,7 +82,12 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
+}
+
 dependencies {
-    implementation("org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version")
     implementation("androidx.core:core-ktx:1.13.1")
 }
