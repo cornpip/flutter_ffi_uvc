@@ -637,21 +637,26 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     if (session != null) {
       _supersede(device: true);
       _finalizer.detach(this);
+      // Release the platform side first. On Android this also cancels a
+      // USB permission dialog an open may still be waiting on, which the
+      // queue drain below would otherwise wait for. A failure here (engine
+      // already detached) must not skip the drain.
       try {
-        // Release the platform side first. On Android this also cancels a
-        // USB permission dialog an open may still be waiting on, which the
-        // queue drain below would otherwise wait for.
         await _usbChannel.invokeMethod<void>(
           'closeUsbDevice',
           <String, Object?>{'sessionHandle': session.address},
         );
-        // A worker may still be inside a native open or start. Let the
-        // queue drain before the session goes away.
-        try {
-          await _nativeQueue;
-        } catch (_) {
-          // The queued operation reported its own failure.
-        }
+      } catch (_) {
+        // Nothing left to release on the platform side.
+      }
+      // A worker may still be inside a native open or start. Let the queue
+      // drain before the session goes away.
+      try {
+        await _nativeQueue;
+      } catch (_) {
+        // The queued operation reported its own failure.
+      }
+      try {
         _bindings.uvc_stop_preview(session);
         _bindings.uvc_close_device(session);
         _tearDownNativeErrorListener(session);
@@ -804,14 +809,18 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     final List<UvcPreviewStartResult> attempts = <UvcPreviewStartResult>[];
     for (final UvcCameraMode mode in modes) {
       if (_disposed) break;
-      final UvcPreviewStartResult result = await startPreview(
+      final Future<UvcPreviewStartResult> attempt = startPreview(
         mode,
         policy: policy,
         consecutiveValidFrames: consecutiveValidFrames,
         timeout: perModeTimeout,
       );
+      // startPreview bumped the epoch synchronously. Any other change while
+      // the attempt runs means a later call took over the stream.
+      final int epoch = _sessionEpoch;
+      final UvcPreviewStartResult result = await attempt;
       attempts.add(result);
-      if (result.success) break;
+      if (result.success || _disposed || _sessionEpoch != epoch) break;
     }
     return UvcAutoPreviewResult(attempts: attempts);
   }

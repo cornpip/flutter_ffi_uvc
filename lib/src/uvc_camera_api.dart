@@ -1231,6 +1231,8 @@ abstract interface class UvcCamera {
   /// On success the preview stream remains running in the returned
   /// [UvcAutoPreviewResult.mode]. On total failure all attempts are stopped
   /// and the per-mode results are available in [UvcAutoPreviewResult.attempts].
+  /// A [stopPreview], [closeUsbDevice], [openUsbDevice], [dispose], or start
+  /// issued while an attempt runs wins, and no further candidate is tried.
   Future<UvcAutoPreviewResult> startPreviewAuto({
     List<UvcCameraMode>? candidates,
     UvcAutoPreviewPreference preference = UvcAutoPreviewPreference.reliability,
