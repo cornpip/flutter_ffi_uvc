@@ -5,11 +5,13 @@
   - `deviceEvents` is shared by all instances
   - `openUsbDevice()` returns `UvcErrorCode.busy` for a device another
     instance already holds open
+  - an undisposed instance releases its camera when garbage collected
 - add `openedDeviceId`
 - **BREAKING** for classes that `implements UvcCamera` (test fakes and
   mocks): add `dispose()` and `openedDeviceId`. Callers are unaffected
 - improve `openUsbDevice()`, `startPreview()`, and `startPreviewAuto()` to
   run the native open and stream start off the UI thread
+  - a later stop, close, dispose, or start wins over one still in flight
 - change detach handling: an instance whose device is unplugged stops its
   preview and closes the device itself
 - change `lastError` on Windows to clear once frames are delivered again,
