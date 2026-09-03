@@ -1187,7 +1187,8 @@ abstract interface class UvcCamera {
   /// Android only — use [openUsbDevice] on Windows and Linux. Throws
   /// [UnsupportedError] on other platforms. A device this instance opened
   /// through [openUsbDevice] is closed first, and [openedDeviceId] becomes
-  /// null.
+  /// null. Throws [StateError] while an [openUsbDevice] call is still in
+  /// progress.
   int openFd(int fd);
 
   /// Starts the native preview stream for [mode] without frame verification.

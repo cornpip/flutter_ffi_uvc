@@ -161,6 +161,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
 
   // Async native operations of one instance run one at a time.
   Future<void> _nativeQueue = Future<void>.value();
+  // openUsbDevice() calls not yet finished, queued ones included. openFd()
+  // refuses to overlap them because their native opens would race.
+  int _usbOpensPending = 0;
 
   Future<T> _serialized<T>(Future<T> Function() operation) {
     final Future<T> result = _nativeQueue.then((_) => operation());
@@ -497,7 +500,10 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     // The whole open runs as one queued transaction, so two opens on the
     // same instance follow each other instead of closing each other's
     // connection, and a start issued after an open waits for it.
-    return _serialized(() => _openUsbDeviceTransaction(deviceId, deviceEpoch));
+    _usbOpensPending += 1;
+    return _serialized(
+      () => _openUsbDeviceTransaction(deviceId, deviceEpoch),
+    ).whenComplete(() => _usbOpensPending -= 1);
   }
 
   Future<int> _openUsbDeviceTransaction(int deviceId, int epoch) async {
@@ -631,22 +637,24 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     if (session != null) {
       _supersede(device: true);
       _finalizer.detach(this);
-      // A worker may still be inside a native open or start. Let the queue
-      // drain before the session goes away.
       try {
-        await _nativeQueue;
-      } catch (_) {
-        // The queued operation reported its own failure.
-      }
-      try {
-        _bindings.uvc_stop_preview(session);
-        _bindings.uvc_close_device(session);
-        _tearDownNativeErrorListener(session);
-        // The platform side holds the handle. Release it before the session.
+        // Release the platform side first. On Android this also cancels a
+        // USB permission dialog an open may still be waiting on, which the
+        // queue drain below would otherwise wait for.
         await _usbChannel.invokeMethod<void>(
           'closeUsbDevice',
           <String, Object?>{'sessionHandle': session.address},
         );
+        // A worker may still be inside a native open or start. Let the
+        // queue drain before the session goes away.
+        try {
+          await _nativeQueue;
+        } catch (_) {
+          // The queued operation reported its own failure.
+        }
+        _bindings.uvc_stop_preview(session);
+        _bindings.uvc_close_device(session);
+        _tearDownNativeErrorListener(session);
         await _textureChannel.invokeMethod<void>(
           'detachPreviewSession',
           <String, Object?>{'sessionHandle': session.address},
@@ -665,6 +673,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   @override
   int openFd(int fd) {
     _ensureAndroidOnlyApi('openFd');
+    if (_usbOpensPending > 0) {
+      throw StateError('openFd() cannot run while openUsbDevice() is in progress.');
+    }
     _supersede(device: true);
     // A device opened through openUsbDevice is replaced by the raw
     // descriptor. Drop its tracking and release its platform connection.
