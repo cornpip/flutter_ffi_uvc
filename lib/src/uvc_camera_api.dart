@@ -1201,8 +1201,8 @@ abstract interface class UvcCamera {
   ///
   /// On success, the preview stream remains running. On failure, the preview
   /// is stopped before the result is returned. A [stopPreview],
-  /// [closeUsbDevice], [dispose], or later start issued while this call is in
-  /// flight wins, and this call then reports a failure.
+  /// [closeUsbDevice], [openUsbDevice], [dispose], or later start issued
+  /// while this call is in flight wins, and this call then reports a failure.
   Future<UvcPreviewStartResult> startPreview(
     UvcCameraMode mode, {
     UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
