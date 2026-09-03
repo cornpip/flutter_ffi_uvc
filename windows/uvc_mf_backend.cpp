@@ -146,9 +146,17 @@ SessionRegistry registry;
 struct Session {
   std::mutex mutex;
 
-  // Open device.
+  // Open device. symlink stays set while a device is open so the source can
+  // be re-activated for every preview start.
+  std::wstring symlink;
   IMFMediaSource* source = nullptr;
+  // Set once the source has streamed. Only then does a preview start need
+  // to re-activate it.
+  bool source_streamed = false;
   IMFSourceReader* reader = nullptr;
+  // Bumped whenever reader is replaced so a late callback from the previous
+  // reader is ignored.
+  uint64_t reader_generation = 0;
   IAMVideoProcAmp* procamp = nullptr;
   IAMCameraControl* camctrl = nullptr;
   std::vector<ModeInfo> modes;
@@ -311,11 +319,15 @@ int ParseHexAfter(const std::wstring& haystack, const wchar_t* needle) {
 }
 
 // Caller holds process.mutex.
+// Device paths are case-insensitive, and WM_DEVICECHANGE reports them in
+// upper case while enumeration reports lower case.
 int AssignIdLocked(const std::wstring& symlink) {
-  auto it = process.id_by_symlink.find(symlink);
+  std::wstring key = symlink;
+  for (wchar_t& c : key) c = towlower(c);
+  auto it = process.id_by_symlink.find(key);
   if (it != process.id_by_symlink.end()) return it->second;
   int id = process.next_device_id++;
-  process.id_by_symlink[symlink] = id;
+  process.id_by_symlink[key] = id;
   return id;
 }
 
@@ -525,8 +537,8 @@ bool ConvertSampleLocked(Session& s, IMFSample* sample) {
 // shared_ptr and sees reader == nullptr and previewing == false.
 class SourceReaderCallback : public IMFSourceReaderCallback {
  public:
-  explicit SourceReaderCallback(std::weak_ptr<Session> session)
-      : session_(std::move(session)) {}
+  SourceReaderCallback(std::weak_ptr<Session> session, uint64_t generation)
+      : session_(std::move(session)), generation_(generation) {}
 
   // IUnknown
   STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override {
@@ -563,7 +575,8 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
     int64_t sequence = 0;
     {
       std::lock_guard<std::mutex> lock(s.mutex);
-      if (!s.previewing.load() || s.reader == nullptr) {
+      if (!s.previewing.load() || s.reader == nullptr ||
+          s.reader_generation != generation_) {
         return S_OK;
       }
       s.stats.input_frame_count += 1;
@@ -633,7 +646,11 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
 
   STDMETHODIMP OnFlush(DWORD /*stream_index*/) override {
     std::shared_ptr<Session> owner = session_.lock();
-    if (owner && owner->flush_event != nullptr) SetEvent(owner->flush_event);
+    if (!owner) return S_OK;
+    std::lock_guard<std::mutex> lock(owner->mutex);
+    if (owner->reader_generation == generation_ && owner->flush_event != nullptr) {
+      SetEvent(owner->flush_event);
+    }
     return S_OK;
   }
 
@@ -646,7 +663,42 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
   ~SourceReaderCallback() = default;
   LONG ref_count_ = 1;
   std::weak_ptr<Session> session_;
+  uint64_t generation_;
 };
+
+// Creates a Source Reader on the open media source, replacing any existing
+// one. Caller holds s.mutex and has stopped the preview.
+bool CreateReaderLocked(Session& s, const std::shared_ptr<Session>& owner) {
+  if (s.reader != nullptr) {
+    s.reader->Release();
+    s.reader = nullptr;
+  }
+  s.reader_generation += 1;
+
+  IMFAttributes* attrs = nullptr;
+  if (FAILED(MFCreateAttributes(&attrs, 3))) {
+    SetErrorMessage(s, "MFCreateAttributes failed");
+    return false;
+  }
+  attrs->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
+  // Keep the media source alive when a reader is released so it can be
+  // reused by the next reader. CloseDeviceLocked shuts it down explicitly.
+  attrs->SetUINT32(MF_SOURCE_READER_DISCONNECT_MEDIASOURCE_ON_SHUTDOWN, TRUE);
+  SourceReaderCallback* callback = new SourceReaderCallback(
+      std::weak_ptr<Session>(owner), s.reader_generation);
+  attrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
+  callback->Release();  // The attribute store holds the reference now.
+
+  HRESULT hr = MFCreateSourceReaderFromMediaSource(s.source, attrs, &s.reader);
+  attrs->Release();
+  if (FAILED(hr) || s.reader == nullptr) {
+    s.reader = nullptr;
+    SetErrorMessage(s, "MFCreateSourceReaderFromMediaSource failed: 0x%08lX",
+                    static_cast<unsigned long>(hr));
+    return false;
+  }
+  return true;
+}
 
 // Stops preview and waits for in-flight callbacks to drain. Must be called
 // WITHOUT s.mutex held: OnReadSample takes the mutex, and MF only completes
@@ -671,6 +723,40 @@ void StopPreviewInternal(Session& s) {
 
 // Caller holds s.mutex. The destructor calls it unlocked because no other
 // reference is left.
+void CloseDeviceLocked(Session& s);
+
+// Activates the media source for s.symlink, creates its reader, and lists
+// the modes. Caller holds s.mutex with no device open. The Frame Server
+// rejects native type changes on a source that already streamed, so every
+// preview start re-activates the source.
+int OpenSourceLocked(Session& s, const std::shared_ptr<Session>& owner) {
+  IMFActivate* activate = nullptr;
+  Enumerate(&s.symlink, &activate);
+  if (activate == nullptr) {
+    SetErrorMessage(s, "Video capture device disappeared");
+    return kErrorNoDevice;
+  }
+  HRESULT hr = activate->ActivateObject(IID_PPV_ARGS(&s.source));
+  activate->Release();
+  if (FAILED(hr) || s.source == nullptr) {
+    SetErrorMessage(s, "Failed to activate media source: 0x%08lX",
+                    static_cast<unsigned long>(hr));
+    s.source = nullptr;
+    return kErrorIo;
+  }
+
+  // Control interfaces are optional. A device without them still streams.
+  s.source->QueryInterface(IID_PPV_ARGS(&s.procamp));
+  s.source->QueryInterface(IID_PPV_ARGS(&s.camctrl));
+
+  if (!CreateReaderLocked(s, owner)) {
+    CloseDeviceLocked(s);
+    return kErrorIo;
+  }
+  EnumerateModesLocked(s);
+  return 0;
+}
+
 void CloseDeviceLocked(Session& s) {
   if (s.reader != nullptr) {
     s.reader->Release();
@@ -690,6 +776,7 @@ void CloseDeviceLocked(Session& s) {
     s.source = nullptr;
   }
   s.modes.clear();
+  s.source_streamed = false;
   s.frame_w = 0;
   s.frame_h = 0;
   s.sequence.store(0);
@@ -1238,48 +1325,10 @@ FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t* session, int fd) {
     return kErrorNoDevice;
   }
 
-  IMFActivate* activate = nullptr;
-  Enumerate(&symlink, &activate);
-  if (activate == nullptr) {
-    SetErrorMessage(s, "Device %d disappeared during open", fd);
-    return kErrorNoDevice;
-  }
-  HRESULT hr = activate->ActivateObject(IID_PPV_ARGS(&s.source));
-  activate->Release();
-  if (FAILED(hr) || s.source == nullptr) {
-    SetErrorMessage(s, "Failed to activate media source: 0x%08lX",
-                    static_cast<unsigned long>(hr));
-    s.source = nullptr;
-    return kErrorIo;
-  }
-
-  // Control interfaces are optional. A device without them still streams.
-  s.source->QueryInterface(IID_PPV_ARGS(&s.procamp));
-  s.source->QueryInterface(IID_PPV_ARGS(&s.camctrl));
-
-  IMFAttributes* attrs = nullptr;
-  if (FAILED(MFCreateAttributes(&attrs, 2))) {
-    CloseDeviceLocked(s);
-    SetErrorMessage(s, "MFCreateAttributes failed");
-    return kErrorOther;
-  }
-  attrs->SetUINT32(MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, TRUE);
-  SourceReaderCallback* callback =
-      new SourceReaderCallback(std::weak_ptr<Session>(owner));
-  attrs->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback);
-  callback->Release();  // The attribute store holds the reference now.
-
-  hr = MFCreateSourceReaderFromMediaSource(s.source, attrs, &s.reader);
-  attrs->Release();
-  if (FAILED(hr) || s.reader == nullptr) {
-    CloseDeviceLocked(s);
-    SetErrorMessage(s, "MFCreateSourceReaderFromMediaSource failed: 0x%08lX",
-                    static_cast<unsigned long>(hr));
-    return kErrorIo;
-  }
-
-  EnumerateModesLocked(s);
-  return 0;
+  s.symlink = symlink;
+  const int result = OpenSourceLocked(s, owner);
+  if (result != 0) s.symlink.clear();
+  return result;
 }
 
 FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
@@ -1290,9 +1339,15 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
   Session& s = *owner;
   StopPreviewInternal(s);
   std::lock_guard<std::mutex> lock(s.mutex);
-  if (s.reader == nullptr) {
+  if (s.symlink.empty()) {
     SetErrorMessage(s, "No device open");
     return kErrorNoDevice;
+  }
+  // A source that already streamed cannot change type. See OpenSourceLocked.
+  if (s.source_streamed || s.source == nullptr) {
+    CloseDeviceLocked(s);
+    const int reopen = OpenSourceLocked(s, owner);
+    if (reopen != 0) return reopen;
   }
 
   const ModeInfo* mode = nullptr;
@@ -1364,6 +1419,7 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
   s.stats = StreamStats();
   s.stats.start_qpc = QpcNow();
   s.previewing.store(true);
+  s.source_streamed = true;
 
   hr = s.reader->ReadSample(kVideoStream, 0, nullptr, nullptr, nullptr,
                             nullptr);
@@ -1389,6 +1445,7 @@ FFI_PLUGIN_EXPORT void uvc_close_device(uvc_session_t* session) {
   {
     std::lock_guard<std::mutex> lock(s->mutex);
     CloseDeviceLocked(*s);
+    s->symlink.clear();
   }
   // The frame listener survives so a bound texture keeps working across a
   // device switch. The error listener belongs to the closed stream.

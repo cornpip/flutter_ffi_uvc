@@ -98,6 +98,11 @@ device-enumeration channel calls carry no session.
 
 ## Frame pipeline
 
+- A source that already streamed is activated again before the next preview
+  start, with a new Source Reader. The Frame Server rejects a native type
+  change on such a source with `MF_E_INVALIDREQUEST`, and releasing the
+  reader alone leaves the source shut down, so a mode switch reopens the
+  source.
 - The Source Reader is configured with
   `MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING` and an RGB32 output
   type, so Media Foundation performs MJPEG decode and YUV conversion. The
