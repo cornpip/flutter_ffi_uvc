@@ -74,14 +74,24 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   void _rememberOpenedDevice(int deviceId) {
     _openDevices[deviceId] = WeakReference<FfiUvcCamera>(this);
     _openedDeviceId = deviceId;
-    _ownDeviceSub ??= deviceEvents.listen((UvcDeviceEvent event) {
+    if (_ownDeviceSub != null) return;
+    // Weak so an undisposed instance can still be collected and finalized.
+    final WeakReference<FfiUvcCamera> weak = WeakReference<FfiUvcCamera>(this);
+    late final StreamSubscription<UvcDeviceEvent> sub;
+    sub = deviceEvents.listen((UvcDeviceEvent event) {
+      final FfiUvcCamera? self = weak.target;
+      if (self == null) {
+        unawaited(sub.cancel());
+        return;
+      }
       if (event.type == UvcDeviceEventType.detached &&
-          event.device.deviceId == _openedDeviceId) {
+          event.device.deviceId == self._openedDeviceId) {
         // The transport is gone, so the session cannot be used again.
-        stopPreview();
-        unawaited(closeUsbDevice());
+        self.stopPreview();
+        unawaited(self.closeUsbDevice());
       }
     });
+    _ownDeviceSub = sub;
   }
 
   // Created on first native use so construction never loads the library.
@@ -137,11 +147,16 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   // when it changes undoes itself.
   int _deviceEpoch = 0;
 
+  // Bumped by calls that start or replace the stream. A superseded start
+  // leaves the stream alone when a later start owns it.
+  int _startEpoch = 0;
+
   // Every call that changes the session goes through here. A new lifecycle
   // method must call it, or in-flight work will not notice the call.
-  void _supersede({bool device = false}) {
+  void _supersede({bool device = false, bool start = false}) {
     _sessionEpoch += 1;
     if (device) _deviceEpoch += 1;
+    if (start) _startEpoch += 1;
   }
 
   // Async native operations of one instance run one at a time.
@@ -166,10 +181,16 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   // because the native layer clears the slot when a device closes.
   void _setupNativeErrorListener() {
     if (_disposed) return;
-    _errorCallable ??=
-        NativeCallable<Void Function(Pointer<Void>, Pointer<Char>)>.listener(
-          _onNativeError,
-        );
+    if (_errorCallable == null) {
+      // Weak so an undisposed instance can still be collected and finalized.
+      final WeakReference<FfiUvcCamera> weak =
+          WeakReference<FfiUvcCamera>(this);
+      _errorCallable =
+          NativeCallable<Void Function(Pointer<Void>, Pointer<Char>)>.listener(
+            (Pointer<Void> data, Pointer<Char> message) =>
+                weak.target?._onNativeError(data, message),
+          );
+    }
     _bindings.uvc_set_error_listener(_s, _errorCallable!.nativeFunction, nullptr);
   }
 
@@ -229,6 +250,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
 
     try {
       final int epoch = _sessionEpoch;
+      final int startEpoch = _startEpoch;
       int startResult;
       try {
         startResult = await _serialized(() => _openPreviewOffThread(mode));
@@ -240,7 +262,11 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       if (_disposed || _sessionEpoch != epoch) {
         // stopPreview(), closeUsbDevice(), dispose(), or a later start ran
         // while this start was in flight and wins.
-        if (startResult == 0 && !_disposed) _stopPreviewNative();
+        // Only undo a stream nobody else started since. A later start owns
+        // the stream now.
+        if (startResult == 0 && !_disposed && _startEpoch == startEpoch) {
+          _stopPreviewNative();
+        }
         return UvcPreviewStartResult(
           mode: mode,
           success: false,
@@ -639,6 +665,18 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   @override
   int openFd(int fd) {
     _ensureAndroidOnlyApi('openFd');
+    _supersede(device: true);
+    // A device opened through openUsbDevice is replaced by the raw
+    // descriptor. Drop its tracking and release its platform connection.
+    if (_openedDeviceId != null) {
+      _forgetOpenedDevice();
+      unawaited(
+        _usbChannel.invokeMethod<void>(
+          'closeUsbDevice',
+          <String, Object?>{'sessionHandle': nativeSessionHandle},
+        ),
+      );
+    }
     return _openFdNative(fd);
   }
 
@@ -659,7 +697,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   int openPreview(UvcCameraMode mode) {
     // Replaces the stream like startPreview does, so it supersedes a start
     // still verifying frames.
-    _supersede();
+    _supersede(start: true);
     _recordPreviewRequest(mode);
     return _bindings.uvc_start_preview(
       _s,
@@ -716,7 +754,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     int consecutiveValidFrames = 3,
     Duration timeout = const Duration(seconds: 2),
   }) {
-    _supersede();
+    _supersede(start: true);
     _lastPreviewRequest = _PreviewRequest(
       mode: mode,
       policy: policy,
@@ -854,7 +892,16 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     _stallConfig = config;
     _resetStallTracking();
     _stallTimer?.cancel();
-    _stallTimer = Timer.periodic(config.checkInterval, (_) => _stallTick());
+    // Weak so an undisposed instance can still be collected and finalized.
+    final WeakReference<FfiUvcCamera> weak = WeakReference<FfiUvcCamera>(this);
+    _stallTimer = Timer.periodic(config.checkInterval, (Timer timer) {
+      final FfiUvcCamera? self = weak.target;
+      if (self == null) {
+        timer.cancel();
+        return;
+      }
+      self._stallTick();
+    });
   }
 
   @override
