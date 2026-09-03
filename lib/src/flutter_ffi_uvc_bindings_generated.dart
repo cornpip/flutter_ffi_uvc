@@ -22,114 +22,179 @@ class FlutterFfiUvcBindings {
     ffi.Pointer<T> Function<T extends ffi.NativeType>(String symbolName) lookup,
   ) : _lookup = lookup;
 
-  /// A very short-lived native function.
-  ///
-  /// For very short-lived functions, it is fine to call them on the main isolate.
-  /// They will block the Dart execution while running the native function, so
-  /// only do this for native functions which are guaranteed to be short-lived.
-  int sum(int a, int b) {
-    return _sum(a, b);
+  /// Allocates an idle session. Returns NULL on allocation failure.
+  ffi.Pointer<uvc_session_t> uvc_session_create() {
+    return _uvc_session_create();
   }
 
-  late final _sumPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Int, ffi.Int)>>('sum');
-  late final _sum = _sumPtr.asFunction<int Function(int, int)>();
-
-  /// A longer lived native function, which occupies the thread calling it.
-  ///
-  /// Do not call these kind of native functions in the main isolate. They will
-  /// block Dart execution. This will cause dropped frames in Flutter applications.
-  /// Instead, call these native functions on a separate isolate.
-  int sum_long_running(int a, int b) {
-    return _sum_long_running(a, b);
-  }
-
-  late final _sum_long_runningPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Int, ffi.Int)>>(
-        'sum_long_running',
+  late final _uvc_session_createPtr =
+      _lookup<ffi.NativeFunction<ffi.Pointer<uvc_session_t> Function()>>(
+        'uvc_session_create',
       );
-  late final _sum_long_running = _sum_long_runningPtr
-      .asFunction<int Function(int, int)>();
+  late final _uvc_session_create = _uvc_session_createPtr
+      .asFunction<ffi.Pointer<uvc_session_t> Function()>();
 
-  int uvc_open_fd(int fd) {
-    return _uvc_open_fd(fd);
+  /// Stops preview and recording, closes the device, and frees the session.
+  /// Waits for every acquire pin to be released. No listener fires afterwards.
+  void uvc_session_destroy(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_session_destroy(session);
+  }
+
+  late final _uvc_session_destroyPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Void Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_session_destroy');
+  late final _uvc_session_destroy = _uvc_session_destroyPtr
+      .asFunction<void Function(ffi.Pointer<uvc_session_t>)>();
+
+  /// For callers that hold a session pointer they do not own. uvc_session_acquire
+  /// returns 1 and pins the session when the pointer is a live session, and 0
+  /// for any other pointer. Pair every successful acquire with a release.
+  int uvc_session_acquire(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_session_acquire(session);
+  }
+
+  late final _uvc_session_acquirePtr =
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<uvc_session_t>)>>(
+        'uvc_session_acquire',
+      );
+  late final _uvc_session_acquire = _uvc_session_acquirePtr
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
+
+  void uvc_session_release(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_session_release(session);
+  }
+
+  late final _uvc_session_releasePtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Void Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_session_release');
+  late final _uvc_session_release = _uvc_session_releasePtr
+      .asFunction<void Function(ffi.Pointer<uvc_session_t>)>();
+
+  /// Opens a device on the session. fd is a USB device node descriptor on
+  /// Android and Linux and the enumeration device id on Windows. A device
+  /// already open on this session is closed first.
+  int uvc_open_fd(ffi.Pointer<uvc_session_t> session, int fd) {
+    return _uvc_open_fd(session, fd);
   }
 
   late final _uvc_open_fdPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Int)>>('uvc_open_fd');
-  late final _uvc_open_fd = _uvc_open_fdPtr.asFunction<int Function(int)>();
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(ffi.Pointer<uvc_session_t>, ffi.Int)
+        >
+      >('uvc_open_fd');
+  late final _uvc_open_fd = _uvc_open_fdPtr
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>, int)>();
 
-  int uvc_start_preview(int frame_format, int width, int height, int fps) {
-    return _uvc_start_preview(frame_format, width, height, fps);
+  int uvc_start_preview(
+    ffi.Pointer<uvc_session_t> session,
+    int frame_format,
+    int width,
+    int height,
+    int fps,
+  ) {
+    return _uvc_start_preview(session, frame_format, width, height, fps);
   }
 
   late final _uvc_start_previewPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Int, ffi.Int, ffi.Int, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+          )
+        >
       >('uvc_start_preview');
   late final _uvc_start_preview = _uvc_start_previewPtr
-      .asFunction<int Function(int, int, int, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, int, int, int, int)
+      >();
 
-  void uvc_stop_preview() {
-    return _uvc_stop_preview();
+  void uvc_stop_preview(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_stop_preview(session);
   }
 
   late final _uvc_stop_previewPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function()>>('uvc_stop_preview');
+      _lookup<
+        ffi.NativeFunction<ffi.Void Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_stop_preview');
   late final _uvc_stop_preview = _uvc_stop_previewPtr
-      .asFunction<void Function()>();
+      .asFunction<void Function(ffi.Pointer<uvc_session_t>)>();
 
-  void uvc_close_device() {
-    return _uvc_close_device();
+  void uvc_close_device(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_close_device(session);
   }
 
   late final _uvc_close_devicePtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function()>>('uvc_close_device');
+      _lookup<
+        ffi.NativeFunction<ffi.Void Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_close_device');
   late final _uvc_close_device = _uvc_close_devicePtr
-      .asFunction<void Function()>();
+      .asFunction<void Function(ffi.Pointer<uvc_session_t>)>();
 
-  int uvc_is_previewing() {
-    return _uvc_is_previewing();
+  int uvc_is_previewing(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_is_previewing(session);
   }
 
   late final _uvc_is_previewingPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function()>>('uvc_is_previewing');
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<uvc_session_t>)>>(
+        'uvc_is_previewing',
+      );
   late final _uvc_is_previewing = _uvc_is_previewingPtr
-      .asFunction<int Function()>();
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
 
-  int uvc_frame_width() {
-    return _uvc_frame_width();
+  int uvc_frame_width(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_frame_width(session);
   }
 
   late final _uvc_frame_widthPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function()>>('uvc_frame_width');
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<uvc_session_t>)>>(
+        'uvc_frame_width',
+      );
   late final _uvc_frame_width = _uvc_frame_widthPtr
-      .asFunction<int Function()>();
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
 
-  int uvc_frame_height() {
-    return _uvc_frame_height();
+  int uvc_frame_height(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_frame_height(session);
   }
 
   late final _uvc_frame_heightPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function()>>('uvc_frame_height');
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<uvc_session_t>)>>(
+        'uvc_frame_height',
+      );
   late final _uvc_frame_height = _uvc_frame_heightPtr
-      .asFunction<int Function()>();
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
 
   int uvc_copy_latest_frame_rgba(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
   ) {
-    return _uvc_copy_latest_frame_rgba(buffer, buffer_length);
+    return _uvc_copy_latest_frame_rgba(session, buffer, buffer_length);
   }
 
   late final _uvc_copy_latest_frame_rgbaPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_copy_latest_frame_rgba');
   late final _uvc_copy_latest_frame_rgba = _uvc_copy_latest_frame_rgbaPtr
-      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<ffi.Uint8>, int)
+      >();
 
   int uvc_copy_latest_frame_rgba_with_metadata(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
     ffi.Pointer<ffi.Int> out_width,
@@ -137,6 +202,7 @@ class FlutterFfiUvcBindings {
     ffi.Pointer<ffi.Int64> out_sequence,
   ) {
     return _uvc_copy_latest_frame_rgba_with_metadata(
+      session,
       buffer,
       buffer_length,
       out_width,
@@ -149,6 +215,7 @@ class FlutterFfiUvcBindings {
       _lookup<
         ffi.NativeFunction<
           ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
             ffi.Pointer<ffi.Uint8>,
             ffi.Int,
             ffi.Pointer<ffi.Int>,
@@ -161,6 +228,7 @@ class FlutterFfiUvcBindings {
       _uvc_copy_latest_frame_rgba_with_metadataPtr
           .asFunction<
             int Function(
+              ffi.Pointer<uvc_session_t>,
               ffi.Pointer<ffi.Uint8>,
               int,
               ffi.Pointer<ffi.Int>,
@@ -170,6 +238,7 @@ class FlutterFfiUvcBindings {
           >();
 
   int uvc_copy_latest_frame_rgba_transformed(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
     int rotation,
@@ -180,6 +249,7 @@ class FlutterFfiUvcBindings {
     ffi.Pointer<ffi.Int64> out_sequence,
   ) {
     return _uvc_copy_latest_frame_rgba_transformed(
+      session,
       buffer,
       buffer_length,
       rotation,
@@ -195,6 +265,7 @@ class FlutterFfiUvcBindings {
       _lookup<
         ffi.NativeFunction<
           ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
             ffi.Pointer<ffi.Uint8>,
             ffi.Int,
             ffi.Int,
@@ -210,6 +281,7 @@ class FlutterFfiUvcBindings {
       _uvc_copy_latest_frame_rgba_transformedPtr
           .asFunction<
             int Function(
+              ffi.Pointer<uvc_session_t>,
               ffi.Pointer<ffi.Uint8>,
               int,
               int,
@@ -221,78 +293,132 @@ class FlutterFfiUvcBindings {
             )
           >();
 
-  int uvc_latest_frame_sequence() {
-    return _uvc_latest_frame_sequence();
+  int uvc_latest_frame_sequence(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_latest_frame_sequence(session);
   }
 
   late final _uvc_latest_frame_sequencePtr =
-      _lookup<ffi.NativeFunction<ffi.Int64 Function()>>(
-        'uvc_latest_frame_sequence',
-      );
+      _lookup<
+        ffi.NativeFunction<ffi.Int64 Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_latest_frame_sequence');
   late final _uvc_latest_frame_sequence = _uvc_latest_frame_sequencePtr
-      .asFunction<int Function()>();
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
 
-  void uvc_set_frame_listener(uvc_frame_listener_t listener) {
-    return _uvc_set_frame_listener(listener);
+  void uvc_set_frame_listener(
+    ffi.Pointer<uvc_session_t> session,
+    uvc_frame_listener_t listener,
+    ffi.Pointer<ffi.Void> user_data,
+  ) {
+    return _uvc_set_frame_listener(session, listener, user_data);
   }
 
   late final _uvc_set_frame_listenerPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(uvc_frame_listener_t)>>(
-        'uvc_set_frame_listener',
-      );
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Void Function(
+            ffi.Pointer<uvc_session_t>,
+            uvc_frame_listener_t,
+            ffi.Pointer<ffi.Void>,
+          )
+        >
+      >('uvc_set_frame_listener');
   late final _uvc_set_frame_listener = _uvc_set_frame_listenerPtr
-      .asFunction<void Function(uvc_frame_listener_t)>();
+      .asFunction<
+        void Function(
+          ffi.Pointer<uvc_session_t>,
+          uvc_frame_listener_t,
+          ffi.Pointer<ffi.Void>,
+        )
+      >();
 
-  void uvc_set_error_listener(uvc_error_listener_t listener) {
-    return _uvc_set_error_listener(listener);
+  void uvc_set_error_listener(
+    ffi.Pointer<uvc_session_t> session,
+    uvc_error_listener_t listener,
+    ffi.Pointer<ffi.Void> user_data,
+  ) {
+    return _uvc_set_error_listener(session, listener, user_data);
   }
 
   late final _uvc_set_error_listenerPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(uvc_error_listener_t)>>(
-        'uvc_set_error_listener',
-      );
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Void Function(
+            ffi.Pointer<uvc_session_t>,
+            uvc_error_listener_t,
+            ffi.Pointer<ffi.Void>,
+          )
+        >
+      >('uvc_set_error_listener');
   late final _uvc_set_error_listener = _uvc_set_error_listenerPtr
-      .asFunction<void Function(uvc_error_listener_t)>();
+      .asFunction<
+        void Function(
+          ffi.Pointer<uvc_session_t>,
+          uvc_error_listener_t,
+          ffi.Pointer<ffi.Void>,
+        )
+      >();
 
   int uvc_get_stream_stats_json(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
   ) {
-    return _uvc_get_stream_stats_json(buffer, buffer_length);
+    return _uvc_get_stream_stats_json(session, buffer, buffer_length);
   }
 
   late final _uvc_get_stream_stats_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_get_stream_stats_json');
   late final _uvc_get_stream_stats_json = _uvc_get_stream_stats_jsonPtr
-      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<ffi.Uint8>, int)
+      >();
 
   int uvc_get_supported_modes_json(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
   ) {
-    return _uvc_get_supported_modes_json(buffer, buffer_length);
+    return _uvc_get_supported_modes_json(session, buffer, buffer_length);
   }
 
   late final _uvc_get_supported_modes_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_get_supported_modes_json');
   late final _uvc_get_supported_modes_json = _uvc_get_supported_modes_jsonPtr
-      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<ffi.Uint8>, int)
+      >();
 
-  ffi.Pointer<ffi.Char> uvc_last_error() {
-    return _uvc_last_error();
+  /// Last error text of the session. Valid until the session is destroyed.
+  ffi.Pointer<ffi.Char> uvc_last_error(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_last_error(session);
   }
 
   late final _uvc_last_errorPtr =
-      _lookup<ffi.NativeFunction<ffi.Pointer<ffi.Char> Function()>>(
-        'uvc_last_error',
-      );
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Pointer<ffi.Char> Function(ffi.Pointer<uvc_session_t>)
+        >
+      >('uvc_last_error');
   late final _uvc_last_error = _uvc_last_errorPtr
-      .asFunction<ffi.Pointer<ffi.Char> Function()>();
+      .asFunction<ffi.Pointer<ffi.Char> Function(ffi.Pointer<uvc_session_t>)>();
 
+  /// Process-wide native log level (UVC_LOG_LEVEL_*).
   void uvc_set_log_level(int level) {
     return _uvc_set_log_level(level);
   }
@@ -307,33 +433,47 @@ class FlutterFfiUvcBindings {
   /// Preview transform: rotation is 0, 90, 180, or 270 (clockwise degrees).
   /// flip_h mirrors the output left-right; flip_v mirrors it top-bottom.
   /// Transforms are applied during preview blit to the attached Flutter Texture
-  /// and do not affect the shared RGBA buffer returned by copyLatestFrame.
-  void uvc_set_preview_transform(int rotation, int flip_h, int flip_v) {
-    return _uvc_set_preview_transform(rotation, flip_h, flip_v);
+  /// and do not affect the RGBA buffer returned by copyLatestFrame.
+  void uvc_set_preview_transform(
+    ffi.Pointer<uvc_session_t> session,
+    int rotation,
+    int flip_h,
+    int flip_v,
+  ) {
+    return _uvc_set_preview_transform(session, rotation, flip_h, flip_v);
   }
 
   late final _uvc_set_preview_transformPtr =
-      _lookup<ffi.NativeFunction<ffi.Void Function(ffi.Int, ffi.Int, ffi.Int)>>(
-        'uvc_set_preview_transform',
-      );
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Void Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+          )
+        >
+      >('uvc_set_preview_transform');
   late final _uvc_set_preview_transform = _uvc_set_preview_transformPtr
-      .asFunction<void Function(int, int, int)>();
+      .asFunction<void Function(ffi.Pointer<uvc_session_t>, int, int, int)>();
 
   /// Reads back the current preview transform. Desktop plugin layers use this to
   /// render the attached Flutter texture with the same transform the preview
   /// blit applies. Null out-pointers are allowed.
   void uvc_get_preview_transform(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Int> rotation,
     ffi.Pointer<ffi.Int> flip_h,
     ffi.Pointer<ffi.Int> flip_v,
   ) {
-    return _uvc_get_preview_transform(rotation, flip_h, flip_v);
+    return _uvc_get_preview_transform(session, rotation, flip_h, flip_v);
   }
 
   late final _uvc_get_preview_transformPtr =
       _lookup<
         ffi.NativeFunction<
           ffi.Void Function(
+            ffi.Pointer<uvc_session_t>,
             ffi.Pointer<ffi.Int>,
             ffi.Pointer<ffi.Int>,
             ffi.Pointer<ffi.Int>,
@@ -343,6 +483,7 @@ class FlutterFfiUvcBindings {
   late final _uvc_get_preview_transform = _uvc_get_preview_transformPtr
       .asFunction<
         void Function(
+          ffi.Pointer<uvc_session_t>,
           ffi.Pointer<ffi.Int>,
           ffi.Pointer<ffi.Int>,
           ffi.Pointer<ffi.Int>,
@@ -357,6 +498,7 @@ class FlutterFfiUvcBindings {
   /// the encoded (post-transform) dimensions; out_sequence reports the source
   /// frame sequence.
   int uvc_take_picture_jpeg(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
     int quality,
@@ -368,6 +510,7 @@ class FlutterFfiUvcBindings {
     ffi.Pointer<ffi.Int64> out_sequence,
   ) {
     return _uvc_take_picture_jpeg(
+      session,
       buffer,
       buffer_length,
       quality,
@@ -384,6 +527,7 @@ class FlutterFfiUvcBindings {
       _lookup<
         ffi.NativeFunction<
           ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
             ffi.Pointer<ffi.Uint8>,
             ffi.Int,
             ffi.Int,
@@ -399,6 +543,7 @@ class FlutterFfiUvcBindings {
   late final _uvc_take_picture_jpeg = _uvc_take_picture_jpegPtr
       .asFunction<
         int Function(
+          ffi.Pointer<uvc_session_t>,
           ffi.Pointer<ffi.Uint8>,
           int,
           int,
@@ -413,10 +558,10 @@ class FlutterFfiUvcBindings {
 
   /// Video recording (MP4 / H.264).
   ///
-  /// Records the shared preview stream to an MP4 file while the preview keeps
-  /// running. Requires an active preview: the recording locks onto the current
-  /// frame dimensions, and frames whose dimensions later stop matching (e.g.
-  /// after a mode switch) are dropped. rotation/flip semantics match
+  /// Records the session's preview stream to an MP4 file while the preview
+  /// keeps running. Requires an active preview: the recording locks onto the
+  /// current frame dimensions, and frames whose dimensions later stop matching
+  /// (e.g. after a mode switch) are dropped. rotation/flip semantics match
   /// uvc_take_picture_jpeg and are captured at start; the transform stays fixed
   /// for the whole recording. Recording is finalized automatically when the
   /// preview stops or the device closes.
@@ -426,6 +571,7 @@ class FlutterFfiUvcBindings {
   /// timestamps always follow actual frame arrival times.
   /// Returns 0 on success or a negative libuvc-style error code.
   int uvc_start_recording(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Char> path,
     int bitrate_bps,
     int fps_hint,
@@ -434,6 +580,7 @@ class FlutterFfiUvcBindings {
     int flip_v,
   ) {
     return _uvc_start_recording(
+      session,
       path,
       bitrate_bps,
       fps_hint,
@@ -447,6 +594,7 @@ class FlutterFfiUvcBindings {
       _lookup<
         ffi.NativeFunction<
           ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
             ffi.Pointer<ffi.Char>,
             ffi.Int,
             ffi.Int,
@@ -458,198 +606,329 @@ class FlutterFfiUvcBindings {
       >('uvc_start_recording');
   late final _uvc_start_recording = _uvc_start_recordingPtr
       .asFunction<
-        int Function(ffi.Pointer<ffi.Char>, int, int, int, int, int)
+        int Function(
+          ffi.Pointer<uvc_session_t>,
+          ffi.Pointer<ffi.Char>,
+          int,
+          int,
+          int,
+          int,
+          int,
+        )
       >();
 
   /// Stops recording, drains the encoder, and finalizes the MP4 file.
   /// Returns 0 when the file was finalized, negative on failure. Calling with no
   /// active recording returns 0.
-  int uvc_stop_recording() {
-    return _uvc_stop_recording();
+  int uvc_stop_recording(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_stop_recording(session);
   }
 
   late final _uvc_stop_recordingPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function()>>('uvc_stop_recording');
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<uvc_session_t>)>>(
+        'uvc_stop_recording',
+      );
   late final _uvc_stop_recording = _uvc_stop_recordingPtr
-      .asFunction<int Function()>();
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
 
-  int uvc_is_recording() {
-    return _uvc_is_recording();
+  int uvc_is_recording(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_is_recording(session);
   }
 
   late final _uvc_is_recordingPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function()>>('uvc_is_recording');
+      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Pointer<uvc_session_t>)>>(
+        'uvc_is_recording',
+      );
   late final _uvc_is_recording = _uvc_is_recordingPtr
-      .asFunction<int Function()>();
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
 
   /// Returns JSON array of all controls the device supports, with min/max/def/cur/res fields.
   /// Returns number of bytes written, or 0 on failure.
-  int uvc_ctrl_get_all_json(ffi.Pointer<ffi.Uint8> buffer, int buffer_length) {
-    return _uvc_ctrl_get_all_json(buffer, buffer_length);
+  int uvc_ctrl_get_all_json(
+    ffi.Pointer<uvc_session_t> session,
+    ffi.Pointer<ffi.Uint8> buffer,
+    int buffer_length,
+  ) {
+    return _uvc_ctrl_get_all_json(session, buffer, buffer_length);
   }
 
   late final _uvc_ctrl_get_all_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_ctrl_get_all_json');
   late final _uvc_ctrl_get_all_json = _uvc_ctrl_get_all_jsonPtr
-      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<ffi.Uint8>, int)
+      >();
 
   /// Returns JSON array of controls present in descriptor bmControls only.
   /// Debug helper: does not probe GET_CUR/GET_MIN/GET_MAX.
   int uvc_ctrl_get_bm_controls_json(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
   ) {
-    return _uvc_ctrl_get_bm_controls_json(buffer, buffer_length);
+    return _uvc_ctrl_get_bm_controls_json(session, buffer, buffer_length);
   }
 
   late final _uvc_ctrl_get_bm_controls_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_ctrl_get_bm_controls_json');
   late final _uvc_ctrl_get_bm_controls_json = _uvc_ctrl_get_bm_controls_jsonPtr
-      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<ffi.Uint8>, int)
+      >();
 
   /// Returns the current value of a control. Returns INT32_MIN on error.
-  int uvc_ctrl_get(int ctrl_id) {
-    return _uvc_ctrl_get(ctrl_id);
+  int uvc_ctrl_get(ffi.Pointer<uvc_session_t> session, int ctrl_id) {
+    return _uvc_ctrl_get(session, ctrl_id);
   }
 
   late final _uvc_ctrl_getPtr =
-      _lookup<ffi.NativeFunction<ffi.Int32 Function(ffi.Int)>>('uvc_ctrl_get');
-  late final _uvc_ctrl_get = _uvc_ctrl_getPtr.asFunction<int Function(int)>();
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int32 Function(ffi.Pointer<uvc_session_t>, ffi.Int)
+        >
+      >('uvc_ctrl_get');
+  late final _uvc_ctrl_get = _uvc_ctrl_getPtr
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>, int)>();
 
   /// Sets a control value. Returns 0 (UVC_SUCCESS) on success, negative on error.
-  int uvc_ctrl_set(int ctrl_id, int value) {
-    return _uvc_ctrl_set(ctrl_id, value);
+  int uvc_ctrl_set(ffi.Pointer<uvc_session_t> session, int ctrl_id, int value) {
+    return _uvc_ctrl_set(session, ctrl_id, value);
   }
 
   late final _uvc_ctrl_setPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Int, ffi.Int32)>>(
-        'uvc_ctrl_set',
-      );
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(ffi.Pointer<uvc_session_t>, ffi.Int, ffi.Int32)
+        >
+      >('uvc_ctrl_set');
   late final _uvc_ctrl_set = _uvc_ctrl_setPtr
-      .asFunction<int Function(int, int)>();
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>, int, int)>();
 
   /// Compound controls that cannot be represented as a single integer value.
   int uvc_get_white_balance_component_json(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
   ) {
-    return _uvc_get_white_balance_component_json(buffer, buffer_length);
+    return _uvc_get_white_balance_component_json(
+      session,
+      buffer,
+      buffer_length,
+    );
   }
 
   late final _uvc_get_white_balance_component_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_get_white_balance_component_json');
   late final _uvc_get_white_balance_component_json =
       _uvc_get_white_balance_component_jsonPtr
-          .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+          .asFunction<
+            int Function(
+              ffi.Pointer<uvc_session_t>,
+              ffi.Pointer<ffi.Uint8>,
+              int,
+            )
+          >();
 
-  int uvc_set_white_balance_component_values(int blue, int red) {
-    return _uvc_set_white_balance_component_values(blue, red);
+  int uvc_set_white_balance_component_values(
+    ffi.Pointer<uvc_session_t> session,
+    int blue,
+    int red,
+  ) {
+    return _uvc_set_white_balance_component_values(session, blue, red);
   }
 
   late final _uvc_set_white_balance_component_valuesPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Uint16, ffi.Uint16)>>(
-        'uvc_set_white_balance_component_values',
-      );
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(ffi.Pointer<uvc_session_t>, ffi.Uint16, ffi.Uint16)
+        >
+      >('uvc_set_white_balance_component_values');
   late final _uvc_set_white_balance_component_values =
       _uvc_set_white_balance_component_valuesPtr
-          .asFunction<int Function(int, int)>();
+          .asFunction<int Function(ffi.Pointer<uvc_session_t>, int, int)>();
 
-  int uvc_get_focus_rel_json(ffi.Pointer<ffi.Uint8> buffer, int buffer_length) {
-    return _uvc_get_focus_rel_json(buffer, buffer_length);
+  int uvc_get_focus_rel_json(
+    ffi.Pointer<uvc_session_t> session,
+    ffi.Pointer<ffi.Uint8> buffer,
+    int buffer_length,
+  ) {
+    return _uvc_get_focus_rel_json(session, buffer, buffer_length);
   }
 
   late final _uvc_get_focus_rel_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_get_focus_rel_json');
   late final _uvc_get_focus_rel_json = _uvc_get_focus_rel_jsonPtr
-      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<ffi.Uint8>, int)
+      >();
 
-  int uvc_set_focus_rel_values(int focus_rel, int speed) {
-    return _uvc_set_focus_rel_values(focus_rel, speed);
+  int uvc_set_focus_rel_values(
+    ffi.Pointer<uvc_session_t> session,
+    int focus_rel,
+    int speed,
+  ) {
+    return _uvc_set_focus_rel_values(session, focus_rel, speed);
   }
 
   late final _uvc_set_focus_rel_valuesPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Int8, ffi.Uint8)>>(
-        'uvc_set_focus_rel_values',
-      );
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(ffi.Pointer<uvc_session_t>, ffi.Int8, ffi.Uint8)
+        >
+      >('uvc_set_focus_rel_values');
   late final _uvc_set_focus_rel_values = _uvc_set_focus_rel_valuesPtr
-      .asFunction<int Function(int, int)>();
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>, int, int)>();
 
-  int uvc_get_zoom_rel_json(ffi.Pointer<ffi.Uint8> buffer, int buffer_length) {
-    return _uvc_get_zoom_rel_json(buffer, buffer_length);
+  int uvc_get_zoom_rel_json(
+    ffi.Pointer<uvc_session_t> session,
+    ffi.Pointer<ffi.Uint8> buffer,
+    int buffer_length,
+  ) {
+    return _uvc_get_zoom_rel_json(session, buffer, buffer_length);
   }
 
   late final _uvc_get_zoom_rel_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_get_zoom_rel_json');
   late final _uvc_get_zoom_rel_json = _uvc_get_zoom_rel_jsonPtr
-      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<ffi.Uint8>, int)
+      >();
 
-  int uvc_set_zoom_rel_values(int zoom_rel, int digital_zoom, int speed) {
-    return _uvc_set_zoom_rel_values(zoom_rel, digital_zoom, speed);
+  int uvc_set_zoom_rel_values(
+    ffi.Pointer<uvc_session_t> session,
+    int zoom_rel,
+    int digital_zoom,
+    int speed,
+  ) {
+    return _uvc_set_zoom_rel_values(session, zoom_rel, digital_zoom, speed);
   }
 
   late final _uvc_set_zoom_rel_valuesPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Int8, ffi.Uint8, ffi.Uint8)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Int8,
+            ffi.Uint8,
+            ffi.Uint8,
+          )
+        >
       >('uvc_set_zoom_rel_values');
   late final _uvc_set_zoom_rel_values = _uvc_set_zoom_rel_valuesPtr
-      .asFunction<int Function(int, int, int)>();
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>, int, int, int)>();
 
   int uvc_get_pantilt_abs_json(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
   ) {
-    return _uvc_get_pantilt_abs_json(buffer, buffer_length);
+    return _uvc_get_pantilt_abs_json(session, buffer, buffer_length);
   }
 
   late final _uvc_get_pantilt_abs_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_get_pantilt_abs_json');
   late final _uvc_get_pantilt_abs_json = _uvc_get_pantilt_abs_jsonPtr
-      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<ffi.Uint8>, int)
+      >();
 
-  int uvc_set_pantilt_abs_values(int pan, int tilt) {
-    return _uvc_set_pantilt_abs_values(pan, tilt);
+  int uvc_set_pantilt_abs_values(
+    ffi.Pointer<uvc_session_t> session,
+    int pan,
+    int tilt,
+  ) {
+    return _uvc_set_pantilt_abs_values(session, pan, tilt);
   }
 
   late final _uvc_set_pantilt_abs_valuesPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Int32, ffi.Int32)>>(
-        'uvc_set_pantilt_abs_values',
-      );
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(ffi.Pointer<uvc_session_t>, ffi.Int32, ffi.Int32)
+        >
+      >('uvc_set_pantilt_abs_values');
   late final _uvc_set_pantilt_abs_values = _uvc_set_pantilt_abs_valuesPtr
-      .asFunction<int Function(int, int)>();
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>, int, int)>();
 
   int uvc_get_pantilt_rel_json(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
   ) {
-    return _uvc_get_pantilt_rel_json(buffer, buffer_length);
+    return _uvc_get_pantilt_rel_json(session, buffer, buffer_length);
   }
 
   late final _uvc_get_pantilt_rel_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_get_pantilt_rel_json');
   late final _uvc_get_pantilt_rel_json = _uvc_get_pantilt_rel_jsonPtr
-      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<ffi.Uint8>, int)
+      >();
 
   int uvc_set_pantilt_rel_values(
+    ffi.Pointer<uvc_session_t> session,
     int pan_rel,
     int pan_speed,
     int tilt_rel,
     int tilt_speed,
   ) {
     return _uvc_set_pantilt_rel_values(
+      session,
       pan_rel,
       pan_speed,
       tilt_rel,
@@ -660,49 +939,85 @@ class FlutterFfiUvcBindings {
   late final _uvc_set_pantilt_rel_valuesPtr =
       _lookup<
         ffi.NativeFunction<
-          ffi.Int Function(ffi.Int8, ffi.Uint8, ffi.Int8, ffi.Uint8)
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Int8,
+            ffi.Uint8,
+            ffi.Int8,
+            ffi.Uint8,
+          )
         >
       >('uvc_set_pantilt_rel_values');
   late final _uvc_set_pantilt_rel_values = _uvc_set_pantilt_rel_valuesPtr
-      .asFunction<int Function(int, int, int, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, int, int, int, int)
+      >();
 
-  int uvc_get_roll_rel_json(ffi.Pointer<ffi.Uint8> buffer, int buffer_length) {
-    return _uvc_get_roll_rel_json(buffer, buffer_length);
+  int uvc_get_roll_rel_json(
+    ffi.Pointer<uvc_session_t> session,
+    ffi.Pointer<ffi.Uint8> buffer,
+    int buffer_length,
+  ) {
+    return _uvc_get_roll_rel_json(session, buffer, buffer_length);
   }
 
   late final _uvc_get_roll_rel_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_get_roll_rel_json');
   late final _uvc_get_roll_rel_json = _uvc_get_roll_rel_jsonPtr
-      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<ffi.Uint8>, int)
+      >();
 
-  int uvc_set_roll_rel_values(int roll_rel, int speed) {
-    return _uvc_set_roll_rel_values(roll_rel, speed);
+  int uvc_set_roll_rel_values(
+    ffi.Pointer<uvc_session_t> session,
+    int roll_rel,
+    int speed,
+  ) {
+    return _uvc_set_roll_rel_values(session, roll_rel, speed);
   }
 
   late final _uvc_set_roll_rel_valuesPtr =
-      _lookup<ffi.NativeFunction<ffi.Int Function(ffi.Int8, ffi.Uint8)>>(
-        'uvc_set_roll_rel_values',
-      );
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(ffi.Pointer<uvc_session_t>, ffi.Int8, ffi.Uint8)
+        >
+      >('uvc_set_roll_rel_values');
   late final _uvc_set_roll_rel_values = _uvc_set_roll_rel_valuesPtr
-      .asFunction<int Function(int, int)>();
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>, int, int)>();
 
   int uvc_get_digital_window_json(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
   ) {
-    return _uvc_get_digital_window_json(buffer, buffer_length);
+    return _uvc_get_digital_window_json(session, buffer, buffer_length);
   }
 
   late final _uvc_get_digital_window_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_get_digital_window_json');
   late final _uvc_get_digital_window_json = _uvc_get_digital_window_jsonPtr
-      .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<ffi.Uint8>, int)
+      >();
 
   int uvc_set_digital_window_values(
+    ffi.Pointer<uvc_session_t> session,
     int window_top,
     int window_left,
     int window_bottom,
@@ -711,6 +1026,7 @@ class FlutterFfiUvcBindings {
     int num_steps_units,
   ) {
     return _uvc_set_digital_window_values(
+      session,
       window_top,
       window_left,
       window_bottom,
@@ -724,6 +1040,7 @@ class FlutterFfiUvcBindings {
       _lookup<
         ffi.NativeFunction<
           ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
             ffi.Uint16,
             ffi.Uint16,
             ffi.Uint16,
@@ -734,24 +1051,40 @@ class FlutterFfiUvcBindings {
         >
       >('uvc_set_digital_window_values');
   late final _uvc_set_digital_window_values = _uvc_set_digital_window_valuesPtr
-      .asFunction<int Function(int, int, int, int, int, int)>();
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, int, int, int, int, int, int)
+      >();
 
   int uvc_get_region_of_interest_json(
+    ffi.Pointer<uvc_session_t> session,
     ffi.Pointer<ffi.Uint8> buffer,
     int buffer_length,
   ) {
-    return _uvc_get_region_of_interest_json(buffer, buffer_length);
+    return _uvc_get_region_of_interest_json(session, buffer, buffer_length);
   }
 
   late final _uvc_get_region_of_interest_jsonPtr =
       _lookup<
-        ffi.NativeFunction<ffi.Int Function(ffi.Pointer<ffi.Uint8>, ffi.Int)>
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
       >('uvc_get_region_of_interest_json');
   late final _uvc_get_region_of_interest_json =
       _uvc_get_region_of_interest_jsonPtr
-          .asFunction<int Function(ffi.Pointer<ffi.Uint8>, int)>();
+          .asFunction<
+            int Function(
+              ffi.Pointer<uvc_session_t>,
+              ffi.Pointer<ffi.Uint8>,
+              int,
+            )
+          >();
 
   int uvc_set_region_of_interest_values(
+    ffi.Pointer<uvc_session_t> session,
     int roi_top,
     int roi_left,
     int roi_bottom,
@@ -759,6 +1092,7 @@ class FlutterFfiUvcBindings {
     int auto_controls,
   ) {
     return _uvc_set_region_of_interest_values(
+      session,
       roi_top,
       roi_left,
       roi_bottom,
@@ -771,6 +1105,7 @@ class FlutterFfiUvcBindings {
       _lookup<
         ffi.NativeFunction<
           ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
             ffi.Uint16,
             ffi.Uint16,
             ffi.Uint16,
@@ -781,17 +1116,38 @@ class FlutterFfiUvcBindings {
       >('uvc_set_region_of_interest_values');
   late final _uvc_set_region_of_interest_values =
       _uvc_set_region_of_interest_valuesPtr
-          .asFunction<int Function(int, int, int, int, int)>();
+          .asFunction<
+            int Function(ffi.Pointer<uvc_session_t>, int, int, int, int, int)
+          >();
 }
 
-typedef uvc_frame_listener_tFunction = ffi.Void Function(ffi.Int64 sequence);
-typedef Dartuvc_frame_listener_tFunction = void Function(int sequence);
+final class uvc_session extends ffi.Opaque {}
+
+/// One camera per session. Sessions share nothing except the log level.
+/// A NULL session behaves like a closed one. Int-returning calls return
+/// UVC_ERROR_INVALID_PARAM (-2), uvc_ctrl_get returns INT32_MIN, JSON writers
+/// return 0, and uvc_last_error returns "".
+typedef uvc_session_t = uvc_session;
+typedef uvc_frame_listener_tFunction =
+    ffi.Void Function(ffi.Pointer<ffi.Void> user_data, ffi.Int64 sequence);
+typedef Dartuvc_frame_listener_tFunction =
+    void Function(ffi.Pointer<ffi.Void> user_data, int sequence);
+
+/// Listeners run on native threads and receive user_data unchanged. A NULL
+/// listener clears the slot. uvc_close_device keeps the frame listener and
+/// clears the error listener.
 typedef uvc_frame_listener_t =
     ffi.Pointer<ffi.NativeFunction<uvc_frame_listener_tFunction>>;
 typedef uvc_error_listener_tFunction =
-    ffi.Void Function(ffi.Pointer<ffi.Char> message);
+    ffi.Void Function(
+      ffi.Pointer<ffi.Void> user_data,
+      ffi.Pointer<ffi.Char> message,
+    );
 typedef Dartuvc_error_listener_tFunction =
-    void Function(ffi.Pointer<ffi.Char> message);
+    void Function(
+      ffi.Pointer<ffi.Void> user_data,
+      ffi.Pointer<ffi.Char> message,
+    );
 typedef uvc_error_listener_t =
     ffi.Pointer<ffi.NativeFunction<uvc_error_listener_tFunction>>;
 

@@ -18,22 +18,29 @@ import 'dart:io';
 
 import 'package:ffi/ffi.dart';
 
-typedef _OpenFdC = Int32 Function(Int32);
-typedef _OpenFd = int Function(int);
-typedef _JsonC = Int32 Function(Pointer<Uint8>, Int32);
-typedef _Json = int Function(Pointer<Uint8>, int);
-typedef _StartPreviewC = Int32 Function(Int32, Int32, Int32, Int32);
-typedef _StartPreview = int Function(int, int, int, int);
-typedef _SequenceC = Int64 Function();
-typedef _Sequence = int Function();
+// Every ABI call takes the session handle first.
+typedef _Session = Pointer<Void>;
+typedef _SessionCreateC = _Session Function();
+typedef _SessionCreate = _Session Function();
+typedef _SessionDestroyC = Void Function(_Session);
+typedef _SessionDestroy = void Function(_Session);
+typedef _OpenFdC = Int32 Function(_Session, Int32);
+typedef _OpenFd = int Function(_Session, int);
+typedef _JsonC = Int32 Function(_Session, Pointer<Uint8>, Int32);
+typedef _Json = int Function(_Session, Pointer<Uint8>, int);
+typedef _StartPreviewC = Int32 Function(_Session, Int32, Int32, Int32, Int32);
+typedef _StartPreview = int Function(_Session, int, int, int, int);
+typedef _SequenceC = Int64 Function(_Session);
+typedef _Sequence = int Function(_Session);
 typedef _StartRecordingC =
-    Int32 Function(Pointer<Utf8>, Int32, Int32, Int32, Int32, Int32);
-typedef _StartRecording = int Function(Pointer<Utf8>, int, int, int, int, int);
-typedef _IntVoidC = Int32 Function();
-typedef _IntVoid = int Function();
-typedef _VoidVoidC = Void Function();
-typedef _VoidVoid = void Function();
-typedef _LastErrorC = Pointer<Utf8> Function();
+    Int32 Function(_Session, Pointer<Utf8>, Int32, Int32, Int32, Int32, Int32);
+typedef _StartRecording =
+    int Function(_Session, Pointer<Utf8>, int, int, int, int, int);
+typedef _IntVoidC = Int32 Function(_Session);
+typedef _IntVoid = int Function(_Session);
+typedef _VoidVoidC = Void Function(_Session);
+typedef _VoidVoid = void Function(_Session);
+typedef _LastErrorC = Pointer<Utf8> Function(_Session);
 
 Future<void> main(List<String> args) async {
   final int? wantWidth = args.isNotEmpty ? int.parse(args[0]) : null;
@@ -47,6 +54,10 @@ Future<void> main(List<String> args) async {
   final DynamicLibrary lib =
       DynamicLibrary.open('$debugDir\\flutter_ffi_uvc_plugin.dll');
 
+  final _SessionCreate sessionCreate = lib
+      .lookupFunction<_SessionCreateC, _SessionCreate>('uvc_session_create');
+  final _SessionDestroy sessionDestroy = lib
+      .lookupFunction<_SessionDestroyC, _SessionDestroy>('uvc_session_destroy');
   final _OpenFd openFd = lib.lookupFunction<_OpenFdC, _OpenFd>('uvc_open_fd');
   final _Json modesJson = lib.lookupFunction<_JsonC, _Json>(
     'uvc_get_supported_modes_json',
@@ -70,15 +81,22 @@ Future<void> main(List<String> args) async {
   final _VoidVoid closeDevice = lib.lookupFunction<_VoidVoidC, _VoidVoid>(
     'uvc_close_device',
   );
-  final Pointer<Utf8> Function() lastError = lib
-      .lookupFunction<_LastErrorC, Pointer<Utf8> Function()>('uvc_last_error');
+  final Pointer<Utf8> Function(_Session) lastError = lib
+      .lookupFunction<_LastErrorC, Pointer<Utf8> Function(_Session)>(
+        'uvc_last_error',
+      );
 
-  String err() => lastError().toDartString();
+  final _Session s = sessionCreate();
+  if (s == nullptr) {
+    print('FAIL: uvc_session_create returned null');
+    exit(1);
+  }
+  String err() => lastError(s).toDartString();
 
   // Device ids are assigned in enumeration order starting at 1.
   int opened = -1;
   for (int id = 1; id <= 4; id++) {
-    final int result = openFd(id);
+    final int result = openFd(s, id);
     if (result == 0) {
       opened = id;
       break;
@@ -92,7 +110,7 @@ Future<void> main(List<String> args) async {
   print('opened device id $opened');
 
   final Pointer<Uint8> buffer = calloc<Uint8>(64 * 1024);
-  final int jsonBytes = modesJson(buffer, 64 * 1024);
+  final int jsonBytes = modesJson(s, buffer, 64 * 1024);
   if (jsonBytes <= 0) {
     print('FAIL: no supported modes (${err()})');
     exit(1);
@@ -122,6 +140,7 @@ Future<void> main(List<String> args) async {
   print('using mode: $pick');
 
   final int startResult = startPreview(
+    s,
     pick['format'] as int,
     pick['width'] as int,
     pick['height'] as int,
@@ -133,14 +152,14 @@ Future<void> main(List<String> args) async {
   }
 
   final Stopwatch clock = Stopwatch()..start();
-  while (latestSequence() < 3) {
+  while (latestSequence(s) < 3) {
     if (clock.elapsed > const Duration(seconds: 5)) {
       print('FAIL: no frames delivered within 5s (${err()})');
       exit(1);
     }
     await Future<void>.delayed(const Duration(milliseconds: 100));
   }
-  print('frames flowing (sequence=${latestSequence()})');
+  print('frames flowing (sequence=${latestSequence(s)})');
 
   final String outPath =
       '${Directory.systemTemp.path}\\uvc_record_smoke.mp4';
@@ -148,37 +167,38 @@ Future<void> main(List<String> args) async {
   if (outFile.existsSync()) outFile.deleteSync();
 
   final Pointer<Utf8> nativePath = outPath.toNativeUtf8(allocator: calloc);
-  final int recStart = startRecording(nativePath, 0, 0, rotation, 0, 0);
+  final int recStart = startRecording(s, nativePath, 0, 0, rotation, 0, 0);
   calloc.free(nativePath);
   if (recStart != 0) {
     print('FAIL: startRecording -> $recStart (${err()})');
     exit(1);
   }
-  print('recording to $outPath (isRecording=${isRecording()})');
+  print('recording to $outPath (isRecording=${isRecording(s)})');
 
-  final int seqBefore = latestSequence();
+  final int seqBefore = latestSequence(s);
   await Future<void>.delayed(const Duration(seconds: 5));
-  final int seqAfter = latestSequence();
+  final int seqAfter = latestSequence(s);
   print('captured ~${seqAfter - seqBefore} frames in 5s');
 
   // With `preview-stop` as the 4th argument, skip uvc_stop_recording and rely
   // on uvc_stop_preview auto-finalizing the file.
   if (args.length > 3 && args[3] == 'preview-stop') {
     print('stopping preview with recording still active (auto-finalize)');
-    stopPreview();
+    stopPreview(s);
   } else {
-    final int recStop = stopRecording();
+    final int recStop = stopRecording(s);
     if (recStop != 0) {
       print('FAIL: stopRecording -> $recStop (${err()})');
       exit(1);
     }
-    stopPreview();
+    stopPreview(s);
   }
-  if (isRecording() != 0) {
+  if (isRecording(s) != 0) {
     print('FAIL: isRecording still true after stop');
     exit(1);
   }
-  closeDevice();
+  closeDevice(s);
+  sessionDestroy(s);
 
   if (!outFile.existsSync()) {
     print('FAIL: output file missing');

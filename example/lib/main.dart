@@ -8,6 +8,7 @@ import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 import 'package:flutter_ffi_uvc_example/android_bridge.dart';
 
 import 'app_theme.dart';
+import 'camera_slots_page.dart';
 import 'widgets/controls_panel.dart';
 import 'widgets/stream_stats_card.dart';
 
@@ -25,15 +26,29 @@ class MyApp extends StatelessWidget {
       title: 'UVC Preview Demo',
       debugShowCheckedModeBanner: false,
       theme: buildExampleTheme(),
-      home: UvcPreviewPage(),
+      home: const CameraSlotsPage(),
     );
   }
 }
 
 class UvcPreviewPage extends StatefulWidget {
-  UvcPreviewPage({super.key, UvcCamera? camera}) : camera = camera ?? uvcCamera;
+  UvcPreviewPage({
+    super.key,
+    UvcCamera? camera,
+    this.ownsCamera = false,
+    this.title = 'UVC Camera Preview',
+    this.openDevices,
+  }) : camera = camera ?? uvcCamera;
 
   final UvcCamera camera;
+
+  /// When true the page disposes [camera] after its own teardown.
+  final bool ownsCamera;
+  final String title;
+
+  /// Shared between pages so a device open in one page is not offered in
+  /// another.
+  final OpenDeviceRegistry? openDevices;
 
   @override
   State<UvcPreviewPage> createState() => _UvcPreviewPageState();
@@ -128,7 +143,20 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     // Watchdog: report (and, when enabled, auto-recover from) silent stalls.
     _stallEventSub = _camera.stallEvents.listen(_onStallEvent);
     _camera.enableStallDetection(_stallDetectionConfig());
+    widget.openDevices?.addListener(_onOpenDevicesChanged);
     unawaited(_initializePermissionsAndDevices());
+  }
+
+  void _onOpenDevicesChanged() {
+    if (mounted) setState(() {});
+  }
+
+  bool _isOpenElsewhere(UvcUsbDevice device) =>
+      widget.openDevices?.isOpenElsewhere(device.deviceId, this) ?? false;
+
+  void _markDeviceClosed() {
+    final UvcUsbDevice? device = _selectedDevice;
+    if (device != null) widget.openDevices?.markClosed(device.deviceId, this);
   }
 
   // Library defaults (2s stall timeout, 500ms checks, 3 restart attempts)
@@ -146,6 +174,8 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.openDevices?.removeListener(_onOpenDevicesChanged);
+    _markDeviceClosed();
     _streamErrorSub?.cancel();
     _deviceEventSub?.cancel();
     _stallEventSub?.cancel();
@@ -154,10 +184,17 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     _focusRepeatTimer?.cancel();
     _focusValueHideTimer?.cancel();
     _previewImage?.dispose();
-    unawaited(_stopCurrentPreview());
-    unawaited(_disposePreviewTexture());
-    unawaited(_camera.closeUsbDevice());
+    unawaited(_teardownCamera());
     super.dispose();
+  }
+
+  Future<void> _teardownCamera() async {
+    await _stopCurrentPreview();
+    await _disposePreviewTexture();
+    await _camera.closeUsbDevice();
+    if (widget.ownsCamera) {
+      await _camera.dispose();
+    }
   }
 
   Future<void> _initializePermissionsAndDevices() async {
@@ -215,8 +252,13 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   }
 
   Future<void> _openSelectedDevice(UvcUsbDevice device) async {
+    if (_isOpenElsewhere(device)) {
+      _setStatus('${device.displayName} is open in another camera slot.');
+      return;
+    }
     _setStatus('Opening device...', openingDevice: true);
     _log('Open device requested: ${device.displayName}');
+    _markDeviceClosed();
 
     _previewImage?.dispose();
     _previewImage = null;
@@ -227,19 +269,28 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       // image); openUsbDevice() tears down the native session itself before
       // opening. Both are needed — they clean up different layers.
       await _stopCurrentPreview();
+      final Stopwatch timing = Stopwatch()..start();
       final int openResult = await _camera.openUsbDevice(device.deviceId);
+      final int openMs = timing.elapsedMilliseconds;
       if (openResult != 0) {
         throw Exception('uvc_open_fd failed: ${_camera.lastError}');
       }
 
       final List<UvcCameraMode> libuvcModes = _camera.supportedModes();
+      final int modesMs = timing.elapsedMilliseconds - openMs;
       final List<UvcCameraControl> controls = _camera.supportedControls();
+      final int controlsMs = timing.elapsedMilliseconds - openMs - modesMs;
       _log(
         'Controls: ${controls.map((UvcCameraControl c) => '${c.name}(id=${c.id.nativeValue},cur=${c.cur})').join(', ')}',
       );
 
       // Debug-only: logs controls that are advertised in bmControls but fail GET_CUR probing.
       final List<UvcBmControlInfo> bmControls = _camera.debugBmControls();
+      _log(
+        'Open timings: open=${openMs}ms modes=${modesMs}ms '
+        'controls=${controlsMs}ms '
+        'bm=${timing.elapsedMilliseconds - openMs - modesMs - controlsMs}ms',
+      );
       final Set<int> controlIds = controls
           .map((UvcCameraControl c) => c.id.nativeValue)
           .toSet();
@@ -270,9 +321,14 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       // smaller, safer modes first; pass
       // preference: UvcAutoPreviewPreference.quality to try larger
       // resolutions first instead.
+      final Stopwatch previewTiming = Stopwatch()..start();
       final UvcAutoPreviewResult autoResult = await _camera.startPreviewAuto(
         perModeTimeout: _startupProbeTimeout,
         maxCandidates: 3,
+      );
+      _log(
+        'Preview auto-select took ${previewTiming.elapsedMilliseconds}ms '
+        'over ${autoResult.attempts.length} attempt(s)',
       );
       final UvcCameraMode? startedMode = autoResult.mode;
       if (startedMode != null) {
@@ -292,6 +348,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
             'Opened device. Automatic probe tried ${autoResult.attempts.length} mode(s) and found no working preview. Try a mode manually.';
       }
 
+      widget.openDevices?.markOpen(device.deviceId, this);
       setState(() {
         _selectedDevice = device;
         _cameraModes = _sortModesForDisplay(libuvcModes);
@@ -336,6 +393,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       await _stopCurrentPreview(clearPreviewImage: true);
       await _camera.closeUsbDevice();
       await _disposePreviewTexture();
+      _markDeviceClosed();
       setState(() {
         _selectedDevice = null;
         _selectedMode = null;
@@ -454,6 +512,8 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     final bool isActiveDevice =
         _selectedDevice != null &&
         event.device.deviceId == _selectedDevice!.deviceId;
+    // The package closes its own device on detach. _disconnectSelectedDevice
+    // still runs to release the texture and reset the page state.
     switch (event.type) {
       case UvcDeviceEventType.attached:
         _setStatus('USB camera attached: ${event.device.displayName}');
@@ -1107,7 +1167,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         ),
         backgroundColor: Colors.transparent,
         scrolledUnderElevation: 0,
-        title: const Text('UVC Camera Preview'),
+        title: Text(widget.title),
         actions: <Widget>[
           if (_cameraControls.isNotEmpty)
             IconButton(
@@ -1618,6 +1678,8 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                   final bool selected =
                                       _selectedDevice?.deviceId ==
                                       device.deviceId;
+                                  final bool openElsewhere =
+                                      _isOpenElsewhere(device);
                                   return Container(
                                     decoration: BoxDecoration(
                                       color: selected
@@ -1650,7 +1712,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                         ),
                                         const SizedBox(height: 4),
                                         Text(
-                                          device.details,
+                                          openElsewhere
+                                              ? '${device.details}\nOpen in another camera slot'
+                                              : device.details,
                                           style: Theme.of(
                                             context,
                                           ).textTheme.bodyMedium,
@@ -1669,7 +1733,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                                 mainAxisSize: MainAxisSize.min,
                                                 children: <Widget>[
                                                   ElevatedButton(
-                                                    onPressed: _openingDevice
+                                                    onPressed:
+                                                        _openingDevice ||
+                                                            openElsewhere
                                                         ? null
                                                         : () => unawaited(
                                                             _openSelectedDevice(

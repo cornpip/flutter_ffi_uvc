@@ -148,6 +148,14 @@ struct _FfiUvcTexture {
   size_t buffer_capacity;
   uint32_t buffer_width;
   uint32_t buffer_height;
+  // Session this texture renders. Guarded by session_mutex, which the render
+  // thread holds across its copy so a detach cannot race it.
+  GMutex session_mutex;
+  uvc_session_t* session;
+  // Coalesces frame marks so at most one idle callback is pending.
+  gint mark_pending;
+  // Bare pointer. The plugin outlives every registered texture.
+  FlutterFfiUvcPlugin* plugin;
 };
 
 G_DECLARE_FINAL_TYPE(FfiUvcTexture, ffi_uvc_texture, FFI_UVC, TEXTURE,
@@ -162,13 +170,17 @@ gboolean ffi_uvc_texture_copy_pixels(FlPixelBufferTexture* texture,
                                      GError** error) {
   FfiUvcTexture* self = FFI_UVC_TEXTURE(texture);
 
-  const int frame_w = uvc_frame_width();
-  const int frame_h = uvc_frame_height();
+  g_mutex_lock(&self->session_mutex);
+  uvc_session_t* session = self->session;
+  // Pin the session so a destroy from Dart waits for this copy.
+  const gboolean pinned = session != nullptr && uvc_session_acquire(session);
+  const int frame_w = pinned ? uvc_frame_width(session) : 0;
+  const int frame_h = pinned ? uvc_frame_height(session) : 0;
   if (frame_w > 0 && frame_h > 0) {
     int rotation = 0;
     int flip_h = 0;
     int flip_v = 0;
-    uvc_get_preview_transform(&rotation, &flip_h, &flip_v);
+    uvc_get_preview_transform(session, &rotation, &flip_h, &flip_v);
     const gboolean swap = rotation == 90 || rotation == 270;
     const uint32_t out_w = static_cast<uint32_t>(swap ? frame_h : frame_w);
     const uint32_t out_h = static_cast<uint32_t>(swap ? frame_w : frame_h);
@@ -185,14 +197,16 @@ gboolean ffi_uvc_texture_copy_pixels(FlPixelBufferTexture* texture,
       int copied_h = 0;
       int64_t sequence = 0;
       const int copied = uvc_copy_latest_frame_rgba_transformed(
-          self->buffer, static_cast<int>(needed), rotation, flip_h, flip_v,
-          &copied_w, &copied_h, &sequence);
+          session, self->buffer, static_cast<int>(needed), rotation, flip_h,
+          flip_v, &copied_w, &copied_h, &sequence);
       if (copied > 0) {
         self->buffer_width = static_cast<uint32_t>(copied_w);
         self->buffer_height = static_cast<uint32_t>(copied_h);
       }
     }
   }
+  if (pinned) uvc_session_release(session);
+  g_mutex_unlock(&self->session_mutex);
 
   // When no new frame could be copied, fall back to the previous one so the
   // texture never flashes empty mid-session.
@@ -210,6 +224,7 @@ gboolean ffi_uvc_texture_copy_pixels(FlPixelBufferTexture* texture,
 
 void ffi_uvc_texture_finalize(GObject* object) {
   FfiUvcTexture* self = FFI_UVC_TEXTURE(object);
+  g_mutex_clear(&self->session_mutex);
   free(self->buffer);
   self->buffer = nullptr;
   G_OBJECT_CLASS(ffi_uvc_texture_parent_class)->finalize(object);
@@ -226,6 +241,10 @@ void ffi_uvc_texture_init(FfiUvcTexture* self) {
   self->buffer_capacity = 0;
   self->buffer_width = 0;
   self->buffer_height = 0;
+  g_mutex_init(&self->session_mutex);
+  self->session = nullptr;
+  self->mark_pending = 0;
+  self->plugin = nullptr;
 }
 
 }  // namespace
@@ -252,10 +271,10 @@ struct _FlutterFfiUvcPlugin {
 
   // texture id -> FfiUvcTexture* (owns a ref).
   GHashTable* textures;
-  int64_t attached_texture_id;
 
-  // fd handed to uvc_open_fd; owned here until closeUsbDevice.
-  int open_fd;
+  // int64 session handle -> fd handed to uvc_open_fd, owned until
+  // closeUsbDevice.
+  GHashTable* session_fds;
 
   // Video devices seen via enumeration or attach events, keyed by the sysfs
   // device basename (e.g. "1-2"), so detach events can be classified after
@@ -272,32 +291,117 @@ G_DEFINE_TYPE(FlutterFfiUvcPlugin, flutter_ffi_uvc_plugin, g_object_get_type())
 
 namespace {
 
-// The C ABI frame listener carries no context pointer, and the backend is a
-// single shared session anyway; mirror that with a single plugin target.
-// Written on the main thread only; the stream thread never touches it.
-FlutterFfiUvcPlugin* g_frame_target_plugin = nullptr;
-gint g_mark_pending = 0;
+// Textures a frame listener may still name. The backend calls the listener
+// unlocked, so OnNativeFrame only touches textures still in this set.
+GMutex g_live_textures_mutex;
+GHashTable* g_live_textures = nullptr;  // FfiUvcTexture* -> unused
 
-gboolean MarkFrameIdle(gpointer /*user_data*/) {
-  g_atomic_int_set(&g_mark_pending, 0);
-  FlutterFfiUvcPlugin* plugin = g_frame_target_plugin;
-  if (plugin != nullptr && plugin->attached_texture_id >= 0) {
-    gpointer texture = g_hash_table_lookup(
-        plugin->textures, &plugin->attached_texture_id);
-    if (texture != nullptr) {
-      fl_texture_registrar_mark_texture_frame_available(
-          plugin->texture_registrar, FL_TEXTURE(texture));
-    }
+void LiveTexturesAdd(FfiUvcTexture* texture) {
+  g_mutex_lock(&g_live_textures_mutex);
+  if (g_live_textures == nullptr) {
+    g_live_textures = g_hash_table_new(g_direct_hash, g_direct_equal);
   }
+  g_hash_table_add(g_live_textures, texture);
+  g_mutex_unlock(&g_live_textures_mutex);
+}
+
+void LiveTexturesRemove(FfiUvcTexture* texture) {
+  g_mutex_lock(&g_live_textures_mutex);
+  if (g_live_textures != nullptr) g_hash_table_remove(g_live_textures, texture);
+  g_mutex_unlock(&g_live_textures_mutex);
+}
+
+// Runs on the main thread with the ref taken in OnNativeFrame.
+gboolean MarkFrameIdle(gpointer user_data) {
+  FfiUvcTexture* texture = FFI_UVC_TEXTURE(user_data);
+  g_atomic_int_set(&texture->mark_pending, 0);
+  if (texture->session != nullptr && texture->plugin != nullptr) {
+    fl_texture_registrar_mark_texture_frame_available(
+        texture->plugin->texture_registrar, FL_TEXTURE(texture));
+  }
+  g_object_unref(texture);
   return G_SOURCE_REMOVE;
 }
 
-// Called from the native frame delivery thread; coalesces marks so at most
-// one idle callback is pending at a time.
-void OnNativeFrame(int64_t /*sequence*/) {
-  if (g_atomic_int_compare_and_exchange(&g_mark_pending, 0, 1)) {
-    g_idle_add(MarkFrameIdle, nullptr);
+// Frame listener. Runs on the native delivery thread with the bound texture
+// as user_data.
+void OnNativeFrame(void* user_data, int64_t /*sequence*/) {
+  g_mutex_lock(&g_live_textures_mutex);
+  const gboolean live = g_live_textures != nullptr &&
+                        g_hash_table_contains(g_live_textures, user_data);
+  if (live) {
+    FfiUvcTexture* texture = FFI_UVC_TEXTURE(user_data);
+    if (g_atomic_int_compare_and_exchange(&texture->mark_pending, 0, 1)) {
+      g_idle_add(MarkFrameIdle, g_object_ref(texture));
+    }
   }
+  g_mutex_unlock(&g_live_textures_mutex);
+}
+
+// Unbinds a texture from its session and clears the session's frame
+// listener. Waits for an in-flight render-thread copy.
+void UnbindTexture(FfiUvcTexture* texture) {
+  g_mutex_lock(&texture->session_mutex);
+  uvc_session_t* session = texture->session;
+  texture->session = nullptr;
+  g_mutex_unlock(&texture->session_mutex);
+  if (session != nullptr && uvc_session_acquire(session)) {
+    uvc_set_frame_listener(session, nullptr, nullptr);
+    uvc_session_release(session);
+  }
+}
+
+// Unbinds whichever texture currently renders the session, if any.
+void UnbindSession(FlutterFfiUvcPlugin* self, uvc_session_t* session) {
+  GHashTableIter iter;
+  gpointer key = nullptr;
+  gpointer value = nullptr;
+  g_hash_table_iter_init(&iter, self->textures);
+  while (g_hash_table_iter_next(&iter, &key, &value)) {
+    FfiUvcTexture* texture = FFI_UVC_TEXTURE(value);
+    g_mutex_lock(&texture->session_mutex);
+    const gboolean match = texture->session == session;
+    g_mutex_unlock(&texture->session_mutex);
+    if (match) UnbindTexture(texture);
+  }
+}
+
+uvc_session_t* SessionFromArgs(FlValue* args) {
+  const int64_t handle = Int64FromArgs(args, "sessionHandle");
+  return handle > 0 ? reinterpret_cast<uvc_session_t*>(
+                          static_cast<intptr_t>(handle))
+                    : nullptr;
+}
+
+int64_t SessionKey(uvc_session_t* session) {
+  return static_cast<int64_t>(reinterpret_cast<intptr_t>(session));
+}
+
+// Releases fds of sessions that a hot restart leaked and a finalizer has
+// since destroyed.
+void CloseDeadSessionFds(FlutterFfiUvcPlugin* self) {
+  GHashTableIter iter;
+  gpointer key = nullptr;
+  gpointer value = nullptr;
+  g_hash_table_iter_init(&iter, self->session_fds);
+  while (g_hash_table_iter_next(&iter, &key, &value)) {
+    uvc_session_t* session = reinterpret_cast<uvc_session_t*>(
+        static_cast<intptr_t>(*static_cast<int64_t*>(key)));
+    if (uvc_session_acquire(session)) {
+      uvc_session_release(session);
+      continue;
+    }
+    close(GPOINTER_TO_INT(value));
+    g_hash_table_iter_remove(&iter);
+  }
+}
+
+void CloseSessionFd(FlutterFfiUvcPlugin* self, uvc_session_t* session) {
+  const int64_t key = SessionKey(session);
+  gpointer value = g_hash_table_lookup(self->session_fds, &key);
+  if (value == nullptr) return;
+  close(GPOINTER_TO_INT(value));
+  g_hash_table_remove(self->session_fds, &key);
 }
 
 int64_t* Int64KeyNew(int64_t value) {
@@ -393,9 +497,13 @@ void HandleUsbCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
     g_autoptr(FlValue) result = ListVideoDevices(self);
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   } else if (strcmp(method, "openUsbDevice") == 0) {
+    uvc_session_t* session = SessionFromArgs(args);
     const int64_t device_id = Int64FromArgs(args, "deviceId");
     char devnode[64];
-    if (device_id < 0 || !DevnodeForDeviceId(device_id, devnode, sizeof(devnode))) {
+    if (session == nullptr) {
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "invalid_args", "sessionHandle is required.", nullptr));
+    } else if (device_id < 0 || !DevnodeForDeviceId(device_id, devnode, sizeof(devnode))) {
       g_autofree gchar* message = g_strdup_printf(
           "No UVC device with id %" G_GINT64_FORMAT, device_id);
       response = FL_METHOD_RESPONSE(
@@ -411,8 +519,11 @@ void HandleUsbCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
         response = FL_METHOD_RESPONSE(
             fl_method_error_response_new("open_failed", message, nullptr));
       } else {
-        if (self->open_fd >= 0) close(self->open_fd);
-        self->open_fd = fd;
+        // A session holds one device. Opening another replaces it.
+        CloseSessionFd(self, session);
+        CloseDeadSessionFds(self);
+        g_hash_table_replace(self->session_fds, Int64KeyNew(SessionKey(session)),
+                             GINT_TO_POINTER(fd));
         // The Dart layer passes this value straight to uvc_open_fd, the same
         // flow as Android's UsbDeviceConnection file descriptor.
         g_autoptr(FlValue) result = fl_value_new_map();
@@ -423,10 +534,8 @@ void HandleUsbCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
   } else if (strcmp(method, "closeUsbDevice") == 0) {
     // The native session is closed by the Dart layer through
     // uvc_close_device before this call; only the fd remains to release.
-    if (self->open_fd >= 0) {
-      close(self->open_fd);
-      self->open_fd = -1;
-    }
+    uvc_session_t* session = SessionFromArgs(args);
+    if (session != nullptr) CloseSessionFd(self, session);
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   } else {
     response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
@@ -454,33 +563,53 @@ void HandleTextureCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
           "texture_create_failed", "RegisterTexture failed", nullptr));
     } else {
       const int64_t texture_id = fl_texture_get_id(FL_TEXTURE(texture));
+      texture->plugin = self;
+      LiveTexturesAdd(texture);
       g_hash_table_replace(self->textures, Int64KeyNew(texture_id), texture);
       g_autoptr(FlValue) result = fl_value_new_int(texture_id);
       response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
     }
   } else if (strcmp(method, "disposePreviewTexture") == 0) {
     const int64_t texture_id = Int64FromArgs(args, "textureId");
-    if (texture_id >= 0 && texture_id == self->attached_texture_id) {
-      uvc_set_frame_listener(nullptr);
-      self->attached_texture_id = -1;
-    }
     gpointer texture = g_hash_table_lookup(self->textures, &texture_id);
     if (texture != nullptr) {
+      UnbindTexture(FFI_UVC_TEXTURE(texture));
+      LiveTexturesRemove(FFI_UVC_TEXTURE(texture));
       fl_texture_registrar_unregister_texture(self->texture_registrar,
                                               FL_TEXTURE(texture));
       g_hash_table_remove(self->textures, &texture_id);
     }
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   } else if (strcmp(method, "attachPreviewTexture") == 0) {
+    uvc_session_t* session = SessionFromArgs(args);
     const int64_t texture_id = Int64FromArgs(args, "textureId");
-    if (g_hash_table_lookup(self->textures, &texture_id) == nullptr) {
+    gpointer texture = g_hash_table_lookup(self->textures, &texture_id);
+    if (session == nullptr) {
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "invalid_args", "sessionHandle is required.", nullptr));
+    } else if (texture == nullptr) {
       response = FL_METHOD_RESPONSE(fl_method_error_response_new(
           "texture_not_found", "Unknown textureId", nullptr));
+    } else if (!uvc_session_acquire(session)) {
+      response = FL_METHOD_RESPONSE(fl_method_error_response_new(
+          "invalid_session", "sessionHandle is not a live session", nullptr));
     } else {
-      self->attached_texture_id = texture_id;
-      uvc_set_frame_listener(OnNativeFrame);
+      // One texture per session and one session per texture.
+      UnbindSession(self, session);
+      FfiUvcTexture* bound = FFI_UVC_TEXTURE(texture);
+      UnbindTexture(bound);
+      g_mutex_lock(&bound->session_mutex);
+      bound->session = session;
+      g_mutex_unlock(&bound->session_mutex);
+      uvc_set_frame_listener(session, OnNativeFrame, bound);
+      uvc_session_release(session);
       response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
     }
+  } else if (strcmp(method, "detachPreviewSession") == 0) {
+    // Dart calls this before destroying the session.
+    uvc_session_t* session = SessionFromArgs(args);
+    if (session != nullptr) UnbindSession(self, session);
+    response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   } else {
     response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
   }
@@ -774,10 +903,6 @@ void UsbChannelCb(FlMethodChannel* /*channel*/, FlMethodCall* method_call,
 static void flutter_ffi_uvc_plugin_dispose(GObject* object) {
   FlutterFfiUvcPlugin* self = FLUTTER_FFI_UVC_PLUGIN(object);
 
-  if (g_frame_target_plugin == self) {
-    uvc_set_frame_listener(nullptr);
-    g_frame_target_plugin = nullptr;
-  }
   StopDeviceNotifications(self);
 
   if (self->textures != nullptr) {
@@ -786,18 +911,31 @@ static void flutter_ffi_uvc_plugin_dispose(GObject* object) {
     gpointer texture = nullptr;
     g_hash_table_iter_init(&iter, self->textures);
     while (g_hash_table_iter_next(&iter, &key, &texture)) {
+      UnbindTexture(FFI_UVC_TEXTURE(texture));
+      LiveTexturesRemove(FFI_UVC_TEXTURE(texture));
       fl_texture_registrar_unregister_texture(self->texture_registrar,
                                               FL_TEXTURE(texture));
     }
     g_clear_pointer(&self->textures, g_hash_table_unref);
   }
-  if (self->open_fd >= 0) {
-    // Stop the shared native session before releasing the descriptor it
-    // streams on; otherwise libuvc's transfer threads keep using a closed
-    // (and possibly reused) fd during engine teardown.
-    uvc_close_device();
-    close(self->open_fd);
-    self->open_fd = -1;
+  if (self->session_fds != nullptr) {
+    // Close each native session before its fd, or libuvc's transfer threads
+    // keep using a closed fd during engine teardown.
+    GHashTableIter iter;
+    gpointer key = nullptr;
+    gpointer value = nullptr;
+    g_hash_table_iter_init(&iter, self->session_fds);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+      uvc_session_t* session = reinterpret_cast<uvc_session_t*>(
+          static_cast<intptr_t>(*static_cast<int64_t*>(key)));
+      // A session leaked by Dart may already be destroyed by its finalizer.
+      if (uvc_session_acquire(session)) {
+        uvc_close_device(session);
+        uvc_session_release(session);
+      }
+      close(GPOINTER_TO_INT(value));
+    }
+    g_clear_pointer(&self->session_fds, g_hash_table_unref);
   }
   g_clear_pointer(&self->known_video_devices, g_hash_table_unref);
   g_clear_object(&self->device_event_channel);
@@ -810,13 +948,12 @@ static void flutter_ffi_uvc_plugin_class_init(FlutterFfiUvcPluginClass* klass) {
 }
 
 static void flutter_ffi_uvc_plugin_init(FlutterFfiUvcPlugin* self) {
-  self->attached_texture_id = -1;
-  self->open_fd = -1;
   self->uevent_fd = -1;
   self->uevent_wakeup_pipe[0] = -1;
   self->uevent_wakeup_pipe[1] = -1;
   self->textures =
       g_hash_table_new_full(Int64Hash, Int64Equal, g_free, g_object_unref);
+  self->session_fds = g_hash_table_new_full(Int64Hash, Int64Equal, g_free, nullptr);
   self->known_video_devices =
       g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 }
@@ -849,8 +986,6 @@ void flutter_ffi_uvc_plugin_register_with_registrar(
   fl_event_channel_set_stream_handlers(plugin->device_event_channel,
                                        DeviceEventsListenCb,
                                        DeviceEventsCancelCb, plugin, nullptr);
-
-  g_frame_target_plugin = plugin;
 
   g_object_unref(plugin);
 }

@@ -3,6 +3,7 @@ import 'dart:ffi' as ffi;
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
+import 'package:flutter_ffi_uvc/testing.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -14,8 +15,14 @@ import 'test_library.dart';
 // the public header, so it is not part of the generated bindings.
 // ---------------------------------------------------------------------------
 
-typedef _NativeTriggerTestError = ffi.Void Function(ffi.Pointer<ffi.Char>);
-typedef _DartTriggerTestError = void Function(ffi.Pointer<ffi.Char>);
+typedef _NativeTriggerTestError = ffi.Void Function(
+  ffi.Pointer<ffi.Void>,
+  ffi.Pointer<ffi.Char>,
+);
+typedef _DartTriggerTestError = void Function(
+  ffi.Pointer<ffi.Void>,
+  ffi.Pointer<ffi.Char>,
+);
 
 class _UvcTestBindings {
   _UvcTestBindings() {
@@ -27,11 +34,14 @@ class _UvcTestBindings {
 
   late final ffi.DynamicLibrary _lib;
   late final _DartTriggerTestError _trigger;
+  // The shared instance's native session, whose error stream the tests observe.
+  final ffi.Pointer<ffi.Void> _session =
+      ffi.Pointer<ffi.Void>.fromAddress(nativeSessionHandleOf(uvcCamera));
 
   void triggerError(String message) {
     final ffi.Pointer<Utf8> ptr = message.toNativeUtf8();
     try {
-      _trigger(ptr.cast<ffi.Char>());
+      _trigger(_session, ptr.cast<ffi.Char>());
     } finally {
       calloc.free(ptr);
     }

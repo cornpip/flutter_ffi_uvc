@@ -1,7 +1,5 @@
 # Roadmap
 
-- Multiple simultaneous cameras. Requires per-instance native sessions
-  across every layer.
 - Windows zero-copy preview path. Render NV12/YUY2 to a DXGI shared texture
   instead of the CPU RGBA pixel-buffer path.
 

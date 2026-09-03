@@ -1,12 +1,12 @@
 import 'dart:typed_data';
 
 import 'flutter_ffi_uvc_bindings_generated.dart';
+import 'flutter_ffi_uvc_impl.dart' show FfiUvcCamera;
 
 /// Package-wide native UVC log verbosity.
 ///
-/// This controls logs emitted by the shared native camera session. Because this
-/// package exposes a single shared native session, the configured level applies
-/// globally rather than per device instance.
+/// This controls logs emitted by the native layer. The level is process-wide
+/// and applies to every [UvcCamera] instance.
 enum UvcLogLevel {
   error(0),
   warn(1),
@@ -307,7 +307,7 @@ enum UvcControlKind {
   }
 }
 
-/// A single preview frame copied from the native shared camera state.
+/// A single preview frame copied from the native camera state.
 class UvcPreviewFrame {
   const UvcPreviewFrame({
     required this.width,
@@ -857,7 +857,7 @@ enum UvcPreviewPolicy {
 /// [flipVertical] mirrors the rendered image top-bottom.
 ///
 /// Transforms are applied during the native blit step and do not affect the
-/// shared RGBA buffer returned by [UvcCamera.copyLatestFrame].
+/// RGBA buffer returned by [UvcCamera.copyLatestFrame].
 class UvcPreviewTransform {
   const UvcPreviewTransform({
     this.rotation = 0,
@@ -1036,7 +1036,7 @@ enum UvcStallEventType {
   restartFailed,
 }
 
-/// A stall detection or recovery event for the shared preview stream.
+/// A stall detection or recovery event for the preview stream.
 class UvcStallEvent {
   const UvcStallEvent({
     required this.type,
@@ -1103,16 +1103,29 @@ class UvcAutoPreviewResult {
   UvcCameraMode? get mode => selected?.mode;
 }
 
-/// High-level camera API for the shared native UVC session.
+/// High-level camera API. One instance drives one camera.
 ///
-/// This package exposes a single shared camera service through [uvcCamera].
-/// The implementation wraps native global state, so it does not model multiple
-/// independent camera instances in Dart.
+/// [uvcCamera] is the shared default instance. Create more with
+/// [UvcCamera.new] to stream several cameras at once. Each instance owns its
+/// own native session, preview, recording, and error stream. Call [dispose]
+/// when an instance is no longer needed.
+///
+/// Two cameras behind one USB 2.0 hub, or on a phone's single port, share
+/// one bus. The second stream may then only start in a lower mode or fail,
+/// and [startPreviewAuto] falls back to smaller modes.
 abstract interface class UvcCamera {
+  /// Creates an independent camera instance.
+  factory UvcCamera() = FfiUvcCamera;
+
+  /// Stops preview and recording, closes the device, unbinds any attached
+  /// texture, and frees the native session. The instance is unusable
+  /// afterwards. Textures still need [disposePreviewTexture].
+  Future<void> dispose();
+
   /// Sets the package-wide native UVC log level.
   ///
   /// This may be called before opening a device or while a device is already
-  /// active. The setting applies to the shared native camera session.
+  /// active. The setting is shared by every [UvcCamera] instance.
   void setLogLevel(UvcLogLevel level);
 
   /// Requests the CAMERA permission.
@@ -1131,12 +1144,16 @@ abstract interface class UvcCamera {
 
   /// Stream of USB attach/detach events for UVC-capable devices.
   ///
-  /// This is a broadcast stream; the underlying platform listener is
-  /// registered while at
-  /// least one listener is subscribed. When the currently opened
-  /// device reports [UvcDeviceEventType.detached], the native session has lost
-  /// its transport — stop the preview and call [closeUsbDevice] or [closeFd].
+  /// This is a broadcast stream shared by every instance. When the device
+  /// this instance opened through [openUsbDevice] is detached, the instance
+  /// stops its preview and closes the device itself, and the event is still
+  /// delivered here. A device opened through [openFd] has no device id, so
+  /// the app closes it with [closeFd].
   Stream<UvcDeviceEvent> get deviceEvents;
+
+  /// Device id passed to the [openUsbDevice] call that is currently open, or
+  /// null when no device is open or it was opened through [openFd].
+  int? get openedDeviceId;
 
   /// Opens a USB device by [deviceId].
   ///
@@ -1144,9 +1161,12 @@ abstract interface class UvcCamera {
   /// have no permission flow; on Linux the device node must be accessible
   /// (usually a udev rule).
   ///
-  /// If another device is already open, the shared native session is safely
-  /// torn down first — any running preview is stopped and the previous device
-  /// is closed — so calling this again is also how you switch between devices.
+  /// If this instance already has a device open, its preview is stopped and
+  /// the device is closed first, so calling this again is also how you switch
+  /// between devices. Other instances are not affected. A device that another
+  /// [UvcCamera] instance in this app holds open is refused with
+  /// [UvcErrorCode.busy]. Cameras held by other processes cannot be detected
+  /// in advance and fail at open instead.
   /// On any failure nothing is left open: the previous session's teardown is
   /// not rolled back, and a partially opened new device is closed before the
   /// error is reported. Mode selection and preview start are left to the
@@ -1233,10 +1253,14 @@ abstract interface class UvcCamera {
   @Deprecated('Use closeFd() instead.')
   void closeDevice();
 
-  /// Whether the shared native preview stream is currently running.
+  /// Whether this instance's native preview stream is currently running.
   bool get isPreviewing;
 
-  /// Last error message reported by the native layer.
+  /// Last error message of this instance, or an empty string.
+  ///
+  /// Set by the native layer and by calls the package rejects before reaching
+  /// it, such as a busy device. Cleared once preview frames are delivered
+  /// again and by the next open, start, stop, or close.
   String get lastError;
 
   /// Stream of errors emitted by the native frame pipeline.
@@ -1248,7 +1272,7 @@ abstract interface class UvcCamera {
   /// session; errors stop arriving after [closeUsbDevice] or [closeFd].
   Stream<UvcStreamError> get streamErrors;
 
-  /// Enables watchdog-based stall detection for the shared preview stream.
+  /// Enables watchdog-based stall detection for this instance's preview.
   ///
   /// While enabled, the delivered frame sequence is sampled every
   /// [UvcStallDetectionConfig.checkInterval]; if it stops advancing for
@@ -1278,7 +1302,7 @@ abstract interface class UvcCamera {
   /// [enableStallDetection]. This is a broadcast stream.
   Stream<UvcStallEvent> get stallEvents;
 
-  /// Copies the latest RGBA frame from the shared native preview buffer.
+  /// Copies the latest RGBA frame from this instance's native preview buffer.
   ///
   /// Use this (or [copyLatestFrameTransformed]) when raw pixels are the goal,
   /// e.g. ML inference or frame analysis. To save a picture file, prefer
@@ -1360,7 +1384,7 @@ abstract interface class UvcCamera {
   /// Releases a texture created by [createPreviewTexture].
   Future<void> disposePreviewTexture(int textureId);
 
-  /// Attaches the shared native preview stream to an existing texture.
+  /// Attaches this instance's preview stream to an existing texture.
   ///
   /// A subsequent [startPreview] call renders into the attached texture.
   Future<void> attachPreviewTexture(int textureId, {int? width, int? height});

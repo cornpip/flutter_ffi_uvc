@@ -1,6 +1,22 @@
-## 0.12.2-wip
+## 0.13.0-wip
 
-- docs: roadmap.md update
+- add multiple simultaneous cameras: `UvcCamera()` creates an independent
+  instance and `dispose()` releases it. `uvcCamera` stays the shared default
+  - `deviceEvents` is shared by all instances
+  - `openUsbDevice()` returns `UvcErrorCode.busy` for a device another
+    instance already holds open
+- add `openedDeviceId`
+- **BREAKING** for classes that `implements UvcCamera` (test fakes and
+  mocks): add `dispose()` and `openedDeviceId`. Callers are unaffected
+- improve `openUsbDevice()`, `startPreview()`, and `startPreviewAuto()` to
+  run the native open and stream start off the UI thread
+- change detach handling: an instance whose device is unplugged stops its
+  preview and closes the device itself
+- change `lastError` on Windows to clear once frames are delivered again,
+  matching Android and Linux
+- fix `ensureCameraPermission()` never completing for a second concurrent
+  caller on Android
+- example: add camera slots for previewing several cameras at once
 
 ## 0.12.1
 

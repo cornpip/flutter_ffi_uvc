@@ -1,14 +1,15 @@
 # flutter_ffi_uvc
 
-UVC (USB Video Class) camera plugin. Connect a USB
-camera and get live preview on a Flutter `Texture`, JPEG still capture, MP4
-video recording, raw frame access from Dart, camera controls, and stream
+UVC (USB Video Class) camera plugin. Connect one or several USB cameras and
+get live preview on a Flutter `Texture`, JPEG still capture, MP4 video
+recording, raw frame access from Dart, camera controls, and stream
 diagnostics.  
 Under the hood it uses `libuvc` on Android and Linux, and Media Foundation
 on Windows.
 
 <img src="./readme_img/260430.gif" alt="app_image_2" width="300"/>
-<img src="./readme_img/11.png" alt="app_image_2" width="300"/>
+<img src="./readme_img/11.png" alt="app_image_1" width="300"/>
+<img src="./readme_img/22.png" alt="app_image_2" width="600"/>
 
 ## Supported Platforms
 
@@ -74,9 +75,10 @@ The sections below cover each step in detail.
 8. Call `uvcCamera.stopPreview()` when preview is no longer needed.
 9. When finished, call `uvcCamera.closeUsbDevice()`.
 
-### Single-camera model
+### Camera instances
 
-This plugin is designed around a single, shared global `uvcCamera` instance. It supports one connected camera at a time:
+One `UvcCamera` instance drives one camera. `uvcCamera` is a ready-made
+shared instance for apps that use a single camera:
 
 ```dart
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
@@ -90,6 +92,32 @@ class UvcPreviewPage extends StatefulWidget {
   final UvcCamera camera;
 }
 ```
+
+To stream several cameras at once, create an instance per camera. Each has
+its own preview, texture, recording, controls, and `streamErrors`. Call
+`dispose()` when an instance is no longer needed. It stops the preview and
+closes the device. Textures you created still need `disposePreviewTexture`.
+
+```dart
+final UvcCamera front = UvcCamera();
+final UvcCamera rear = UvcCamera();
+
+await front.openUsbDevice(devices[0].deviceId);
+await rear.openUsbDevice(devices[1].deviceId);
+// ... preview, capture, record on each independently
+
+await front.dispose();
+await rear.dispose();
+```
+
+A device already open in another instance of this app is refused with
+`UvcErrorCode.busy`. Cameras held by other processes cannot be detected in
+advance and fail at open instead.
+
+Two cameras behind one USB 2.0 hub, or on a phone's single port, share one
+bus. The second stream may then only start in a lower mode or fail, and
+`startPreviewAuto()` falls back to smaller modes. On a desktop, separate
+root ports give each camera its own bus.
 
 ### USB Device discovery and opening
 
@@ -130,17 +158,19 @@ await uvcCamera.closeUsbDevice();
 StreamSubscription<UvcDeviceEvent>? _deviceEventSub;
 
 _deviceEventSub = uvcCamera.deviceEvents.listen((UvcDeviceEvent event) {
-  if (event.type == UvcDeviceEventType.detached) {
-    // If this was the opened device, the native session lost its transport.
-    uvcCamera.stopPreview();
-    uvcCamera.closeUsbDevice();
-  } else {
+  if (event.type == UvcDeviceEventType.detached &&
+      event.device.deviceId == uvcCamera.openedDeviceId) {
+    // The package has already stopped the preview and closed the device.
+    // Update the UI.
+  } else if (event.type == UvcDeviceEventType.attached) {
     // A camera was plugged in: refresh the device list, offer to open it, …
   }
 });
 ```
 
-This is a broadcast stream; cancel the subscription on dispose.
+This is a broadcast stream shared by every instance. Cancel the subscription
+on dispose. `openedDeviceId` is the device id an instance currently holds
+open.
 
 #### Alternative: opening by file descriptor (Android only)
 

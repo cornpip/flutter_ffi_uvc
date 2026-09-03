@@ -21,6 +21,8 @@ class _FakeCamera implements UvcCamera {
 
   // --- unused stubs ---
   @override
+  Future<void> dispose() async {}
+  @override
   void setLogLevel(UvcLogLevel level) {}
   @override
   Future<bool> ensureCameraPermission() async => false;
@@ -30,6 +32,8 @@ class _FakeCamera implements UvcCamera {
   Future<int> openUsbDevice(int deviceId) async => -1;
   @override
   Future<void> closeUsbDevice() async {}
+  @override
+  int? get openedDeviceId => null;
   @override
   int openFd(int fd) => -1;
   @override
