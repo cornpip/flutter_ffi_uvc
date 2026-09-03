@@ -96,6 +96,10 @@ The plugin layer binds a session to a Flutter texture through
 `sessionHandle`, and one session drives at most one texture. The
 device-enumeration channel calls carry no session.
 
+Entry points arrive on the Flutter platform thread and on Dart worker
+threads. Media Foundation objects are free-threaded, so every entry point
+initialises COM as MTA on a thread that has no apartment yet.
+
 ## Frame pipeline
 
 - A source that already streamed is activated again before the next preview

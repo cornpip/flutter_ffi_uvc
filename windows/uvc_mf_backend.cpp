@@ -290,9 +290,11 @@ void ReportError(Session& s, const char* fmt, ...) {
 
 // Caller holds process.mutex.
 bool EnsureMediaFoundationLocked() {
-  // The platform thread already runs STA COM in a Flutter runner; this only
-  // covers standalone use (tests). RPC_E_CHANGED_MODE is fine.
-  HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  // Entry points run on the Flutter platform thread and on Dart worker
+  // threads. Media Foundation objects are free-threaded, so a worker thread
+  // joins the MTA. The platform thread is already STA and reports
+  // RPC_E_CHANGED_MODE, which is fine.
+  HRESULT hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   (void)hr;
   if (!process.mf_started) {
     if (FAILED(MFStartup(MF_VERSION, MFSTARTUP_LITE))) {

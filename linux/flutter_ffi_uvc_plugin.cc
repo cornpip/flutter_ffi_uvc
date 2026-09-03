@@ -273,7 +273,7 @@ struct _FlutterFfiUvcPlugin {
   GHashTable* textures;
 
   // int64 session handle -> fd handed to uvc_open_fd, owned until
-  // closeUsbDevice.
+  // closeUsbDevice. Stored as fd + 1 so descriptor 0 is not a null value.
   GHashTable* session_fds;
 
   // Video devices seen via enumeration or attach events, keyed by the sysfs
@@ -391,7 +391,7 @@ void CloseDeadSessionFds(FlutterFfiUvcPlugin* self) {
       uvc_session_release(session);
       continue;
     }
-    close(GPOINTER_TO_INT(value));
+    close(GPOINTER_TO_INT(value) - 1);
     g_hash_table_iter_remove(&iter);
   }
 }
@@ -400,7 +400,7 @@ void CloseSessionFd(FlutterFfiUvcPlugin* self, uvc_session_t* session) {
   const int64_t key = SessionKey(session);
   gpointer value = g_hash_table_lookup(self->session_fds, &key);
   if (value == nullptr) return;
-  close(GPOINTER_TO_INT(value));
+  close(GPOINTER_TO_INT(value) - 1);
   g_hash_table_remove(self->session_fds, &key);
 }
 
@@ -523,7 +523,7 @@ void HandleUsbCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
         CloseSessionFd(self, session);
         CloseDeadSessionFds(self);
         g_hash_table_replace(self->session_fds, Int64KeyNew(SessionKey(session)),
-                             GINT_TO_POINTER(fd));
+                             GINT_TO_POINTER(fd + 1));
         // The Dart layer passes this value straight to uvc_open_fd, the same
         // flow as Android's UsbDeviceConnection file descriptor.
         g_autoptr(FlValue) result = fl_value_new_map();
@@ -933,7 +933,7 @@ static void flutter_ffi_uvc_plugin_dispose(GObject* object) {
         uvc_close_device(session);
         uvc_session_release(session);
       }
-      close(GPOINTER_TO_INT(value));
+      close(GPOINTER_TO_INT(value) - 1);
     }
     g_clear_pointer(&self->session_fds, g_hash_table_unref);
   }

@@ -25,7 +25,9 @@ extern "C" {
 #endif
 
 // One camera per session. Sessions share nothing except the log level.
-// A NULL session behaves like a closed one. Int-returning calls return
+// Every call may arrive on any thread, including several threads for one
+// session, and backends serialize internally. Listeners may run on native
+// threads. A NULL session behaves like a closed one. Int-returning calls return
 // UVC_ERROR_INVALID_PARAM (-2), uvc_ctrl_get returns INT32_MIN, JSON writers
 // return 0, and uvc_last_error returns "".
 typedef struct uvc_session uvc_session_t;
