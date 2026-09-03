@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
@@ -37,7 +38,9 @@ class UvcPreviewPage extends StatefulWidget {
     UvcCamera? camera,
     this.ownsCamera = false,
     this.title = 'UVC Camera Preview',
-    this.openDevices,
+    this.isOpenElsewhere,
+    this.openRevision,
+    this.onOpenChanged,
   }) : camera = camera ?? uvcCamera;
 
   final UvcCamera camera;
@@ -46,9 +49,15 @@ class UvcPreviewPage extends StatefulWidget {
   final bool ownsCamera;
   final String title;
 
-  /// Shared between pages so a device open in one page is not offered in
-  /// another.
-  final OpenDeviceRegistry? openDevices;
+  /// Whether another page holds the device open. Such devices are not
+  /// offered here.
+  final bool Function(int deviceId)? isOpenElsewhere;
+
+  /// Bumped by the host when any page opens or closes a device.
+  final ValueListenable<int>? openRevision;
+
+  /// Called after this page opened or closed a device.
+  final VoidCallback? onOpenChanged;
 
   @override
   State<UvcPreviewPage> createState() => _UvcPreviewPageState();
@@ -62,6 +71,12 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   static const Duration _fpsSampleInterval = Duration(milliseconds: 1000);
   static const Duration _streamErrorSnackbarCooldown = Duration(seconds: 3);
   UvcCamera get _camera => widget.camera;
+
+  // Device refresh, open, and disconnect may finish after the page was
+  // removed, for example when a slot is deleted mid-open.
+  void _safeSetState(VoidCallback fn) {
+    if (mounted) setState(fn);
+  }
 
   List<UvcUsbDevice> _devices = const <UvcUsbDevice>[];
   List<UvcCameraMode> _cameraModes = const <UvcCameraMode>[];
@@ -143,21 +158,14 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     // Watchdog: report (and, when enabled, auto-recover from) silent stalls.
     _stallEventSub = _camera.stallEvents.listen(_onStallEvent);
     _camera.enableStallDetection(_stallDetectionConfig());
-    widget.openDevices?.addListener(_onOpenDevicesChanged);
+    widget.openRevision?.addListener(_onOpenRevision);
     unawaited(_initializePermissionsAndDevices());
   }
 
-  void _onOpenDevicesChanged() {
-    if (mounted) setState(() {});
-  }
+  void _onOpenRevision() => _safeSetState(() {});
 
   bool _isOpenElsewhere(UvcUsbDevice device) =>
-      widget.openDevices?.isOpenElsewhere(device.deviceId, this) ?? false;
-
-  void _markDeviceClosed() {
-    final UvcUsbDevice? device = _selectedDevice;
-    if (device != null) widget.openDevices?.markClosed(device.deviceId, this);
-  }
+      widget.isOpenElsewhere?.call(device.deviceId) ?? false;
 
   // Library defaults (2s stall timeout, 500ms checks, 3 restart attempts)
   // are fine for the demo; only the auto-restart switch is ours.
@@ -174,8 +182,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    widget.openDevices?.removeListener(_onOpenDevicesChanged);
-    _markDeviceClosed();
+    widget.openRevision?.removeListener(_onOpenRevision);
     _streamErrorSub?.cancel();
     _deviceEventSub?.cancel();
     _stallEventSub?.cancel();
@@ -195,6 +202,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     if (widget.ownsCamera) {
       await _camera.dispose();
     }
+    widget.onOpenChanged?.call();
   }
 
   Future<void> _initializePermissionsAndDevices() async {
@@ -216,7 +224,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
 
   Future<void> _refreshDevices() async {
     _log('Refreshing device list');
-    setState(() {
+    _safeSetState(() {
       _loadingDevices = true;
       _status = null;
     });
@@ -224,7 +232,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     try {
       final List<UvcUsbDevice> devices = await _camera.listUsbDevices();
 
-      setState(() {
+      _safeSetState(() {
         _devices = devices;
         _selectedDevice =
             devices.any(
@@ -258,7 +266,6 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     }
     _setStatus('Opening device...', openingDevice: true);
     _log('Open device requested: ${device.displayName}');
-    _markDeviceClosed();
 
     _previewImage?.dispose();
     _previewImage = null;
@@ -348,8 +355,8 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
             'Opened device. Automatic probe tried ${autoResult.attempts.length} mode(s) and found no working preview. Try a mode manually.';
       }
 
-      widget.openDevices?.markOpen(device.deviceId, this);
-      setState(() {
+      widget.onOpenChanged?.call();
+      _safeSetState(() {
         _selectedDevice = device;
         _cameraModes = _sortModesForDisplay(libuvcModes);
         _modeFormatFilter = null;
@@ -393,8 +400,8 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       await _stopCurrentPreview(clearPreviewImage: true);
       await _camera.closeUsbDevice();
       await _disposePreviewTexture();
-      _markDeviceClosed();
-      setState(() {
+      widget.onOpenChanged?.call();
+      _safeSetState(() {
         _selectedDevice = null;
         _selectedMode = null;
         _cameraModes = const <UvcCameraMode>[];
@@ -440,7 +447,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       return;
     }
 
-    setState(() {
+    _safeSetState(() {
       _selectedMode = mode;
       _openingDevice = false;
       _previewFrozen = false;
@@ -556,7 +563,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       _status = message;
       return;
     }
-    setState(() => _status = message);
+    _safeSetState(() => _status = message);
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(
@@ -569,7 +576,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   }
 
   void _setStallAutoRecover(bool value) {
-    setState(() => _stallAutoRecover = value);
+    _safeSetState(() => _stallAutoRecover = value);
     // Reconfigure the watchdog in place: detection stays on either way, only
     // the automatic stop/restart behaviour is toggled.
     _camera.enableStallDetection(_stallDetectionConfig());
@@ -623,7 +630,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       _streamStats = streamStats;
       return;
     }
-    setState(() {
+    _safeSetState(() {
       _previewFps = frameDelta <= 0 ? 0 : frameDelta / seconds;
       _streamStats = streamStats;
     });
@@ -639,7 +646,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       _previewTextureId = textureId;
       return;
     }
-    setState(() {
+    _safeSetState(() {
       _previewTextureId = textureId;
     });
   }
@@ -710,7 +717,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     if (clearPreviewImage) {
       final ui.Image? previousImage = _previewImage;
       if (mounted) {
-        setState(() {
+        _safeSetState(() {
           _previewImage = null;
         });
       } else {
@@ -729,7 +736,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     Object? error,
   }) {
     _log(status, error: error);
-    setState(() {
+    _safeSetState(() {
       _status = status;
       if (loadingDevices != null) {
         _loadingDevices = loadingDevices;
@@ -756,9 +763,9 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     _camera.setControl(ctrl.id, next);
     _focusValueHideTimer?.cancel();
     _focusValueHideTimer = Timer(const Duration(seconds: 2), () {
-      if (mounted) setState(() => _focusValueVisible = false);
+      if (mounted) _safeSetState(() => _focusValueVisible = false);
     });
-    setState(() {
+    _safeSetState(() {
       _focusValueVisible = true;
       _cameraControls = _cameraControls
           .map(
@@ -771,7 +778,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
 
   Future<void> _toggleManualFocusControls() async {
     if (_manualFocusControlsVisible) {
-      setState(() {
+      _safeSetState(() {
         _manualFocusControlsVisible = false;
         _focusValueVisible = false;
       });
@@ -785,7 +792,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
 
     final int? currentValue = _camera.getControl(ctrl.id);
     if (currentValue != null) {
-      setState(() {
+      _safeSetState(() {
         _cameraControls = _cameraControls
             .map(
               (UvcCameraControl c) =>
@@ -797,12 +804,12 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       });
       _focusValueHideTimer?.cancel();
       _focusValueHideTimer = Timer(const Duration(seconds: 2), () {
-        if (mounted) setState(() => _focusValueVisible = false);
+        if (mounted) _safeSetState(() => _focusValueVisible = false);
       });
       return;
     }
 
-    setState(() {
+    _safeSetState(() {
       _manualFocusControlsVisible = true;
     });
   }
@@ -821,13 +828,13 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
   }
 
   Future<void> _triggerOneShutAF() async {
-    setState(() => _afTriggering = true);
+    _safeSetState(() => _afTriggering = true);
     try {
       _camera.setControl(UvcControlId.focusAuto, 1);
       await Future<void>.delayed(const Duration(milliseconds: 600));
       _camera.setControl(UvcControlId.focusAuto, 0);
     } finally {
-      if (mounted) setState(() => _afTriggering = false);
+      if (mounted) _safeSetState(() => _afTriggering = false);
     }
   }
 
@@ -836,7 +843,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       return;
     }
 
-    setState(() => _savingPhoto = true);
+    _safeSetState(() => _savingPhoto = true);
     ui.Image? capturedImage;
     try {
       // takePicture() encodes JPEG in the native layer and defaults to
@@ -893,7 +900,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       await _stopCurrentPreview();
       final ui.Image? previousImage = _previewImage;
       if (mounted) {
-        setState(() {
+        _safeSetState(() {
           _previewImage = capturedImage;
           _previewFrozen = true;
         });
@@ -914,7 +921,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     } finally {
       capturedImage?.dispose();
       if (mounted) {
-        setState(() => _savingPhoto = false);
+        _safeSetState(() => _savingPhoto = false);
       } else {
         _savingPhoto = false;
       }
@@ -954,7 +961,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       );
       return;
     }
-    setState(() {
+    _safeSetState(() {
       _recording = true;
       _recordingPath = path;
     });
@@ -965,7 +972,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     final String? path = _recordingPath;
     final int result = _camera.stopVideoRecording();
     if (mounted) {
-      setState(() {
+      _safeSetState(() {
         _recording = false;
         _recordingPath = null;
       });
@@ -1033,7 +1040,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
       return;
     }
 
-    setState(() {
+    _safeSetState(() {
       _previewFrozen = false;
       _openingDevice = false;
       _status = 'Preview running: ${mode.label} / Texture';
@@ -1055,7 +1062,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
           onChanged: (UvcControlId id, int value) {
             final int result = _camera.setControl(id, value);
             if (result == 0) {
-              setState(() {
+              _safeSetState(() {
                 _cameraControls = _cameraControls
                     .map(
                       (UvcCameraControl c) =>
@@ -1080,7 +1087,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
             }
             final List<UvcCameraControl> refreshed = _camera
                 .supportedControls();
-            setState(() {
+            _safeSetState(() {
               _cameraControls = refreshed;
             });
             Navigator.of(context).pop();
@@ -1106,7 +1113,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
         now - _lastSnackBarErrorAt! < _streamErrorSnackbarCooldown;
 
     if (isRepeatedMessage && withinCooldown) {
-      setState(() {
+      _safeSetState(() {
         _status = 'Stream error: ${error.message}';
       });
       return;
@@ -1114,7 +1121,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
 
     _lastSnackBarErrorKey = errorKey;
     _lastSnackBarErrorAt = now;
-    setState(() {
+    _safeSetState(() {
       _status = 'Stream error: ${error.message}';
     });
     ScaffoldMessenger.of(context)
@@ -1410,7 +1417,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                           active: false,
                                           onTap: () {
                                             _camera.rotatePreviewClockwise();
-                                            setState(() {});
+                                            _safeSetState(() {});
                                           },
                                         ),
                                         const SizedBox(height: 8),
@@ -1422,7 +1429,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                           onTap: () {
                                             _camera
                                                 .togglePreviewFlipHorizontal();
-                                            setState(() {});
+                                            _safeSetState(() {});
                                           },
                                         ),
                                         const SizedBox(height: 8),
@@ -1434,7 +1441,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                               .previewTransform.flipVertical,
                                           onTap: () {
                                             _camera.togglePreviewFlipVertical();
-                                            setState(() {});
+                                            _safeSetState(() {});
                                           },
                                         ),
                                         const SizedBox(height: 8),
@@ -1450,7 +1457,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                               active: _transformControlsExpanded ||
                                   _camera.previewTransform !=
                                       UvcPreviewTransform.identity,
-                              onTap: () => setState(
+                              onTap: () => _safeSetState(
                                 () => _transformControlsExpanded =
                                     !_transformControlsExpanded,
                               ),
@@ -1570,7 +1577,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                       ),
                                 value: _saveToGallery,
                                 onChanged: (bool value) =>
-                                    setState(() => _saveToGallery = value),
+                                    _safeSetState(() => _saveToGallery = value),
                               ),
                             if (_cameraModes.isNotEmpty)
                               SwitchListTile(
@@ -1599,7 +1606,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                     ChoiceChip(
                                       label: const Text('All'),
                                       selected: _modeFormatFilter == null,
-                                      onSelected: (_) => setState(
+                                      onSelected: (_) => _safeSetState(
                                         () => _modeFormatFilter = null,
                                       ),
                                     ),
@@ -1608,7 +1615,7 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
                                       ChoiceChip(
                                         label: Text(format),
                                         selected: _modeFormatFilter == format,
-                                        onSelected: (_) => setState(
+                                        onSelected: (_) => _safeSetState(
                                           () => _modeFormatFilter = format,
                                         ),
                                       ),

@@ -1,35 +1,7 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 
 import 'main.dart';
-
-/// Device ids open in some slot, so no slot opens a camera another holds.
-class OpenDeviceRegistry extends ChangeNotifier {
-  final Map<int, Object> _owners = <int, Object>{};
-
-  void markOpen(int deviceId, Object owner) {
-    _owners[deviceId] = owner;
-    _notifyLater();
-  }
-
-  void markClosed(int deviceId, Object owner) {
-    if (_owners[deviceId] == owner) {
-      _owners.remove(deviceId);
-      _notifyLater();
-    }
-  }
-
-  // markClosed runs from a page's dispose, where the tree is locked, so
-  // listeners are told after the current frame work.
-  void _notifyLater() => scheduleMicrotask(notifyListeners);
-
-  bool isOpenElsewhere(int deviceId, Object owner) {
-    final Object? current = _owners[deviceId];
-    return current != null && current != owner;
-  }
-}
 
 /// Hosts one [UvcPreviewPage] per camera so several cameras stream at once.
 ///
@@ -60,7 +32,21 @@ class _CameraSlot {
 class _CameraSlotsPageState extends State<CameraSlotsPage> {
   static const double _sideBySideMinWidth = 1100;
 
-  final OpenDeviceRegistry _openDevices = OpenDeviceRegistry();
+  // Bumped whenever a slot opens or closes a device so every slot rebuilds
+  // its device list. Which device each slot holds comes from the package.
+  final ValueNotifier<int> _openRevision = ValueNotifier<int>(0);
+  bool _disposed = false;
+
+  // A removed page reports its close after its own teardown, which may be
+  // after this host is gone.
+  void _bumpOpenRevision() {
+    if (!_disposed) _openRevision.value += 1;
+  }
+
+  bool _isOpenElsewhere(UvcCamera self, int deviceId) => _slots.any(
+    (_CameraSlot slot) =>
+        slot.camera != self && slot.camera.openedDeviceId == deviceId,
+  );
 
   final List<_CameraSlot> _slots = <_CameraSlot>[
     _CameraSlot(camera: uvcCamera, ownsCamera: false, id: 1),
@@ -91,12 +77,15 @@ class _CameraSlotsPageState extends State<CameraSlotsPage> {
     camera: slot.camera,
     ownsCamera: slot.ownsCamera,
     title: 'Camera ${slot.id}',
-    openDevices: _openDevices,
+    isOpenElsewhere: (int deviceId) => _isOpenElsewhere(slot.camera, deviceId),
+    openRevision: _openRevision,
+    onOpenChanged: _bumpOpenRevision,
   );
 
   @override
   void dispose() {
-    _openDevices.dispose();
+    _disposed = true;
+    _openRevision.dispose();
     super.dispose();
   }
 
