@@ -128,7 +128,23 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       StreamController<UvcStallEvent>.broadcast();
   UvcStallDetectionConfig? _stallConfig;
   Timer? _stallTimer;
+  // Every stop, close, dispose, and start bumps the epoch. An async native
+  // operation belongs to the epoch it started in and undoes itself when a
+  // later call has moved on.
   int _sessionEpoch = 0;
+
+  // Bumped only by closeUsbDevice, closeFd, and dispose. An open in flight
+  // when it changes undoes itself.
+  int _deviceEpoch = 0;
+
+  // Async native operations of one instance run one at a time.
+  Future<void> _nativeQueue = Future<void>.value();
+
+  Future<T> _serialized<T>(Future<T> Function() operation) {
+    final Future<T> result = _nativeQueue.then((_) => operation());
+    _nativeQueue = result.then((_) {}, onError: (_) {});
+    return result;
+  }
   int _stallLastSequence = 0;
   // Monotonic clock for stall timing so wall-clock adjustments (NTP, manual
   // time changes) can neither fake nor mask a stall.
@@ -205,7 +221,29 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     });
 
     try {
-      final int startResult = await _openPreviewOffThread(mode);
+      final int epoch = _sessionEpoch;
+      int startResult;
+      try {
+        startResult = await _serialized(() => _openPreviewOffThread(mode));
+      } on StateError {
+        // dispose() ran before the queued start reached the native layer.
+        if (!_disposed) rethrow;
+        startResult = UvcErrorCode.noDevice.nativeValue;
+      }
+      if (_disposed || _sessionEpoch != epoch) {
+        // stopPreview(), closeUsbDevice(), dispose(), or a later start ran
+        // while this start was in flight and wins.
+        if (startResult == 0 && !_disposed) _stopPreviewNative();
+        return UvcPreviewStartResult(
+          mode: mode,
+          success: false,
+          validFrameCount: 0,
+          consecutiveValidFrames: 0,
+          errorCount: 0,
+          elapsed: stopwatch.elapsed,
+          lastError: 'Preview start superseded by a later call',
+        );
+      }
       if (startResult != 0) {
         final String error = this.lastError;
         return UvcPreviewStartResult(
@@ -423,6 +461,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       stopPreview();
     }
     await closeUsbDevice();
+    final int epoch = _deviceEpoch;
     final FfiUvcCamera? holder = _deviceHolder(deviceId);
     if (holder != null && holder != this) {
       _dartLastError = 'Device $deviceId is open in another UvcCamera instance';
@@ -464,11 +503,30 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     final int fd = result?['fileDescriptor'] as int? ?? -1;
     // Opening can block for seconds while the OS finishes initialising a
     // freshly plugged camera, so it runs on a worker isolate.
-    final int openResult = await Isolate.run(
-      () => _bindings.uvc_open_fd(Pointer<uvc_session_t>.fromAddress(handle), fd),
+    final int openResult = await _serialized(
+      () => Isolate.run(
+        () => _bindings.uvc_open_fd(
+          Pointer<uvc_session_t>.fromAddress(handle),
+          fd,
+        ),
+      ),
     );
-    if (_disposed) {
+    if (_disposed || _deviceEpoch != epoch) {
+      // closeUsbDevice() or dispose() ran while the open was in flight and
+      // wins. Undo what the worker opened.
       _releaseDeviceClaim(deviceId);
+      if (openResult == 0 && !_disposed) {
+        _bindings.uvc_close_device(_s);
+      }
+      try {
+        await _usbChannel.invokeMethod<void>(
+          'closeUsbDevice',
+          <String, Object?>{'sessionHandle': handle},
+        );
+      } catch (_) {
+        // Nothing left to release.
+      }
+      _dartLastError = 'Open cancelled: the instance was closed';
       return UvcErrorCode.noDevice.nativeValue;
     }
     if (openResult == 0) {
@@ -493,6 +551,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   Future<void> closeUsbDevice() async {
     _ensureSupportedPlatform();
     _sessionEpoch += 1;
+    _deviceEpoch += 1;
     _dartLastError = null;
     _forgetOpenedDevice();
     _resetStallTracking();
@@ -519,6 +578,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     _stallConfig = null;
     if (session != null) {
       _sessionEpoch += 1;
+      _deviceEpoch += 1;
       _finalizer.detach(this);
       try {
         _bindings.uvc_stop_preview(session);
@@ -715,6 +775,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   void closeFd() {
     _ensureAndroidOnlyApi('closeFd');
     _sessionEpoch += 1;
+    _deviceEpoch += 1;
     _dartLastError = null;
     _forgetOpenedDevice();
     _resetStallTracking();

@@ -1173,7 +1173,9 @@ abstract interface class UvcCamera {
   /// caller: follow a successful open with [startPreviewAuto] or
   /// [startPreview].
   ///
-  /// Returns 0 on success, or a negative native error code.
+  /// Returns 0 on success, or a negative native error code. A
+  /// [closeUsbDevice] or [dispose] issued while this call is in flight wins,
+  /// and the call then reports [UvcErrorCode.noDevice].
   /// Throws [PlatformException] if the USB layer fails (e.g. permission denied,
   /// device not found).
   Future<int> openUsbDevice(int deviceId);
@@ -1198,7 +1200,9 @@ abstract interface class UvcCamera {
   /// observed without an intervening stream error, or until [timeout] elapses.
   ///
   /// On success, the preview stream remains running. On failure, the preview
-  /// is stopped before the result is returned.
+  /// is stopped before the result is returned. A [stopPreview],
+  /// [closeUsbDevice], [dispose], or later start issued while this call is in
+  /// flight wins, and this call then reports a failure.
   Future<UvcPreviewStartResult> startPreview(
     UvcCameraMode mode, {
     UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
