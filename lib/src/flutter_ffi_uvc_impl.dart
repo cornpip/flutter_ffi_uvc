@@ -259,7 +259,8 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       }
 
       while (stopwatch.elapsed < timeout) {
-        if (_disposed) {
+        if (_disposed || _sessionEpoch != epoch) {
+          // A later call owns the stream now. Leave it running.
           return UvcPreviewStartResult(
             mode: mode,
             success: false,
@@ -267,7 +268,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
             consecutiveValidFrames: consecutiveValidFrames,
             errorCount: errorCount,
             elapsed: stopwatch.elapsed,
-            lastError: 'UvcCamera disposed while verifying the preview',
+            lastError: 'Preview start superseded by a later call',
           );
         }
         if (policy == UvcPreviewPolicy.sequenceOnly) {
@@ -318,7 +319,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
         ]);
       }
 
-      if (_disposed) {
+      if (_disposed || _sessionEpoch != epoch) {
         return UvcPreviewStartResult(
           mode: mode,
           success: false,
@@ -326,7 +327,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
           consecutiveValidFrames: consecutiveValidFrames,
           errorCount: errorCount,
           elapsed: stopwatch.elapsed,
-          lastError: 'UvcCamera disposed while verifying the preview',
+          lastError: 'Preview start superseded by a later call',
         );
       }
       final String error = lastError ?? this.lastError;
@@ -453,14 +454,21 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   }
 
   @override
-  Future<int> openUsbDevice(int deviceId) async {
+  Future<int> openUsbDevice(int deviceId) {
     _ensureSupportedPlatform();
+    // The whole open runs as one queued transaction, so two opens on the
+    // same instance follow each other instead of closing each other's
+    // connection, and a start issued after an open waits for it.
+    return _serialized(() => _openUsbDeviceTransaction(deviceId));
+  }
+
+  Future<int> _openUsbDeviceTransaction(int deviceId) async {
     _dartLastError = null;
     // An instance holds one device. Close this instance's device first.
-    if (isPreviewing) {
-      stopPreview();
-    }
-    await closeUsbDevice();
+    // Internal close: the epochs stay, so a start queued behind this open
+    // still runs.
+    _stopPreviewNative();
+    await _closeUsbDeviceInternal();
     final int epoch = _deviceEpoch;
     final FfiUvcCamera? holder = _deviceHolder(deviceId);
     if (holder != null && holder != this) {
@@ -503,13 +511,8 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     final int fd = result?['fileDescriptor'] as int? ?? -1;
     // Opening can block for seconds while the OS finishes initialising a
     // freshly plugged camera, so it runs on a worker isolate.
-    final int openResult = await _serialized(
-      () => Isolate.run(
-        () => _bindings.uvc_open_fd(
-          Pointer<uvc_session_t>.fromAddress(handle),
-          fd,
-        ),
-      ),
+    final int openResult = await Isolate.run(
+      () => _bindings.uvc_open_fd(Pointer<uvc_session_t>.fromAddress(handle), fd),
     );
     if (_disposed || _deviceEpoch != epoch) {
       // closeUsbDevice() or dispose() ran while the open was in flight and
@@ -539,7 +542,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       // The platform-side open succeeded but the native session failed to
       // attach; close it so any failure leaves nothing open.
       try {
-        await closeUsbDevice();
+        await _closeUsbDeviceInternal();
       } catch (_) {
         // Cleanup failure must not mask the original open error.
       }
@@ -548,10 +551,14 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   }
 
   @override
-  Future<void> closeUsbDevice() async {
+  Future<void> closeUsbDevice() {
     _ensureSupportedPlatform();
     _sessionEpoch += 1;
     _deviceEpoch += 1;
+    return _closeUsbDeviceInternal();
+  }
+
+  Future<void> _closeUsbDeviceInternal() async {
     _dartLastError = null;
     _forgetOpenedDevice();
     _resetStallTracking();
@@ -564,8 +571,12 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     );
   }
 
+  Future<void>? _disposing;
+
   @override
-  Future<void> dispose() async {
+  Future<void> dispose() => _disposing ??= _disposeImpl();
+
+  Future<void> _disposeImpl() async {
     if (_disposed) return;
     // Mark disposed before the first await so a re-entrant dispose() or a
     // concurrent open cannot see the session.
