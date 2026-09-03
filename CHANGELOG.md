@@ -1,3 +1,7 @@
+## 0.12.2-wip
+
+- docs: roadmap.md update
+
 ## 0.12.1
 
 - fix the Kotlin Gradle Plugin warning Flutter reports for this package when

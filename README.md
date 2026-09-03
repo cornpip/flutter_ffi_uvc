@@ -343,8 +343,8 @@ if (stopped == 0) {
   recorded: UVC is a video-only class, and camera microphones are separate
   USB audio devices, which this package does not currently capture.
 - Recording is available on Android and Windows. On Linux
-  `startVideoRecording()` returns a non-zero code (no native encoder is
-  wired up yet); use `takePicture()` and `copyLatestFrame()` there.
+  `startVideoRecording()` returns a non-zero code; use `takePicture()` and
+  `copyLatestFrame()` there.
 
 #### H.264 camera streams
 
@@ -361,8 +361,8 @@ modes.
 - Windows: H.264 modes are not listed; the remaining formats already
   cover every advertised resolution (rationale:
   [doc/windows-backend.md](doc/windows-backend.md)).
-- Linux: H.264 modes are not listed; the backend has no H.264 decoder yet,
-  and the other formats cover every advertised resolution.
+- Linux: H.264 modes are not listed; the other formats cover every
+  advertised resolution.
 
 ### Controls
 

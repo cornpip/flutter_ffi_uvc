@@ -1,54 +1,14 @@
 # Roadmap
 
-Planned and completed work areas, ordered by expected impact. Items marked
-done landed in the version noted next to them.
-
-## Stability & API robustness
-
-- [x] **USB attach/detach events** (`deviceEvents`) — react when a camera is
-  plugged in or unplugged mid-session. (0.6.0)
-- [x] **Typed error codes** (`UvcErrorCode`, `UvcException`,
-  `UvcPreviewStartResult.errorCode`) — branch on failures instead of parsing
-  `lastError` strings. (0.6.0)
-- [x] **Stall detection and recovery** (`enableStallDetection`, `stallEvents`,
-  optional auto-restart) — detect silent frame delivery stops and recover
-  without user interaction. (0.6.0)
-- [x] **Automatic mode selection** (`startPreviewAuto`) — try descriptor
-  modes in a reliability-ordered sequence and keep the first mode that
-  streams and verifies. (0.6.0)
-
-## Features under consideration
-
-- [x] **Still capture API** — native JPEG encode of the latest frame
-  (`takePicture()` returning encoded bytes), so apps do not have to encode
-  RGBA themselves. Android via the bundled libjpeg-turbo; Windows via WIC.
-  (0.9.0)
-- [x] **Video recording** — MP4 recording of the preview stream. Android via
-  MediaCodec/MediaMuxer; Windows via the Media Foundation Sink Writer.
-  (0.10.0)
-
-## Long-term / needs architectural decision
-
-- [ ] **Multiple simultaneous cameras** — requires redesigning the single
-  shared native session model.
-- [x] **H.264 UVC format support (Android)** — Android previews H.264 modes
-  through a MediaCodec decode path with NEON conversion. Windows keeps H264
-  excluded: the Camera Frame Server already exposes every advertised
-  resolution as decoded types there, so H264 unlocks nothing (a pass-through
-  recording path was built and deliberately dropped — see
-  `doc/windows-backend.md`). (0.11.0)
-- [ ] **Windows zero-copy preview path** — render NV12/YUY2 straight to a
-  DXGI shared texture (`GpuSurfaceTexture` + D3D11) instead of the current
-  CPU RGBA pixel-buffer path. Only worth doing if profiling shows CPU cost at
-  high resolutions, or together with video recording (hardware encoders
-  consume NV12 directly); `copyLatestFrame()` keeps requiring an RGBA
-  readback path either way.
+- Multiple simultaneous cameras. Requires per-instance native sessions
+  across every layer.
+- Windows zero-copy preview path. Render NV12/YUY2 to a DXGI shared texture
+  instead of the CPU RGBA pixel-buffer path.
 
 ## Considered and rejected
 
-- **Push-based frame stream** (`Stream<UvcPreviewFrame>`) — frame access
-  stays pull-only via `copyLatestFrame()`; a pushed frame goes stale in the
-  event queue while a pull always gets the newest one. See
-  [doc/frame-access-design.md](doc/frame-access-design.md).
+- H.264 preview on Linux - other formats cover every resolution.
+- Push-based frame stream - pull-only, see `doc/frame-access-design.md`.
+- H.264 on Windows - unlocks nothing, see `doc/windows-backend.md`.
 
 Suggestions and device reports are welcome via GitHub issues.

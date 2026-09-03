@@ -1310,8 +1310,8 @@ abstract interface class UvcCamera {
   /// Requires an active preview with delivered frames — call after a
   /// successful [startPreview] / [startPreviewAuto]. Frames are encoded
   /// natively; nothing crosses into Dart per frame. The preview keeps running
-  /// while recording. Not available on Linux yet: there this returns a
-  /// negative error code.
+  /// while recording. Not available on Linux: there this returns a negative
+  /// error code.
   ///
   /// [transform] defaults to [previewTransform] so the recording matches what
   /// the preview shows; it is captured once at start and stays fixed for the
@@ -1406,8 +1406,8 @@ abstract interface class UvcCamera {
   /// On Android this includes the device's H.264 modes (previewable via
   /// [startPreview], decoded by the hardware decoder). On Windows H.264 is
   /// deliberately excluded from this list (an inter-frame codec breaks the
-  /// per-frame validation model — see `doc/windows-backend.md`); on Linux it
-  /// is excluded because the backend has no H.264 decoder yet.
+  /// per-frame validation model — see `doc/windows-backend.md`) and on Linux
+  /// as well.
   List<UvcCameraMode> supportedModes();
 
   // ---------------------------------------------------------------------------
