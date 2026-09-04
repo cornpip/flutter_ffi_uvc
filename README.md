@@ -54,7 +54,7 @@ final UvcStillPicture? picture = uvcCamera.takePicture();
 final UvcPreviewFrame? frame = uvcCamera.copyLatestFrame();
 
 // 4. Tear down.
-uvcCamera.stopPreview();
+await uvcCamera.stopPreview();
 await uvcCamera.disposePreviewTexture(textureId);
 await uvcCamera.closeUsbDevice();
 ```
@@ -72,7 +72,7 @@ The sections below cover each step in detail.
 5. Pick a mode and call `await uvcCamera.startPreview(mode)`. This starts the stream and verifies frame delivery.
 6. On success, attach a Flutter `Texture` via `attachPreviewTexture` for live preview.
 7. Use `takePicture()` to capture a JPEG picture, or `copyLatestFrame()` when you need raw frame bytes in Dart.
-8. Call `uvcCamera.stopPreview()` when preview is no longer needed.
+8. Call `await uvcCamera.stopPreview()` when preview is no longer needed.
 9. When finished, call `uvcCamera.closeUsbDevice()`.
 
 ### Camera instances
@@ -110,9 +110,15 @@ await front.dispose();
 await rear.dispose();
 ```
 
-A device already open in another instance of this app is refused with
+A device already open in another instance of this app fails with
 `UvcErrorCode.busy`. Cameras held by other processes cannot be detected in
 advance and fail at open instead.
+
+Lifecycle calls on one instance run one at a time, in call order. A call
+made while another is in progress waits for it. Only `stopPreview()`,
+`closeUsbDevice()`, and `dispose()` act early: they end the frame
+verification of a start in progress, which then reports
+`UvcErrorCode.interrupted`.
 
 Two cameras behind one USB 2.0 hub, or on a phone's single port, share one
 bus. The second stream may then only start in a lower mode or fail, and
@@ -126,9 +132,10 @@ root ports give each camera its own bus.
 final List<UvcUsbDevice> devices = await uvcCamera.listUsbDevices();
 
 // Open a device. On Android this requests USB permission if not already granted.
-final int result = await uvcCamera.openUsbDevice(devices.first.deviceId);
-if (result != 0) {
-  print('Open failed: ${uvcCamera.lastError}');
+try {
+  await uvcCamera.openUsbDevice(devices.first.deviceId);
+} on UvcException catch (error) {
+  print('Open failed: $error');
 }
 ```
 
@@ -136,8 +143,8 @@ On Android, `openUsbDevice` requests USB permission if it has not been granted
 yet; on Windows and Linux it opens the camera directly with no permission
 flow (on Linux the device node must be accessible, see
 [Linux setup](#linux-setup)). It
-throws a `PlatformException` if the platform layer fails, and returns a
-non-zero code if the native session fails to initialize.
+throws a `PlatformException` if the platform layer fails, and a
+`UvcException` if the native session fails to initialize.
 
 If another device is already open, `openUsbDevice` safely tears down the current
 session first (stopping any running preview and closing the previous device), so
@@ -221,7 +228,7 @@ AspectRatio(
 On teardown:
 
 ```dart
-uvcCamera.stopPreview();
+await uvcCamera.stopPreview();
 await uvcCamera.disposePreviewTexture(textureId);
 ```
 
@@ -351,17 +358,18 @@ and the live preview keeps running while recording:
 
 ```dart
 // Requires an active preview (after startPreview / startPreviewAuto).
-final int started = uvcCamera.startVideoRecording('/path/to/video.mp4');
-if (started != 0) {
-  print('Recording failed to start: ${uvcCamera.lastError}');
+try {
+  uvcCamera.startVideoRecording('/path/to/video.mp4');
+} on UvcException catch (error) {
+  print('Recording failed to start: $error');
 }
 
 // ... later
-final int stopped = uvcCamera.stopVideoRecording();
-if (stopped == 0) {
-  // The MP4 file is finalized and ready to play or move.
-}
+uvcCamera.stopVideoRecording();
+// The MP4 file is finalized and ready to play or move.
 ```
+
+Both throw `UvcException` on failure.
 
 - `previewTransform` is applied by default, captured once at start; pass an
   explicit `transform` to override. `bitrateBps` defaults to a value derived
@@ -541,9 +549,9 @@ if (!result.success) {
 ```
 
 `UvcPreviewStartResult.nativeErrorCode` is non-zero when stream startup
-itself failed, when the start was refused (`busy`, `noDevice`), or when it was
-cancelled by a stop, close, or dispose (`interrupted`). Verification failures
-report through `lastError` and the frame counters instead.
+itself failed, when no device was open (`noDevice`), or when a stop, close,
+or dispose ended the verification early (`interrupted`). Verification
+failures report through `lastError` and the frame counters instead.
 
 ### Logging
 

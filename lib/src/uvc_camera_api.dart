@@ -263,9 +263,8 @@ enum UvcErrorCode {
   }
 }
 
-/// Exception carrying a typed UVC error code alongside the native code and
-/// the last native error message, for APIs and helpers that throw instead of
-/// returning raw integer codes.
+/// Exception thrown by calls that fail, carrying the typed [code], the raw
+/// native return code, and the error message.
 class UvcException implements Exception {
   const UvcException({
     required this.code,
@@ -384,8 +383,7 @@ class UvcCameraMode {
           other.fps == fps;
 
   @override
-  int get hashCode =>
-      Object.hash(frameFormat, formatName, width, height, fps);
+  int get hashCode => Object.hash(frameFormat, formatName, width, height, fps);
 
   Map<String, Object?> toJson() {
     return <String, Object?>{
@@ -709,8 +707,7 @@ class UvcStreamStats {
       staleFrameCount: json['staleFrameCount'] as int,
       undersizedFrameCount: json['undersizedFrameCount'] as int,
       invalidMjpegCount: json['invalidMjpegCount'] as int,
-      bufferAllocationFailureCount:
-          json['bufferAllocationFailureCount'] as int,
+      bufferAllocationFailureCount: json['bufferAllocationFailureCount'] as int,
       previewSurfaceFailureCount: json['previewSurfaceFailureCount'] as int,
       conversionFailureCount: json['conversionFailureCount'] as int,
       inputFps: (json['inputFps'] as num).toDouble(),
@@ -834,9 +831,9 @@ class UvcPreviewStartResult {
   ///
   /// Verification failures (stream started but frames never became valid)
   /// keep this at 0; inspect [lastError] and the frame counters instead.
-  /// A start refused before reaching the native layer carries
-  /// [UvcErrorCode.busy] or [UvcErrorCode.noDevice], and one cancelled by
-  /// stop, close, or dispose carries [UvcErrorCode.interrupted].
+  /// A start with no device open carries [UvcErrorCode.noDevice], and one
+  /// whose verification was ended early by stop, close, or dispose carries
+  /// [UvcErrorCode.interrupted].
   final int nativeErrorCode;
 
   /// Typed error code for [nativeErrorCode], or null when it is 0.
@@ -889,9 +886,7 @@ class UvcPreviewTransform {
   /// For 90° and 270° rotations the dimensions are swapped; flip flags do not
   /// affect the size.
   (int width, int height) applyToSize(int width, int height) =>
-      (rotation == 90 || rotation == 270)
-          ? (height, width)
-          : (width, height);
+      (rotation == 90 || rotation == 270) ? (height, width) : (width, height);
 
   @override
   bool operator ==(Object other) =>
@@ -1113,6 +1108,18 @@ class UvcAutoPreviewResult {
 /// own native session, preview, recording, and error stream. Call [dispose]
 /// when an instance is no longer needed.
 ///
+/// Lifecycle calls ([openUsbDevice], [openFd], [openPreview], [startPreview],
+/// [startPreviewAuto], [stopPreview], [closeFd], [closeUsbDevice], [dispose])
+/// run one at a time per instance, in call order. A call made while another
+/// is in progress waits for it. Only [stopPreview], [closeFd],
+/// [closeUsbDevice], and [dispose] act early: they end the frame
+/// verification of a start in progress, which then reports
+/// [UvcErrorCode.interrupted].
+///
+/// Calls that can fail throw [UvcException], except [startPreview] and
+/// [startPreviewAuto], which return a result, and readers such as
+/// [takePicture] and [getControl], which return null.
+///
 /// Two cameras behind one USB 2.0 hub, or on a phone's single port, share
 /// one bus. The second stream may then only start in a lower mode or fail,
 /// and [startPreviewAuto] falls back to smaller modes.
@@ -1167,7 +1174,7 @@ abstract interface class UvcCamera {
   /// If this instance already has a device open, its preview is stopped and
   /// the device is closed first, so calling this again is also how you switch
   /// between devices. Other instances are not affected. A device that another
-  /// [UvcCamera] instance in this app holds open is refused with
+  /// [UvcCamera] instance in this app holds open fails with
   /// [UvcErrorCode.busy]. Cameras held by other processes cannot be detected
   /// in advance and fail at open instead.
   /// On any failure nothing is left open: the previous session's teardown is
@@ -1176,35 +1183,30 @@ abstract interface class UvcCamera {
   /// caller: follow a successful open with [startPreviewAuto] or
   /// [startPreview].
   ///
-  /// Returns 0 on success, or a negative native error code. While an open or
-  /// preview start is already in progress this returns [UvcErrorCode.busy].
-  /// A [closeUsbDevice] or [dispose] issued while this call is in flight
-  /// cancels it, and the call then reports [UvcErrorCode.noDevice].
-  /// Throws [PlatformException] if the USB layer fails (e.g. permission denied,
+  /// Throws [UvcException] when the native open fails, and
+  /// [UvcErrorCode.noDevice] when a [closeUsbDevice] or [dispose] cancels the
+  /// open while it waits for the USB permission dialog. Throws
+  /// [PlatformException] if the USB layer fails (e.g. permission denied,
   /// device not found).
-  Future<int> openUsbDevice(int deviceId);
+  Future<void> openUsbDevice(int deviceId);
 
-  /// Closes the active USB device connection. Also cancels an open or start
-  /// in progress.
+  /// Stops the preview and closes the active USB device connection. An open
+  /// waiting for the USB permission dialog is cancelled.
   Future<void> closeUsbDevice();
 
   /// Opens a UVC device using an already acquired platform file descriptor.
   /// Android only — use [openUsbDevice] on Windows and Linux. Throws
   /// [UnsupportedError] on other platforms. A device this instance opened
   /// through [openUsbDevice] is closed first, and [openedDeviceId] becomes
-  /// null. Returns [UvcErrorCode.busy] while an open or preview start is in
-  /// progress or a previous one is still finishing in the native layer.
-  int openFd(int fd);
+  /// null. Throws [UvcException] when the native open fails.
+  Future<void> openFd(int fd);
 
   /// Starts the native preview stream for [mode] without frame verification.
   ///
-  /// Returns 0 on success, or a non-zero error code. To also verify that
-  /// frames are delivered correctly, use [startPreview] instead. Returns
-  /// [UvcErrorCode.noDevice] when no device is open and [UvcErrorCode.busy]
-  /// while an open or start is in progress or a previous one is still
-  /// finishing in the native layer, including a stall auto-restart. Await
-  /// that call, or retry after the next [stallEvents] event.
-  int openPreview(UvcCameraMode mode);
+  /// To also verify that frames are delivered correctly, use [startPreview]
+  /// instead. Throws [UvcException] when the start fails, with
+  /// [UvcErrorCode.noDevice] when no device is open.
+  Future<void> openPreview(UvcCameraMode mode);
 
   /// Starts the preview stream for [mode] and verifies frame delivery.
   ///
@@ -1212,10 +1214,11 @@ abstract interface class UvcCamera {
   /// observed without an intervening stream error, or until [timeout] elapses.
   ///
   /// On success, the preview stream remains running. On failure, the preview
-  /// is stopped before the result is returned. While an open or another
-  /// start is in progress the result carries [UvcErrorCode.busy]. A
-  /// [stopPreview], [closeUsbDevice], or [dispose] issued while this call is
-  /// in flight cancels it, and the result carries [UvcErrorCode.interrupted].
+  /// is stopped before the result is returned. When no device is open the
+  /// result carries [UvcErrorCode.noDevice]. A [stopPreview],
+  /// [closeUsbDevice], or [dispose] issued while this call verifies frames
+  /// ends the verification early, and the result carries
+  /// [UvcErrorCode.interrupted].
   Future<UvcPreviewStartResult> startPreview(
     UvcCameraMode mode, {
     UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
@@ -1242,7 +1245,7 @@ abstract interface class UvcCamera {
   /// [UvcAutoPreviewResult.mode]. On total failure all attempts are stopped
   /// and the per-mode results are available in [UvcAutoPreviewResult.attempts].
   /// A [stopPreview], [closeUsbDevice], or [dispose] issued while an attempt
-  /// runs cancels it, and no further candidate is tried.
+  /// runs ends it early, and no further candidate is tried.
   Future<UvcAutoPreviewResult> startPreviewAuto({
     List<UvcCameraMode>? candidates,
     UvcAutoPreviewPreference preference = UvcAutoPreviewPreference.reliability,
@@ -1254,9 +1257,10 @@ abstract interface class UvcCamera {
 
   /// Stops the active preview stream.
   ///
-  /// Also cancels a [startPreview] or [startPreviewAuto] in progress, which
-  /// then reports [UvcErrorCode.interrupted].
-  void stopPreview();
+  /// A [startPreview] or [startPreviewAuto] in progress ends its frame
+  /// verification early and reports [UvcErrorCode.interrupted]. The stream
+  /// is stopped once the returned future completes.
+  Future<void> stopPreview();
 
   /// Closes the native UVC session opened via [openFd].
   ///
@@ -1267,22 +1271,17 @@ abstract interface class UvcCamera {
   /// If the device was opened with [openUsbDevice], use [closeUsbDevice]
   /// instead — it closes both the native session and the USB connection.
   /// Android only, like [openFd]; throws [UnsupportedError] elsewhere.
-  void closeFd();
-
-  /// Closes the active native device/session.
-  ///
-  /// Deprecated: use [closeFd] instead.
-  @Deprecated('Use closeFd() instead.')
-  void closeDevice();
+  Future<void> closeFd();
 
   /// Whether this instance's native preview stream is currently running.
   bool get isPreviewing;
 
   /// Last error message of this instance, or an empty string.
   ///
-  /// Set by the native layer and by calls the package rejects before reaching
-  /// it, such as a busy device. Cleared once preview frames are delivered
-  /// again and by the next open, start, stop, or close.
+  /// Set by the native layer and by calls that fail before reaching it, such
+  /// as a busy device. The same text as the [UvcException] the call threw.
+  /// Cleared once preview frames are delivered again and by the next open,
+  /// start, stop, or close.
   String get lastError;
 
   /// Stream of errors emitted by the native frame pipeline.
@@ -1349,15 +1348,17 @@ abstract interface class UvcCamera {
   ///
   /// Returns `null` when no frame has been delivered yet or the native encoder
   /// fails (details via [lastError]).
-  UvcStillPicture? takePicture({int quality = 90, UvcPreviewTransform? transform});
+  UvcStillPicture? takePicture({
+    int quality = 90,
+    UvcPreviewTransform? transform,
+  });
 
   /// Starts MP4 (H.264) video recording of the preview stream to [path].
   ///
   /// Requires an active preview with delivered frames — call after a
   /// successful [startPreview] / [startPreviewAuto]. Frames are encoded
   /// natively; nothing crosses into Dart per frame. The preview keeps running
-  /// while recording. Not available on Linux: there this returns a negative
-  /// error code.
+  /// while recording. Not available on Linux: there this throws.
   ///
   /// [transform] defaults to [previewTransform] so the recording matches what
   /// the preview shows; it is captured once at start and stays fixed for the
@@ -1368,10 +1369,9 @@ abstract interface class UvcCamera {
   /// mode changes, or the device closes. Call [stopVideoRecording] to finish
   /// normally.
   ///
-  /// Returns 0 on success, or a negative native error code (details via
-  /// [lastError]) — for example when a recording is already in progress or no
-  /// preview is running.
-  int startVideoRecording(
+  /// Throws [UvcException] on failure, for example when a recording is
+  /// already in progress or no preview is running.
+  void startVideoRecording(
     String path, {
     int bitrateBps = 0,
     UvcPreviewTransform? transform,
@@ -1379,10 +1379,10 @@ abstract interface class UvcCamera {
 
   /// Stops video recording, drains the encoder, and finalizes the MP4 file.
   ///
-  /// Returns 0 when the file was finalized (also when no recording was in
-  /// progress), or a negative native error code — for example when no frames
-  /// were ever encoded (details via [lastError]).
-  int stopVideoRecording();
+  /// Returns normally when the file was finalized (also when no recording was
+  /// in progress). Throws [UvcException] on failure, for example when no
+  /// frames were ever encoded.
+  void stopVideoRecording();
 
   /// Whether an MP4 recording started by [startVideoRecording] is in progress.
   bool get isRecording;
@@ -1424,25 +1424,28 @@ abstract interface class UvcCamera {
   /// Returns the current value for a specific UVC control.
   int? getControl(UvcControlId controlId);
 
-  /// Sets a specific UVC control value.
-  int setControl(UvcControlId controlId, int value);
+  /// Sets a specific UVC control value. Throws [UvcException] when the
+  /// device rejects it.
+  void setControl(UvcControlId controlId, int value);
 
+  /// Compound control getters return null when the control is unavailable.
+  /// Setters throw [UvcException] when the device rejects the value.
   UvcWhiteBalanceComponent? getWhiteBalanceComponent();
-  int setWhiteBalanceComponent(UvcWhiteBalanceComponent value);
+  void setWhiteBalanceComponent(UvcWhiteBalanceComponent value);
   UvcFocusRelativeControl? getFocusRelativeControl();
-  int setFocusRelativeControl(UvcFocusRelativeControl value);
+  void setFocusRelativeControl(UvcFocusRelativeControl value);
   UvcZoomRelativeControl? getZoomRelativeControl();
-  int setZoomRelativeControl(UvcZoomRelativeControl value);
+  void setZoomRelativeControl(UvcZoomRelativeControl value);
   UvcPanTiltAbsoluteControl? getPanTiltAbsoluteControl();
-  int setPanTiltAbsoluteControl(UvcPanTiltAbsoluteControl value);
+  void setPanTiltAbsoluteControl(UvcPanTiltAbsoluteControl value);
   UvcPanTiltRelativeControl? getPanTiltRelativeControl();
-  int setPanTiltRelativeControl(UvcPanTiltRelativeControl value);
+  void setPanTiltRelativeControl(UvcPanTiltRelativeControl value);
   UvcRollRelativeControl? getRollRelativeControl();
-  int setRollRelativeControl(UvcRollRelativeControl value);
+  void setRollRelativeControl(UvcRollRelativeControl value);
   UvcDigitalWindowControl? getDigitalWindowControl();
-  int setDigitalWindowControl(UvcDigitalWindowControl value);
+  void setDigitalWindowControl(UvcDigitalWindowControl value);
   UvcRegionOfInterestControl? getRegionOfInterestControl();
-  int setRegionOfInterestControl(UvcRegionOfInterestControl value);
+  void setRegionOfInterestControl(UvcRegionOfInterestControl value);
 
   /// Returns the camera modes reported by the currently opened device.
   ///

@@ -10,24 +10,7 @@ import 'package:flutter/services.dart';
 import 'flutter_ffi_uvc_bindings_generated.dart';
 import 'uvc_camera_api.dart';
 
-enum _State { closed, opening, open, starting, previewing, disposed }
-
-// An open or preview start in progress. Identity matters more than state.
-// A cancelled operation may find the session in "its" state again because a
-// later call entered it, so every check compares tokens, not states.
-class _Op {
-  _Op({required this.internal});
-
-  // Started by the package (stall auto-restart). An app call takes over.
-  final bool internal;
-}
-
-class _Claim {
-  const _Claim(this.camera, this.token);
-
-  final WeakReference<FfiUvcCamera> camera;
-  final Object token;
-}
+enum _State { closed, open, previewing, disposed }
 
 class _PreviewRequest {
   const _PreviewRequest({
@@ -62,33 +45,38 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   static StreamSubscription<dynamic>? _channelDeviceEvents;
 
   static StreamController<UvcDeviceEvent> _deviceEvents() {
-    return _deviceEventController ??= StreamController<UvcDeviceEvent>.broadcast(
-      onListen: _ensureChannelDeviceEvents,
-      onCancel: _releaseChannelDeviceEvents,
-    );
+    return _deviceEventController ??=
+        StreamController<UvcDeviceEvent>.broadcast(
+          onListen: _ensureChannelDeviceEvents,
+          onCancel: _releaseChannelDeviceEvents,
+        );
   }
 
   static void _ensureChannelDeviceEvents() {
-    _channelDeviceEvents ??= _deviceEventChannel.receiveBroadcastStream().listen(
-      (dynamic raw) {
-        final UvcDeviceEvent event = UvcDeviceEvent.fromMap(
-          (raw as Map<Object?, Object?>?) ?? <Object?, Object?>{},
+    _channelDeviceEvents ??= _deviceEventChannel
+        .receiveBroadcastStream()
+        .listen(
+          (dynamic raw) {
+            final UvcDeviceEvent event = UvcDeviceEvent.fromMap(
+              (raw as Map<Object?, Object?>?) ?? <Object?, Object?>{},
+            );
+            if (event.type == UvcDeviceEventType.detached) {
+              _deviceHolder(event.device.deviceId)?._onOwnDeviceDetached();
+            }
+            _deviceEventController?.add(event);
+          },
+          onError: (Object error, StackTrace stack) {
+            _deviceEventController?.addError(error, stack);
+          },
         );
-        if (event.type == UvcDeviceEventType.detached) {
-          _deviceHolder(event.device.deviceId)?._onOwnDeviceDetached();
-        }
-        _deviceEventController?.add(event);
-      },
-      onError: (Object error, StackTrace stack) {
-        _deviceEventController?.addError(error, stack);
-      },
-    );
   }
 
   // Keeps the platform receiver only while someone needs it.
   static void _releaseChannelDeviceEvents() {
     final bool appListening = _deviceEventController?.hasListener ?? false;
-    _openDevices.removeWhere((_, _Claim claim) => claim.camera.target == null);
+    _openDevices.removeWhere(
+      (_, WeakReference<FfiUvcCamera> claim) => claim.target == null,
+    );
     if (appListening || _openDevices.isNotEmpty) return;
     _channelDeviceEvents?.cancel();
     _channelDeviceEvents = null;
@@ -96,23 +84,18 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
 
   // Devices open or being opened in this process, so two instances never
   // open the same one. Weak so an undisposed instance can still be collected.
-  // The token names the open that made the claim, so a cancelled open cannot
-  // release a claim a later open renewed.
-  static final Map<int, _Claim> _openDevices = <int, _Claim>{};
+  static final Map<int, WeakReference<FfiUvcCamera>> _openDevices =
+      <int, WeakReference<FfiUvcCamera>>{};
   int? _openedDeviceId;
 
   static FfiUvcCamera? _deviceHolder(int deviceId) {
-    final FfiUvcCamera? holder = _openDevices[deviceId]?.camera.target;
+    final FfiUvcCamera? holder = _openDevices[deviceId]?.target;
     if (holder == null) _openDevices.remove(deviceId);
     return holder;
   }
 
-  void _claimDevice(int deviceId, Object token) {
-    _openDevices[deviceId] = _Claim(WeakReference<FfiUvcCamera>(this), token);
-  }
-
-  void _releaseDeviceClaim(int deviceId, Object token) {
-    if (identical(_openDevices[deviceId]?.token, token)) {
+  void _releaseDeviceClaim(int deviceId) {
+    if (_openDevices[deviceId]?.target == this) {
       _openDevices.remove(deviceId);
       _releaseChannelDeviceEvents();
     }
@@ -126,12 +109,8 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
 
   void _forgetOpenedDevice() {
     final int? deviceId = _openedDeviceId;
-    if (deviceId != null &&
-        _openDevices[deviceId]?.camera.target == this) {
-      _openDevices.remove(deviceId);
-    }
     _openedDeviceId = null;
-    _releaseChannelDeviceEvents();
+    if (deviceId != null) _releaseDeviceClaim(deviceId);
   }
 
   void _rememberOpenedDevice(int deviceId) {
@@ -139,11 +118,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     _ensureChannelDeviceEvents();
   }
 
-  // The transport is gone, so the session cannot be used again. An open in
-  // progress closes the old device itself, so it is left alone.
+  // The transport is gone, so the session cannot be used again.
   void _onOwnDeviceDetached() {
-    if (_disposed || _state == _State.opening) return;
-    stopPreview();
+    if (_disposed) return;
     unawaited(closeUsbDevice());
   }
 
@@ -189,78 +166,47 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       StreamController<UvcStallEvent>.broadcast();
   UvcStallDetectionConfig? _stallConfig;
   Timer? _stallTimer;
-  // Lifecycle state. An open or start owns the state it enters through _op
-  // and no other app open or start is accepted until it leaves. stopPreview,
-  // closeUsbDevice, closeFd, and dispose cancel it by clearing _op. It
-  // notices after its next await and backs out of what it did itself.
-  // _begin, _cancel, and _finish are the only writers.
+  // Lifecycle state. Every call that changes it runs as a command on one
+  // queue per instance, in call order, so the state and the native session
+  // move together. Between commands the state is one of these.
   _State _state = _State.closed;
-  _Op? _op;
 
-  bool _owns(_Op op) => !_disposed && identical(_op, op);
-
-  void _begin(_Op op, _State state) {
-    _op = op;
-    _state = state;
-  }
-
-  void _cancel(_State next) {
-    _op = null;
-    _state = next;
-  }
-
-  // Result of a synchronous call, which owns no operation.
-  void _set(_State next) {
-    assert(_op == null);
-    _state = next;
-  }
-
-  // The state a failed start leaves behind. A native start that fails
-  // before it stops the running stream leaves that stream running.
-  _State _afterFailedStart() =>
-      _bindings.uvc_is_previewing(_s) != 0 ? _State.previewing : _State.open;
-
-  // Ends an operation that still owns the session.
-  void _finish(_Op op, _State next) {
-    if (identical(_op, op)) {
-      _op = null;
-      _state = next;
-    }
-  }
-
-  // 0 when an app open or start may begin now, else the code to report. A
-  // stall restart in progress is cancelled and the app call proceeds.
-  int _refuseLifecycleCall() {
-    if (_disposed) {
-      _dartLastError = 'UvcCamera has been disposed';
-      return UvcErrorCode.noDevice.nativeValue;
-    }
-    final _Op? current = _op;
-    if (current == null) return 0;
-    if (current.internal) {
-      _cancel(_State.open);
-      return 0;
-    }
-    _dartLastError = 'Another open or preview start is in progress';
-    return UvcErrorCode.busy.nativeValue;
-  }
-
-  // Native calls of one instance run in call order, so a worker started
-  // before a cancel never runs after the operation that replaced it.
   Future<void> _nativeQueue = Future<void>.value();
-  int _queueDepth = 0;
 
-  Future<T> _serialized<T>(Future<T> Function() operation) {
-    _queueDepth += 1;
-    final Future<T> result = _nativeQueue.then((_) => operation());
+  Future<T> _serialized<T>(Future<T> Function() command) {
+    final Future<T> result = _nativeQueue.then((_) => command());
     _nativeQueue = result.then((_) {}, onError: (_) {});
-    _nativeQueue = _nativeQueue.whenComplete(() => _queueDepth -= 1);
     return result;
   }
+
+  // Bumped by stop, close, and dispose at call time. A preview verification
+  // in progress ends early with interrupted when it sees a newer value. The
+  // queued command that bumped it then runs and stops the stream.
+  int _cancelRequests = 0;
+
+  // Bumped by every app lifecycle call at call time. A stall auto-restart
+  // stops retrying when the app has moved on.
+  int _lifecycleCalls = 0;
+
+  // True while an open command waits on the platform (Android permission
+  // dialog). close and dispose cancel that immediately instead of waiting.
+  bool _openWaitingOnPlatform = false;
 
   String _nativeLastError() {
     final Pointer<Char> pointer = _bindings.uvc_last_error(_s).cast<Char>();
     return pointer == nullptr ? '' : pointer.cast<Utf8>().toDartString();
+  }
+
+  // Builds the exception for a failed call and mirrors it in lastError.
+  UvcException _fail(UvcErrorCode code, String message) {
+    _dartLastError = message;
+    return UvcException.fromNativeCode(code.nativeValue, message: message);
+  }
+
+  // Throws for a non-zero native code, with the native message.
+  void _check(int code) {
+    if (code == 0) return;
+    throw UvcException.fromNativeCode(code, message: _nativeLastError());
   }
 
   int _stallLastSequence = 0;
@@ -279,15 +225,20 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     if (_disposed) return;
     if (_errorCallable == null) {
       // Weak so an undisposed instance can still be collected and finalized.
-      final WeakReference<FfiUvcCamera> weak =
-          WeakReference<FfiUvcCamera>(this);
+      final WeakReference<FfiUvcCamera> weak = WeakReference<FfiUvcCamera>(
+        this,
+      );
       _errorCallable =
           NativeCallable<Void Function(Pointer<Void>, Pointer<Char>)>.listener(
             (Pointer<Void> data, Pointer<Char> message) =>
                 weak.target?._onNativeError(data, message),
           );
     }
-    _bindings.uvc_set_error_listener(_s, _errorCallable!.nativeFunction, nullptr);
+    _bindings.uvc_set_error_listener(
+      _s,
+      _errorCallable!.nativeFunction,
+      nullptr,
+    );
   }
 
   void _tearDownNativeErrorListener([Pointer<uvc_session_t>? session]) {
@@ -308,15 +259,31 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
 
   void _resetPreviewState() {}
 
-  // Caller has set _op to [op] and _state to starting.
+  // Runs inside a queued command.
   Future<UvcPreviewStartResult> _startPreviewInternal(
-    UvcCameraMode mode,
-    _Op op, {
+    UvcCameraMode mode, {
     required UvcPreviewPolicy policy,
     required int requiredConsecutiveValidFrames,
     required Duration timeout,
   }) async {
     final Stopwatch stopwatch = Stopwatch()..start();
+    if (_disposed || _state == _State.closed) {
+      final String message = _disposed
+          ? 'UvcCamera has been disposed'
+          : 'Camera is not open';
+      _dartLastError = message;
+      return UvcPreviewStartResult(
+        mode: mode,
+        success: false,
+        validFrameCount: 0,
+        consecutiveValidFrames: 0,
+        errorCount: 0,
+        elapsed: stopwatch.elapsed,
+        lastError: message,
+        nativeErrorCode: UvcErrorCode.noDevice.nativeValue,
+      );
+    }
+    final int cancelGeneration = _cancelRequests;
     final Stream<UvcStreamError> errors = streamErrors;
     int errorCount = 0;
     int observedErrorGeneration = 0;
@@ -338,22 +305,13 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     });
 
     try {
-      final int startResult = await _serialized(() async {
-        // Cancelled while queued. Skip the native start altogether.
-        if (!_owns(op)) return UvcErrorCode.interrupted.nativeValue;
-        final int result = await _openPreviewOffThread(mode);
-        // Cancelled while the worker was starting. Stop the stream this
-        // start began, still inside the queue slot so a successor's own
-        // native start runs after it.
-        if (!_owns(op) && result == 0 && !_disposed) _stopPreviewNative();
-        return result;
-      });
-      if (!_owns(op)) {
-        return _interrupted(mode, stopwatch, totalValidFrames,
-            consecutiveValidFrames, errorCount);
+      final int startResult = await _openPreviewOffThread(mode);
+      if (_disposed) {
+        // The dispose command queued behind this one stops the stream.
+        return _interrupted(mode, stopwatch, 0, 0, errorCount);
       }
       if (startResult != 0) {
-        _finish(op, _afterFailedStart());
+        _state = _afterFailedStart();
         final String error = _nativeLastError();
         return UvcPreviewStartResult(
           mode: mode,
@@ -366,17 +324,24 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
           nativeErrorCode: startResult,
         );
       }
+      // The stream runs from here. A stop, close, or dispose queued behind
+      // this command will stop it, so an interrupted verification only
+      // returns early.
+      _state = _State.previewing;
 
       while (stopwatch.elapsed < timeout) {
-        if (!_owns(op)) {
-          // Cancelled. Whoever cancelled already dealt with the stream.
-          return _interrupted(mode, stopwatch, totalValidFrames,
-              consecutiveValidFrames, errorCount);
+        if (_cancelRequests != cancelGeneration) {
+          return _interrupted(
+            mode,
+            stopwatch,
+            totalValidFrames,
+            consecutiveValidFrames,
+            errorCount,
+          );
         }
         if (policy == UvcPreviewPolicy.sequenceOnly) {
           final int latestSequence = latestFrameSequence();
           if (latestSequence > 0) {
-            _finish(op, _State.previewing);
             return UvcPreviewStartResult(
               mode: mode,
               success: true,
@@ -404,7 +369,6 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
           consecutiveValidFrames += delta;
           lastSequence = latestSequence;
           if (consecutiveValidFrames >= requiredConsecutiveValidFrames) {
-            _finish(op, _State.previewing);
             return UvcPreviewStartResult(
               mode: mode,
               success: true,
@@ -423,13 +387,18 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
         ]);
       }
 
-      if (!_owns(op)) {
-        return _interrupted(mode, stopwatch, totalValidFrames,
-            consecutiveValidFrames, errorCount);
+      if (_cancelRequests != cancelGeneration) {
+        return _interrupted(
+          mode,
+          stopwatch,
+          totalValidFrames,
+          consecutiveValidFrames,
+          errorCount,
+        );
       }
       final String error = lastError ?? _nativeLastError();
       _stopPreviewNative();
-      _finish(op, _State.open);
+      _state = _State.open;
       return UvcPreviewStartResult(
         mode: mode,
         success: false,
@@ -440,8 +409,6 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
         lastError: error.isNotEmpty ? error : null,
       );
     } finally {
-      // An exception must not leave the session stuck in starting.
-      if (identical(_op, op)) _finish(op, _State.open);
       await errorSub.cancel();
       stopwatch.stop();
     }
@@ -562,8 +529,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   @override
   Future<List<UvcUsbDevice>> listUsbDevices() async {
     _ensureSupportedPlatform();
-    final List<Object?>? raw =
-        await _usbChannel.invokeListMethod<Object?>('listUsbDevices');
+    final List<Object?>? raw = await _usbChannel.invokeListMethod<Object?>(
+      'listUsbDevices',
+    );
     return (raw ?? <Object?>[])
         .whereType<Map<Object?, Object?>>()
         .map(UvcUsbDevice.fromMap)
@@ -571,114 +539,90 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   }
 
   @override
-  Future<int> openUsbDevice(int deviceId) async {
+  Future<void> openUsbDevice(int deviceId) {
     _ensureSupportedPlatform();
-    final int refused = _refuseLifecycleCall();
-    if (refused != 0) return refused;
-    final _Op op = _Op(internal: false);
-    _begin(op, _State.opening);
-    _appLifecycleCall();
-    try {
-      return await _serialized(() => _openUsbDeviceTransaction(deviceId, op));
-    } catch (_) {
-      await _abortOpen(op, deviceId);
-      rethrow;
-    }
+    _lifecycleCalls += 1;
+    return _serialized(() => _openUsbDeviceCommand(deviceId));
   }
 
-  // Backs out of an open that threw while it still owned the session.
-  Future<void> _abortOpen(_Op op, int deviceId) async {
-    _releaseDeviceClaim(deviceId, op);
-    if (!identical(_op, op)) return;
-    _finish(op, _State.closed);
-    try {
-      await _closeUsbDeviceInternal();
-    } catch (_) {
-      // The original error is the one to report.
-    }
-  }
-
-  int _openCancelled() {
-    _dartLastError = 'Open cancelled: the instance was closed';
-    return UvcErrorCode.noDevice.nativeValue;
-  }
-
-  Future<int> _openUsbDeviceTransaction(int deviceId, _Op op) async {
-    if (!_owns(op)) {
-      return _openCancelled();
-    }
+  Future<void> _openUsbDeviceCommand(int deviceId) async {
+    if (_disposed)
+      throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
     _dartLastError = null;
     // An instance holds one device. Close this instance's device first.
     _stopPreviewNative();
     await _closeUsbDeviceInternal();
-    if (!_owns(op)) {
-      return _openCancelled();
-    }
     final FfiUvcCamera? holder = _deviceHolder(deviceId);
     if (holder != null && holder != this) {
-      _finish(op, _State.closed);
-      _dartLastError = 'Device $deviceId is open in another UvcCamera instance';
-      return UvcErrorCode.busy.nativeValue;
+      throw _fail(
+        UvcErrorCode.busy,
+        'Device $deviceId is open in another UvcCamera instance',
+      );
     }
     // Claim the device before the first await so a concurrent open on
     // another instance sees it as busy. Released again on failure.
-    _claimDevice(deviceId, op);
+    _openDevices[deviceId] = WeakReference<FfiUvcCamera>(this);
     final int handle = nativeSessionHandle;
     final Map<Object?, Object?>? result;
+    _openWaitingOnPlatform = true;
     try {
       result = await _usbChannel.invokeMapMethod<Object?, Object?>(
         'openUsbDevice',
         <String, Object?>{'sessionHandle': handle, 'deviceId': deviceId},
       );
     } on PlatformException catch (error) {
-      _releaseDeviceClaim(deviceId, op);
+      _releaseDeviceClaim(deviceId);
       if (error.code == 'closed') {
         // closeUsbDevice() or dispose() cancelled this open.
-        return _openCancelled();
+        throw _fail(
+          UvcErrorCode.noDevice,
+          'Open cancelled: the instance was closed',
+        );
       }
       rethrow;
+    } finally {
+      _openWaitingOnPlatform = false;
     }
-    if (!_owns(op)) {
-      // Cancelled during the platform open. A successor is queued behind
-      // this transaction and has touched nothing yet, so undo freely.
-      _releaseDeviceClaim(deviceId, op);
+    if (_disposed) {
+      _releaseDeviceClaim(deviceId);
       await _platformClose(handle);
-      return _openCancelled();
+      throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
     }
     final int fd = result?['fileDescriptor'] as int? ?? -1;
     // Opening can block for seconds while the OS finishes initialising a
     // freshly plugged camera, so it runs on a worker isolate.
     final int openResult = await Isolate.run(
-      () => _bindings.uvc_open_fd(Pointer<uvc_session_t>.fromAddress(handle), fd),
+      () =>
+          _bindings.uvc_open_fd(Pointer<uvc_session_t>.fromAddress(handle), fd),
     );
-    if (!_owns(op)) {
-      // Cancelled while the worker was opening. A successor is queued behind
-      // this transaction and has touched nothing yet, so undo freely.
-      _releaseDeviceClaim(deviceId, op);
-      if (!_disposed) {
-        if (openResult == 0) _bindings.uvc_close_device(_s);
-        await _platformClose(handle);
-      }
-      return _openCancelled();
+    if (_disposed) {
+      // The dispose command queued behind this one closes the device.
+      _releaseDeviceClaim(deviceId);
+      throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
     }
     if (openResult == 0) {
       _setupNativeErrorListener();
       _rememberOpenedDevice(deviceId);
-      _finish(op, _State.open);
-      return 0;
+      _state = _State.open;
+      return;
     }
     // The platform-side open succeeded but the native session failed to
     // attach. Close it so a failure leaves nothing open.
-    await _abortOpen(op, deviceId);
-    return openResult;
+    _releaseDeviceClaim(deviceId);
+    final String message = _nativeLastError();
+    try {
+      await _closeUsbDeviceInternal();
+    } catch (_) {
+      // The original error is the one to report.
+    }
+    throw UvcException.fromNativeCode(openResult, message: message);
   }
 
   Future<void> _platformClose(int handle) async {
     try {
-      await _usbChannel.invokeMethod<void>(
-        'closeUsbDevice',
-        <String, Object?>{'sessionHandle': handle},
-      );
+      await _usbChannel.invokeMethod<void>('closeUsbDevice', <String, Object?>{
+        'sessionHandle': handle,
+      });
     } catch (_) {
       // Nothing left to release.
     }
@@ -687,24 +631,29 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   @override
   Future<void> closeUsbDevice() {
     _ensureSupportedPlatform();
-    // Cancels an open or start in progress. It notices after its next await
-    // and backs out.
-    _cancel(_State.closed);
-    _appLifecycleCall();
-    return _closeUsbDeviceInternal();
+    _lifecycleCalls += 1;
+    _cancelRequests += 1;
+    // An open waiting on the platform is cancelled now instead of after it.
+    if (_openWaitingOnPlatform) unawaited(_platformClose(nativeSessionHandle));
+    return _serialized(() async {
+      if (_disposed) return;
+      _dartLastError = null;
+      _stopPreviewNative();
+      await _closeUsbDeviceInternal();
+    });
   }
 
+  // Runs inside a queued command.
   Future<void> _closeUsbDeviceInternal() async {
-    _dartLastError = null;
     _forgetOpenedDevice();
     _resetStallTracking();
+    _state = _State.closed;
     // Closing joins the stream thread, so do it before the callable goes away.
     _bindings.uvc_close_device(_s);
     _tearDownNativeErrorListener();
-    await _usbChannel.invokeMethod<void>(
-      'closeUsbDevice',
-      <String, Object?>{'sessionHandle': nativeSessionHandle},
-    );
+    await _usbChannel.invokeMethod<void>('closeUsbDevice', <String, Object?>{
+      'sessionHandle': nativeSessionHandle,
+    });
   }
 
   Future<void>? _disposing;
@@ -713,30 +662,35 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   Future<void> dispose() => _disposing ??= _disposeImpl();
 
   Future<void> _disposeImpl() async {
-    if (_disposed) return;
     // Mark disposed before the first await so a re-entrant dispose() or a
     // concurrent open cannot see the session.
     _disposed = true;
-    _cancel(_State.disposed);
-    _stallGeneration += 1;
+    _lifecycleCalls += 1;
+    _cancelRequests += 1;
     _forgetOpenedDevice();
     final Pointer<uvc_session_t>? session = _session;
     _session = null;
     _stallTimer?.cancel();
     _stallTimer = null;
     _stallConfig = null;
-    if (session != null) {
-      _finalizer.detach(this);
-      // Release the platform side first. On Android this also cancels a
-      // USB permission dialog an open may still be waiting on.
-      await _platformClose(session.address);
-      // A queued open or start may still be running. Let the queue drain
-      // before the session goes away.
-      await _nativeQueue;
+    if (session == null) {
+      _state = _State.disposed;
+      await _streamErrorController.close();
+      await _stallEventController.close();
+      return;
+    }
+    _finalizer.detach(this);
+    // An open waiting on the platform is cancelled now instead of after it.
+    if (_openWaitingOnPlatform) await _platformClose(session.address);
+    // Queued commands run first and skip themselves. The session goes away
+    // only after them.
+    await _serialized(() async {
+      _state = _State.disposed;
       try {
         _bindings.uvc_stop_preview(session);
         _bindings.uvc_close_device(session);
         _tearDownNativeErrorListener(session);
+        await _platformClose(session.address);
         await _textureChannel.invokeMethod<void>(
           'detachPreviewSession',
           <String, Object?>{'sessionHandle': session.address},
@@ -746,110 +700,65 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
         await _streamErrorController.close();
         await _stallEventController.close();
       }
-      return;
-    }
-    await _streamErrorController.close();
-    await _stallEventController.close();
+    });
   }
 
   @override
-  int openFd(int fd) {
+  Future<void> openFd(int fd) {
     _ensureAndroidOnlyApi('openFd');
     if (fd < 0) {
-      _dartLastError = 'Invalid file descriptor: $fd';
-      return UvcErrorCode.invalidParam.nativeValue;
+      throw _fail(UvcErrorCode.invalidParam, 'Invalid file descriptor: $fd');
     }
-    // Synchronous, so it cannot be ordered behind queued or running work.
-    final int refused = _refuseSync();
-    if (refused != 0) return refused;
-    _appLifecycleCall();
-    // A device opened through openUsbDevice is replaced by the raw
-    // descriptor. Drop its tracking and release its platform connection.
-    if (_openedDeviceId != null) {
-      _forgetOpenedDevice();
-      unawaited(_platformClose(nativeSessionHandle));
-    }
-    final int result = _openFdNative(fd);
-    _set(result == 0 ? _State.open : _State.closed);
-    return result;
-  }
-
-  /// Shared native-open step. On Android the value is a real file descriptor;
-  /// on Windows the native layer interprets it as the enumeration device id
-  /// handed back by the openUsbDevice platform channel. That mapping is an
-  /// internal detail — the public [openFd] stays Android-only.
-  int _openFdNative(int fd) {
-    _dartLastError = null;
-    final int result = _bindings.uvc_open_fd(_s, fd);
-    if (result == 0) {
+    _lifecycleCalls += 1;
+    return _serialized(() async {
+      if (_disposed)
+        throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+      _dartLastError = null;
+      _resetStallTracking();
+      // A device opened through openUsbDevice is replaced by the raw
+      // descriptor. Drop its tracking and release its platform connection.
+      if (_openedDeviceId != null) {
+        _forgetOpenedDevice();
+        await _platformClose(nativeSessionHandle);
+      }
+      final int result = _bindings.uvc_open_fd(_s, fd);
+      if (result != 0) {
+        _state = _State.closed;
+        _check(result);
+      }
       _setupNativeErrorListener();
-    }
-    return result;
+      _state = _State.open;
+    });
   }
 
   @override
-  int openPreview(UvcCameraMode mode) {
-    final int refused = _refuseSyncStart();
-    if (refused != 0) return refused;
-    _appLifecycleCall();
-    _recordPreviewRequest(mode);
-    final int result = _bindings.uvc_start_preview(
-      _s,
-      mode.frameFormat,
-      mode.width,
-      mode.height,
-      mode.fps,
-    );
-    _set(result == 0 ? _State.previewing : _afterFailedStart());
-    return result;
+  Future<void> openPreview(UvcCameraMode mode) {
+    _lifecycleCalls += 1;
+    return _serialized(() async {
+      if (_disposed)
+        throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+      if (_state == _State.closed) {
+        throw _fail(UvcErrorCode.noDevice, 'Camera is not open');
+      }
+      final int result = await _openPreviewOffThread(mode);
+      if (_disposed) {
+        throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+      }
+      if (result != 0) {
+        _state = _afterFailedStart();
+        _check(result);
+      }
+      _state = _State.previewing;
+    });
   }
 
-  // 0 when a preview may start now, else the error code to report.
-  int _refuseStart() {
-    if (_state == _State.closed) {
-      _dartLastError = 'Camera is not open';
-      return UvcErrorCode.noDevice.nativeValue;
-    }
-    return _refuseLifecycleCall();
-  }
+  // The state a failed start leaves behind. A native start that fails
+  // before it stops the running stream leaves that stream running.
+  _State _afterFailedStart() =>
+      _bindings.uvc_is_previewing(_s) != 0 ? _State.previewing : _State.open;
 
-  // Synchronous calls cannot be ordered behind queued or running native
-  // work. Checked before anything is cancelled, so a refusal has no side
-  // effect.
-  int _refuseSync() {
-    if (_disposed) {
-      _dartLastError = 'UvcCamera has been disposed';
-      return UvcErrorCode.noDevice.nativeValue;
-    }
-    if (_queueDepth > 0) {
-      _dartLastError = 'A previous open or preview start is still finishing';
-      return UvcErrorCode.busy.nativeValue;
-    }
-    return _refuseLifecycleCall();
-  }
-
-  int _refuseSyncStart() {
-    if (_state == _State.closed) {
-      _dartLastError = 'Camera is not open';
-      return UvcErrorCode.noDevice.nativeValue;
-    }
-    return _refuseSync();
-  }
-
-  UvcPreviewStartResult _refusedStart(UvcCameraMode mode, int code) =>
-      UvcPreviewStartResult(
-        mode: mode,
-        success: false,
-        validFrameCount: 0,
-        consecutiveValidFrames: 0,
-        errorCount: 0,
-        elapsed: Duration.zero,
-        lastError: _dartLastError,
-        nativeErrorCode: code,
-      );
-
-  // Same as openPreview, with the native call on a worker isolate so the
-  // device negotiation does not block the UI.
+  // Native start on a worker isolate so the device negotiation does not
+  // block the UI.
   Future<int> _openPreviewOffThread(UvcCameraMode mode) {
     _recordPreviewRequest(mode);
     final int session = _s.address;
@@ -894,33 +803,30 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     int consecutiveValidFrames = 3,
     Duration timeout = const Duration(seconds: 2),
   }) {
-    if (policy == UvcPreviewPolicy.stableFrames && consecutiveValidFrames <= 0) {
+    if (policy == UvcPreviewPolicy.stableFrames &&
+        consecutiveValidFrames <= 0) {
       throw ArgumentError.value(
         consecutiveValidFrames,
         'consecutiveValidFrames',
         'Must be greater than 0.',
       );
     }
-    final int refused = _refuseStart();
-    if (refused != 0) {
-      return Future<UvcPreviewStartResult>.value(_refusedStart(mode, refused));
-    }
-    final _Op op = _Op(internal: false);
-    _begin(op, _State.starting);
+    _lifecycleCalls += 1;
     _lastPreviewRequest = _PreviewRequest(
       mode: mode,
       policy: policy,
       consecutiveValidFrames: consecutiveValidFrames,
       timeout: timeout,
     );
-    _appLifecycleCall();
-    return _startPreviewInternal(
-      mode,
-      op,
-      policy: policy,
-      requiredConsecutiveValidFrames: consecutiveValidFrames,
-      timeout: timeout,
-    );
+    return _serialized(() async {
+      _resetStallTracking();
+      return _startPreviewInternal(
+        mode,
+        policy: policy,
+        requiredConsecutiveValidFrames: consecutiveValidFrames,
+        timeout: timeout,
+      );
+    });
   }
 
   @override
@@ -939,10 +845,10 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
         'Must be greater than 0.',
       );
     }
-    final List<UvcCameraMode> modes = (candidates ??
-            _defaultAutoCandidates(preference))
-        .take(maxCandidates)
-        .toList();
+    final List<UvcCameraMode> modes =
+        (candidates ?? _defaultAutoCandidates(preference))
+            .take(maxCandidates)
+            .toList();
     final List<UvcPreviewStartResult> attempts = <UvcPreviewStartResult>[];
     for (final UvcCameraMode mode in modes) {
       final UvcPreviewStartResult result = await startPreview(
@@ -954,11 +860,10 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       attempts.add(result);
       if (result.success) break;
       // A failed attempt leaves the device open for the next candidate.
-      // Interrupted, closed, or disposed means the app moved on.
-      if (result.nativeErrorCode == UvcErrorCode.interrupted.nativeValue ||
-          result.nativeErrorCode == UvcErrorCode.busy.nativeValue ||
-          _state == _State.closed ||
-          _disposed) {
+      // Interrupted or no device means the app moved on.
+      final int code = result.nativeErrorCode;
+      if (code == UvcErrorCode.interrupted.nativeValue ||
+          code == UvcErrorCode.noDevice.nativeValue) {
         break;
       }
     }
@@ -966,15 +871,16 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   }
 
   /// Orders descriptor-reported modes MJPEG before uncompressed formats, then
-  /// by resolution and frame rate — ascending for
+  /// by resolution and frame rate. Ascending for
   /// [UvcAutoPreviewPreference.reliability], descending for
   /// [UvcAutoPreviewPreference.quality].
   List<UvcCameraMode> _defaultAutoCandidates(
     UvcAutoPreviewPreference preference,
   ) {
     int formatRank(UvcCameraMode mode) => mode.formatName == 'MJPEG' ? 0 : 1;
-    final int direction =
-        preference == UvcAutoPreviewPreference.reliability ? 1 : -1;
+    final int direction = preference == UvcAutoPreviewPreference.reliability
+        ? 1
+        : -1;
     // H264 modes are opt-in via an explicit startPreview: keyframe timing and
     // decoder behavior vary too much per device for the auto sequence.
     final List<UvcCameraMode> modes = supportedModes()
@@ -994,40 +900,41 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   void _stopPreviewNative() {
     _bindings.uvc_stop_preview(_s);
     _resetPreviewState();
+    if (_state == _State.previewing) _state = _State.open;
   }
 
   @override
-  void stopPreview() {
-    _dartLastError = null;
-    _appLifecycleCall();
-    // Also cancels a start in progress. It notices after its next await and
-    // stops the stream it started.
-    if (_state == _State.previewing || _state == _State.starting) {
-      _cancel(_State.open);
-    }
-    _stopPreviewNative();
+  Future<void> stopPreview() {
+    _lifecycleCalls += 1;
+    _cancelRequests += 1;
+    return _serialized(() async {
+      if (_disposed) return;
+      _dartLastError = null;
+      _resetStallTracking();
+      _stopPreviewNative();
+    });
   }
 
   @override
-  void closeFd() {
+  Future<void> closeFd() {
     _ensureAndroidOnlyApi('closeFd');
-    if (_disposed) return;
-    // A USB permission dialog an open may still be waiting on, or a
-    // connection openUsbDevice made, is released on the platform side.
-    final bool platformHeld =
-        _state == _State.opening || _openedDeviceId != null;
-    _cancel(_State.closed);
-    _appLifecycleCall();
-    _dartLastError = null;
-    _forgetOpenedDevice();
-    _bindings.uvc_close_device(_s);
-    _tearDownNativeErrorListener();
-    _resetPreviewState();
-    if (platformHeld) unawaited(_platformClose(nativeSessionHandle));
+    _lifecycleCalls += 1;
+    _cancelRequests += 1;
+    if (_openWaitingOnPlatform) unawaited(_platformClose(nativeSessionHandle));
+    return _serialized(() async {
+      if (_disposed) return;
+      _dartLastError = null;
+      _stopPreviewNative();
+      final bool platformHeld = _openedDeviceId != null;
+      _forgetOpenedDevice();
+      _resetStallTracking();
+      _state = _State.closed;
+      _bindings.uvc_close_device(_s);
+      _tearDownNativeErrorListener();
+      _resetPreviewState();
+      if (platformHeld) await _platformClose(nativeSessionHandle);
+    });
   }
-
-  @override
-  void closeDevice() => closeFd();
 
   @override
   bool get isPreviewing => _bindings.uvc_is_previewing(_s) != 0;
@@ -1073,15 +980,6 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     _stallConfig = null;
     _stallTimer?.cancel();
     _stallTimer = null;
-    _resetStallTracking();
-  }
-
-  // Bumped by every app lifecycle call. A restart in progress stops when the
-  // app has moved on.
-  int _stallGeneration = 0;
-
-  void _appLifecycleCall() {
-    _stallGeneration += 1;
     _resetStallTracking();
   }
 
@@ -1135,33 +1033,32 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     Duration silence,
   ) async {
     _restartInProgress = true;
-    final int generation = _stallGeneration;
+    final int calls = _lifecycleCalls;
     try {
       while (_restartAttempts < config.maxRestartAttempts) {
         // The first attempt restarts a stalled preview. Later attempts follow
-        // our own failed ones, which leave the session open.
-        final _State required =
-            _restartAttempts == 0 ? _State.previewing : _State.open;
-        if (_state != required) return;
-        if (_stallGeneration != generation || _op != null) return;
+        // our own failed ones, which leave the device open. Any app
+        // lifecycle call in between means the app moved on.
+        final _State required = _restartAttempts == 0
+            ? _State.previewing
+            : _State.open;
+        if (_state != required || _lifecycleCalls != calls) return;
         _restartAttempts += 1;
         final int attempt = _restartAttempts;
-        _stopPreviewNative();
-        // Internal, so an app open or start takes over instead of seeing
-        // busy.
-        final _Op op = _Op(internal: true);
-        _begin(op, _State.starting);
-        final UvcPreviewStartResult result = await _startPreviewInternal(
-          request.mode,
-          op,
-          policy: request.policy,
-          requiredConsecutiveValidFrames: request.consecutiveValidFrames,
-          timeout: request.timeout,
-        );
-        // If stop, close, dispose, or an app open or start ran during the
-        // attempt, their call wins.
+        final UvcPreviewStartResult result = await _serialized(() async {
+          if (_disposed || _lifecycleCalls != calls) {
+            return _interrupted(request.mode, Stopwatch(), 0, 0, 0);
+          }
+          _stopPreviewNative();
+          return _startPreviewInternal(
+            request.mode,
+            policy: request.policy,
+            requiredConsecutiveValidFrames: request.consecutiveValidFrames,
+            timeout: request.timeout,
+          );
+        });
         if (result.nativeErrorCode == UvcErrorCode.interrupted.nativeValue ||
-            _stallGeneration != generation ||
+            _lifecycleCalls != calls ||
             _stallConfig == null) {
           return;
         }
@@ -1276,9 +1173,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       return UvcStillPicture(
         width: nativeWidth.value,
         height: nativeHeight.value,
-        jpegBytes: Uint8List.fromList(
-          nativeBuffer.asTypedList(encodedBytes),
-        ),
+        jpegBytes: Uint8List.fromList(nativeBuffer.asTypedList(encodedBytes)),
         sequence: nativeSequence.value,
       );
     } finally {
@@ -1290,7 +1185,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   }
 
   @override
-  int startVideoRecording(
+  void startVideoRecording(
     String path, {
     int bitrateBps = 0,
     UvcPreviewTransform? transform,
@@ -1300,14 +1195,16 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     final int fpsHint = _lastPreviewRequest?.mode.fps ?? 0;
     final Pointer<Utf8> nativePath = path.toNativeUtf8(allocator: calloc);
     try {
-      return _bindings.uvc_start_recording(
-        _s,
-        nativePath.cast(),
-        bitrateBps,
-        fpsHint,
-        effective.rotation,
-        effective.flipHorizontal ? 1 : 0,
-        effective.flipVertical ? 1 : 0,
+      _check(
+        _bindings.uvc_start_recording(
+          _s,
+          nativePath.cast(),
+          bitrateBps,
+          fpsHint,
+          effective.rotation,
+          effective.flipHorizontal ? 1 : 0,
+          effective.flipVertical ? 1 : 0,
+        ),
       );
     } finally {
       calloc.free(nativePath);
@@ -1315,7 +1212,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   }
 
   @override
-  int stopVideoRecording() => _bindings.uvc_stop_recording(_s);
+  void stopVideoRecording() => _check(_bindings.uvc_stop_recording(_s));
 
   @override
   bool get isRecording => _bindings.uvc_is_recording(_s) != 0;
@@ -1324,10 +1221,12 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   int latestFrameSequence() => _bindings.uvc_latest_frame_sequence(_s);
 
   @override
-  UvcStreamStats getStreamStats() => _readJsonObject(
-    _bindings.uvc_get_stream_stats_json,
-    UvcStreamStats.fromJson,
-  ) ?? const UvcStreamStats.zero();
+  UvcStreamStats getStreamStats() =>
+      _readJsonObject(
+        _bindings.uvc_get_stream_stats_json,
+        UvcStreamStats.fromJson,
+      ) ??
+      const UvcStreamStats.zero();
 
   @override
   Future<int> createPreviewTexture() async {
@@ -1444,8 +1343,8 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
 
   /// Sets [controlId] to [value]. Returns 0 on success, negative on error.
   @override
-  int setControl(UvcControlId controlId, int value) =>
-      _bindings.uvc_ctrl_set(_s, controlId.nativeValue, value);
+  void setControl(UvcControlId controlId, int value) =>
+      _check(_bindings.uvc_ctrl_set(_s, controlId.nativeValue, value));
 
   @override
   UvcWhiteBalanceComponent? getWhiteBalanceComponent() => _readJsonObject(
@@ -1454,8 +1353,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   );
 
   @override
-  int setWhiteBalanceComponent(UvcWhiteBalanceComponent value) =>
-      _bindings.uvc_set_white_balance_component_values(_s, value.blue, value.red);
+  void setWhiteBalanceComponent(UvcWhiteBalanceComponent value) => _check(
+    _bindings.uvc_set_white_balance_component_values(_s, value.blue, value.red),
+  );
 
   @override
   UvcFocusRelativeControl? getFocusRelativeControl() => _readJsonObject(
@@ -1464,8 +1364,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   );
 
   @override
-  int setFocusRelativeControl(UvcFocusRelativeControl value) =>
-      _bindings.uvc_set_focus_rel_values(_s, value.focusRel, value.speed);
+  void setFocusRelativeControl(UvcFocusRelativeControl value) => _check(
+    _bindings.uvc_set_focus_rel_values(_s, value.focusRel, value.speed),
+  );
 
   @override
   UvcZoomRelativeControl? getZoomRelativeControl() => _readJsonObject(
@@ -1474,8 +1375,14 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   );
 
   @override
-  int setZoomRelativeControl(UvcZoomRelativeControl value) => _bindings
-      .uvc_set_zoom_rel_values(_s, value.zoomRel, value.digitalZoom, value.speed);
+  void setZoomRelativeControl(UvcZoomRelativeControl value) => _check(
+    _bindings.uvc_set_zoom_rel_values(
+      _s,
+      value.zoomRel,
+      value.digitalZoom,
+      value.speed,
+    ),
+  );
 
   @override
   UvcPanTiltAbsoluteControl? getPanTiltAbsoluteControl() => _readJsonObject(
@@ -1484,8 +1391,8 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   );
 
   @override
-  int setPanTiltAbsoluteControl(UvcPanTiltAbsoluteControl value) =>
-      _bindings.uvc_set_pantilt_abs_values(_s, value.pan, value.tilt);
+  void setPanTiltAbsoluteControl(UvcPanTiltAbsoluteControl value) =>
+      _check(_bindings.uvc_set_pantilt_abs_values(_s, value.pan, value.tilt));
 
   @override
   UvcPanTiltRelativeControl? getPanTiltRelativeControl() => _readJsonObject(
@@ -1494,14 +1401,15 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   );
 
   @override
-  int setPanTiltRelativeControl(UvcPanTiltRelativeControl value) =>
-      _bindings.uvc_set_pantilt_rel_values(
-        _s,
-        value.panRel,
-        value.panSpeed,
-        value.tiltRel,
-        value.tiltSpeed,
-      );
+  void setPanTiltRelativeControl(UvcPanTiltRelativeControl value) => _check(
+    _bindings.uvc_set_pantilt_rel_values(
+      _s,
+      value.panRel,
+      value.panSpeed,
+      value.tiltRel,
+      value.tiltSpeed,
+    ),
+  );
 
   @override
   UvcRollRelativeControl? getRollRelativeControl() => _readJsonObject(
@@ -1510,8 +1418,8 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   );
 
   @override
-  int setRollRelativeControl(UvcRollRelativeControl value) =>
-      _bindings.uvc_set_roll_rel_values(_s, value.rollRel, value.speed);
+  void setRollRelativeControl(UvcRollRelativeControl value) =>
+      _check(_bindings.uvc_set_roll_rel_values(_s, value.rollRel, value.speed));
 
   @override
   UvcDigitalWindowControl? getDigitalWindowControl() => _readJsonObject(
@@ -1520,16 +1428,17 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   );
 
   @override
-  int setDigitalWindowControl(UvcDigitalWindowControl value) =>
-      _bindings.uvc_set_digital_window_values(
-        _s,
-        value.windowTop,
-        value.windowLeft,
-        value.windowBottom,
-        value.windowRight,
-        value.numSteps,
-        value.numStepsUnits,
-      );
+  void setDigitalWindowControl(UvcDigitalWindowControl value) => _check(
+    _bindings.uvc_set_digital_window_values(
+      _s,
+      value.windowTop,
+      value.windowLeft,
+      value.windowBottom,
+      value.windowRight,
+      value.numSteps,
+      value.numStepsUnits,
+    ),
+  );
 
   @override
   UvcRegionOfInterestControl? getRegionOfInterestControl() => _readJsonObject(
@@ -1538,15 +1447,16 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   );
 
   @override
-  int setRegionOfInterestControl(UvcRegionOfInterestControl value) =>
-      _bindings.uvc_set_region_of_interest_values(
-        _s,
-        value.roiTop,
-        value.roiLeft,
-        value.roiBottom,
-        value.roiRight,
-        value.autoControls,
-      );
+  void setRegionOfInterestControl(UvcRegionOfInterestControl value) => _check(
+    _bindings.uvc_set_region_of_interest_values(
+      _s,
+      value.roiTop,
+      value.roiLeft,
+      value.roiBottom,
+      value.roiRight,
+      value.autoControls,
+    ),
+  );
 
   @override
   UvcPreviewTransform get previewTransform => _previewTransform;
@@ -1592,9 +1502,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   @override
   void togglePreviewFlipVertical() {
     setPreviewTransform(
-      _previewTransform.copyWith(
-        flipVertical: !_previewTransform.flipVertical,
-      ),
+      _previewTransform.copyWith(flipVertical: !_previewTransform.flipVertical),
     );
   }
 

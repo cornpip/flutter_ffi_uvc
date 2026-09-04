@@ -1,21 +1,26 @@
-## 0.13.0-wip
+## 1.0.0-wip
 
+- **BREAKING** `stopPreview()`, `closeFd()`, `openFd()`, and `openPreview()`
+  return a `Future`. Lifecycle calls on one instance run one at a time in
+  call order. `stopPreview()`, `closeUsbDevice()`, and `dispose()` interrupt
+  a `startPreview()` in progress, which reports `UvcErrorCode.interrupted`
+- **BREAKING** calls that can fail throw `UvcException` instead of returning
+  an int code: `openUsbDevice()`, `openFd()`, `openPreview()`,
+  `startVideoRecording()`, `stopVideoRecording()`, `setControl()`, and the
+  compound control setters
+- **BREAKING** remove `closeDevice()`, deprecated since 0.1.0. Use
+  `closeFd()`
 - add multiple simultaneous cameras: `UvcCamera()` creates an independent
   instance and `dispose()` releases it. `uvcCamera` stays the shared default
   - `deviceEvents` is shared by all instances
-  - `openUsbDevice()` returns `UvcErrorCode.busy` for a device another
+  - `openUsbDevice()` fails with `UvcErrorCode.busy` for a device another
     instance already holds open
   - an undisposed instance releases its camera when garbage collected
 - add `openedDeviceId`
-- **BREAKING** for classes that `implements UvcCamera` (test fakes and
-  mocks): add `dispose()` and `openedDeviceId`. Callers are unaffected
 - improve `openUsbDevice()`, `startPreview()`, and `startPreviewAuto()` to
   run the native open and stream start off the UI thread
-- change overlapping lifecycle calls: a second open or start is refused with
-  `UvcErrorCode.busy`, and stop, close, or dispose cancel the one in progress
-  with `UvcErrorCode.interrupted`
-- change detach handling: an instance whose device is unplugged stops its
-  preview and closes the device itself
+- change detach handling: an instance whose device is unplugged closes the
+  device itself
 - change `lastError` on Windows to clear once frames are delivered again,
   matching Android and Linux
 - fix `ensureCameraPermission()` never completing for a second concurrent

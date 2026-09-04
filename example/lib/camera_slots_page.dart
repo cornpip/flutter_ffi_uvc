@@ -19,7 +19,11 @@ class CameraSlotsPage extends StatefulWidget {
 }
 
 class _CameraSlot {
-  _CameraSlot({required this.camera, required this.ownsCamera, required this.id});
+  _CameraSlot({
+    required this.camera,
+    required this.ownsCamera,
+    required this.id,
+  });
 
   final UvcCamera camera;
   final bool ownsCamera;
@@ -162,9 +166,7 @@ class _SlotBar extends StatelessWidget {
                           child: InputChip(
                             label: Text('Camera ${slots[i].id}'),
                             selected: !sideBySide && i == current,
-                            onSelected: sideBySide
-                                ? null
-                                : (_) => onSelect(i),
+                            onSelected: sideBySide ? null : (_) => onSelect(i),
                             // The first slot is the shared instance and stays.
                             onDeleted: slots[i].ownsCamera
                                 ? () => onRemove(i)
