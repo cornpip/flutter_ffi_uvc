@@ -464,40 +464,53 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     )
     nativeCopy,
   ) {
-    final int width = _bindings.uvc_frame_width(_s);
-    final int height = _bindings.uvc_frame_height(_s);
-    if (width <= 0 || height <= 0) {
-      return null;
-    }
-
-    final int expectedBytes = width * height * 4;
-    final Pointer<Uint8> nativeBuffer = calloc<Uint8>(expectedBytes);
-    final Pointer<Int> nativeWidth = calloc<Int>();
-    final Pointer<Int> nativeHeight = calloc<Int>();
-    final Pointer<Int64> nativeSequence = calloc<Int64>();
-    try {
-      final int copiedBytes = nativeCopy(
-        nativeBuffer,
-        expectedBytes,
-        nativeWidth,
-        nativeHeight,
-        nativeSequence,
-      );
-      if (copiedBytes <= 0) {
+    int width = _bindings.uvc_frame_width(_s);
+    int height = _bindings.uvc_frame_height(_s);
+    // A mode switch on the worker isolate can change the frame size between
+    // the size query and the copy. A copy that does not match the size it
+    // reports is retried once with that size.
+    for (int attempt = 0; attempt < 2; attempt++) {
+      if (width <= 0 || height <= 0) {
         return null;
       }
-      return UvcPreviewFrame(
-        width: nativeWidth.value,
-        height: nativeHeight.value,
-        rgbaBytes: Uint8List.fromList(nativeBuffer.asTypedList(copiedBytes)),
-        sequence: nativeSequence.value,
-      );
-    } finally {
-      calloc.free(nativeBuffer);
-      calloc.free(nativeWidth);
-      calloc.free(nativeHeight);
-      calloc.free(nativeSequence);
+      final int expectedBytes = width * height * 4;
+      final Pointer<Uint8> nativeBuffer = calloc<Uint8>(expectedBytes);
+      final Pointer<Int> nativeWidth = calloc<Int>();
+      final Pointer<Int> nativeHeight = calloc<Int>();
+      final Pointer<Int64> nativeSequence = calloc<Int64>();
+      try {
+        final int copiedBytes = nativeCopy(
+          nativeBuffer,
+          expectedBytes,
+          nativeWidth,
+          nativeHeight,
+          nativeSequence,
+        );
+        if (copiedBytes <= 0) {
+          return null;
+        }
+        final int copiedWidth = nativeWidth.value;
+        final int copiedHeight = nativeHeight.value;
+        if (copiedBytes == copiedWidth * copiedHeight * 4) {
+          return UvcPreviewFrame(
+            width: copiedWidth,
+            height: copiedHeight,
+            rgbaBytes: Uint8List.fromList(
+              nativeBuffer.asTypedList(copiedBytes),
+            ),
+            sequence: nativeSequence.value,
+          );
+        }
+        width = copiedWidth;
+        height = copiedHeight;
+      } finally {
+        calloc.free(nativeBuffer);
+        calloc.free(nativeWidth);
+        calloc.free(nativeHeight);
+        calloc.free(nativeSequence);
+      }
     }
+    return null;
   }
 
   UvcPreviewFrame? _copyLatestFrameInternal() => _copyFrameWithMetadata(
@@ -898,13 +911,15 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
         'Must be greater than 0.',
       );
     }
-    final List<UvcCameraMode> modes =
-        (candidates ?? _defaultAutoCandidates(preference))
-            .take(maxCandidates)
-            .toList();
-    final List<UvcPreviewStartResult> attempts = <UvcPreviewStartResult>[];
     _lifecycleCalls += 1;
     final int calls = _lifecycleCalls;
+    // Enumerated on the queue so an open still in progress has finished.
+    final List<UvcCameraMode> modes = await _serialized(
+      () async => (candidates ?? _defaultAutoCandidates(preference))
+          .take(maxCandidates)
+          .toList(),
+    );
+    final List<UvcPreviewStartResult> attempts = <UvcPreviewStartResult>[];
     for (final UvcCameraMode mode in modes) {
       final UvcPreviewStartResult result = await _queueStart(
         mode,
