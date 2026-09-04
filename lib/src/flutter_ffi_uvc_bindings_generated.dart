@@ -34,8 +34,9 @@ class FlutterFfiUvcBindings {
   late final _uvc_session_create = _uvc_session_createPtr
       .asFunction<ffi.Pointer<uvc_session_t> Function()>();
 
-  /// Stops preview and recording, closes the device, and frees the session.
-  /// Waits for every acquire pin to be released. No listener fires afterwards.
+  /// Drains the request queue, stops preview and recording, closes the
+  /// device, and frees the session. Waits for every acquire pin to be
+  /// released. No listener fires afterwards.
   void uvc_session_destroy(ffi.Pointer<uvc_session_t> session) {
     return _uvc_session_destroy(session);
   }
@@ -99,8 +100,10 @@ class FlutterFfiUvcBindings {
   late final _uvc_session_acquire_id = _uvc_session_acquire_idPtr
       .asFunction<ffi.Pointer<uvc_session_t> Function(int)>();
 
-  /// Opens a device on the session. fd is a USB device node descriptor on
-  /// Android and Linux and the enumeration device id on Windows. A device
+  /// Synchronous lifecycle. These block the calling thread and bypass the
+  /// request queue below, which is built on them. The Dart layer uses the
+  /// queue. Opens a device on the session. fd is a USB device node descriptor
+  /// on Android and Linux and the enumeration device id on Windows. A device
   /// already open on this session is closed first.
   int uvc_open_fd(ffi.Pointer<uvc_session_t> session, int fd) {
     return _uvc_open_fd(session, fd);
@@ -381,6 +384,339 @@ class FlutterFfiUvcBindings {
         void Function(
           ffi.Pointer<uvc_session_t>,
           uvc_error_listener_t,
+          ffi.Pointer<ffi.Void>,
+        )
+      >();
+
+  void uvc_set_request_listener(
+    ffi.Pointer<uvc_session_t> session,
+    uvc_request_listener_t listener,
+    ffi.Pointer<ffi.Void> user_data,
+  ) {
+    return _uvc_set_request_listener(session, listener, user_data);
+  }
+
+  late final _uvc_set_request_listenerPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Void Function(
+            ffi.Pointer<uvc_session_t>,
+            uvc_request_listener_t,
+            ffi.Pointer<ffi.Void>,
+          )
+        >
+      >('uvc_set_request_listener');
+  late final _uvc_set_request_listener = _uvc_set_request_listenerPtr
+      .asFunction<
+        void Function(
+          ffi.Pointer<uvc_session_t>,
+          uvc_request_listener_t,
+          ffi.Pointer<ffi.Void>,
+        )
+      >();
+
+  /// Queues an open. The worker closes the device the session holds, then
+  /// waits for uvc_supply_fd with this request id. A stop or close queued
+  /// meanwhile interrupts the wait.
+  int uvc_request_open(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_request_open(session);
+  }
+
+  late final _uvc_request_openPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Int64 Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_request_open');
+  late final _uvc_request_open = _uvc_request_openPtr
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
+
+  /// Hands the fd (or Windows device id) to a queued open. fd < 0 fails the
+  /// open with UVC_ERROR_NO_DEVICE. Returns 0 when the request took the fd,
+  /// which the session then owns until it reports device_released, and
+  /// UVC_ERROR_INVALID_PARAM when no such open is waiting, in which case the
+  /// caller still owns the fd.
+  int uvc_supply_fd(
+    ffi.Pointer<uvc_session_t> session,
+    int request_id,
+    int fd,
+  ) {
+    return _uvc_supply_fd(session, request_id, fd);
+  }
+
+  late final _uvc_supply_fdPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(ffi.Pointer<uvc_session_t>, ffi.Int64, ffi.Int)
+        >
+      >('uvc_supply_fd');
+  late final _uvc_supply_fd = _uvc_supply_fdPtr
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>, int, int)>();
+
+  /// Queues a stream start with verification. timeout_ms bounds the
+  /// verification. The result JSON is readable with
+  /// uvc_take_request_result_json until the next start or auto completes:
+  /// {"success":bool,"validFrameCount":n,"consecutiveValidFrames":n,
+  /// "errorCount":n,"elapsedMs":n,"lastError":"..","nativeErrorCode":n,
+  /// "frameFormat":n,"width":n,"height":n,"fps":n}
+  /// A verification that times out stops the stream. A native start that
+  /// fails may leave a previous stream running, as uvc_start_preview does.
+  int uvc_request_start(
+    ffi.Pointer<uvc_session_t> session,
+    uvc_mode_t mode,
+    int policy,
+    int consecutive_frames,
+    int timeout_ms,
+  ) {
+    return _uvc_request_start(
+      session,
+      mode,
+      policy,
+      consecutive_frames,
+      timeout_ms,
+    );
+  }
+
+  late final _uvc_request_startPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int64 Function(
+            ffi.Pointer<uvc_session_t>,
+            uvc_mode_t,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+          )
+        >
+      >('uvc_request_start');
+  late final _uvc_request_start = _uvc_request_startPtr
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, uvc_mode_t, int, int, int)
+      >();
+
+  /// Queues a start that tries the modes in order until one verifies. With
+  /// modes == NULL the worker takes the device's modes, MJPEG first, then by
+  /// area and fps, ascending when prefer_quality is 0 and descending
+  /// otherwise, never H.264, at most max_candidates of them. Stops after a
+  /// success, an interrupted or no-device attempt, or when a later request
+  /// exists. Result JSON: {"attempts":[<start result>, ...]}
+  int uvc_request_start_auto(
+    ffi.Pointer<uvc_session_t> session,
+    ffi.Pointer<uvc_mode_t> modes,
+    int mode_count,
+    int prefer_quality,
+    int max_candidates,
+    int policy,
+    int consecutive_frames,
+    int timeout_ms,
+  ) {
+    return _uvc_request_start_auto(
+      session,
+      modes,
+      mode_count,
+      prefer_quality,
+      max_candidates,
+      policy,
+      consecutive_frames,
+      timeout_ms,
+    );
+  }
+
+  late final _uvc_request_start_autoPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int64 Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<uvc_mode_t>,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+          )
+        >
+      >('uvc_request_start_auto');
+  late final _uvc_request_start_auto = _uvc_request_start_autoPtr
+      .asFunction<
+        int Function(
+          ffi.Pointer<uvc_session_t>,
+          ffi.Pointer<uvc_mode_t>,
+          int,
+          int,
+          int,
+          int,
+          int,
+          int,
+        )
+      >();
+
+  int uvc_request_stop(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_request_stop(session);
+  }
+
+  late final _uvc_request_stopPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Int64 Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_request_stop');
+  late final _uvc_request_stop = _uvc_request_stopPtr
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
+
+  int uvc_request_close(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_request_close(session);
+  }
+
+  late final _uvc_request_closePtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Int64 Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_request_close');
+  late final _uvc_request_close = _uvc_request_closePtr
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
+
+  /// Id of the most recently queued request, 0 before the first. A caller
+  /// that wants to act only if nothing else was requested since (a stall
+  /// restart) passes it as expected_latest to uvc_request_start_if.
+  int uvc_latest_request_id(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_latest_request_id(session);
+  }
+
+  late final _uvc_latest_request_idPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Int64 Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_latest_request_id');
+  late final _uvc_latest_request_id = _uvc_latest_request_idPtr
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
+
+  /// uvc_request_start that returns UVC_ERROR_INTERRUPTED without queuing
+  /// when the latest request id is not expected_latest.
+  int uvc_request_start_if(
+    ffi.Pointer<uvc_session_t> session,
+    int expected_latest,
+    uvc_mode_t mode,
+    int policy,
+    int consecutive_frames,
+    int timeout_ms,
+  ) {
+    return _uvc_request_start_if(
+      session,
+      expected_latest,
+      mode,
+      policy,
+      consecutive_frames,
+      timeout_ms,
+    );
+  }
+
+  late final _uvc_request_start_ifPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int64 Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Int64,
+            uvc_mode_t,
+            ffi.Int,
+            ffi.Int,
+            ffi.Int,
+          )
+        >
+      >('uvc_request_start_if');
+  late final _uvc_request_start_if = _uvc_request_start_ifPtr
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, int, uvc_mode_t, int, int, int)
+      >();
+
+  /// Copies the result JSON of a completed start or auto request and drops
+  /// it. Returns bytes written, or 0 when there is none.
+  int uvc_take_request_result_json(
+    ffi.Pointer<uvc_session_t> session,
+    int request_id,
+    ffi.Pointer<ffi.Uint8> buffer,
+    int buffer_length,
+  ) {
+    return _uvc_take_request_result_json(
+      session,
+      request_id,
+      buffer,
+      buffer_length,
+    );
+  }
+
+  late final _uvc_take_request_result_jsonPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Int64,
+            ffi.Pointer<ffi.Uint8>,
+            ffi.Int,
+          )
+        >
+      >('uvc_take_request_result_json');
+  late final _uvc_take_request_result_json = _uvc_take_request_result_jsonPtr
+      .asFunction<
+        int Function(
+          ffi.Pointer<uvc_session_t>,
+          int,
+          ffi.Pointer<ffi.Uint8>,
+          int,
+        )
+      >();
+
+  /// Count of stream errors the session reported since creation.
+  int uvc_error_count(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_error_count(session);
+  }
+
+  late final _uvc_error_countPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Int64 Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_error_count');
+  late final _uvc_error_count = _uvc_error_countPtr
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
+
+  /// Modes the open device reports. Returns the count written, at most
+  /// max_modes, or a negative error code.
+  int uvc_get_supported_modes(
+    ffi.Pointer<uvc_session_t> session,
+    ffi.Pointer<uvc_mode_t> out_modes,
+    int max_modes,
+  ) {
+    return _uvc_get_supported_modes(session, out_modes, max_modes);
+  }
+
+  late final _uvc_get_supported_modesPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(
+            ffi.Pointer<uvc_session_t>,
+            ffi.Pointer<uvc_mode_t>,
+            ffi.Int,
+          )
+        >
+      >('uvc_get_supported_modes');
+  late final _uvc_get_supported_modes = _uvc_get_supported_modesPtr
+      .asFunction<
+        int Function(ffi.Pointer<uvc_session_t>, ffi.Pointer<uvc_mode_t>, int)
+      >();
+
+  void uvc_set_platform_listener(
+    ffi.Pointer<uvc_platform_listener_t> listener,
+    ffi.Pointer<ffi.Void> user_data,
+  ) {
+    return _uvc_set_platform_listener(listener, user_data);
+  }
+
+  late final _uvc_set_platform_listenerPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Void Function(
+            ffi.Pointer<uvc_platform_listener_t>,
+            ffi.Pointer<ffi.Void>,
+          )
+        >
+      >('uvc_set_platform_listener');
+  late final _uvc_set_platform_listener = _uvc_set_platform_listenerPtr
+      .asFunction<
+        void Function(
+          ffi.Pointer<uvc_platform_listener_t>,
           ffi.Pointer<ffi.Void>,
         )
       >();
@@ -1180,6 +1516,85 @@ typedef Dartuvc_error_listener_tFunction =
     );
 typedef uvc_error_listener_t =
     ffi.Pointer<ffi.NativeFunction<uvc_error_listener_tFunction>>;
+
+final class uvc_mode_t extends ffi.Struct {
+  @ffi.Int()
+  external int frame_format;
+
+  @ffi.Int()
+  external int width;
+
+  @ffi.Int()
+  external int height;
+
+  @ffi.Int()
+  external int fps;
+}
+
+typedef uvc_request_listener_tFunction =
+    ffi.Void Function(
+      ffi.Pointer<ffi.Void> user_data,
+      ffi.Int64 request_id,
+      ffi.Int op,
+      ffi.Int result,
+    );
+typedef Dartuvc_request_listener_tFunction =
+    void Function(
+      ffi.Pointer<ffi.Void> user_data,
+      int request_id,
+      int op,
+      int result,
+    );
+
+/// Runs on the worker thread. op is a UVC_REQUEST_* value and result the
+/// request's return code. Must not call back into this ABI.
+typedef uvc_request_listener_t =
+    ffi.Pointer<ffi.NativeFunction<uvc_request_listener_tFunction>>;
+
+/// ---------------------------------------------------------------------------
+/// Platform listener. Process-wide, set once by the platform plugin. The
+/// callbacks run on any thread, including the worker and the thread that
+/// destroys a session, and must not call back into this ABI. Setting NULL
+/// returns only after a callback in progress has finished.
+/// ---------------------------------------------------------------------------
+final class uvc_platform_listener_t extends ffi.Struct {
+  /// The session no longer uses the fd it took through uvc_supply_fd for
+  /// this request. The platform closes it here and nowhere else.
+  external ffi.Pointer<
+    ffi.NativeFunction<
+      ffi.Void Function(
+        ffi.Pointer<ffi.Void> user_data,
+        ffi.Uint64 session_id,
+        ffi.Int64 request_id,
+      )
+    >
+  >
+  device_released;
+
+  /// The session id is gone for good. Fires once per destroyed session.
+  external ffi.Pointer<
+    ffi.NativeFunction<
+      ffi.Void Function(ffi.Pointer<ffi.Void> user_data, ffi.Uint64 session_id)
+    >
+  >
+  session_destroyed;
+}
+
+const int UVC_REQUEST_OPEN = 1;
+
+const int UVC_REQUEST_START = 2;
+
+const int UVC_REQUEST_START_AUTO = 3;
+
+const int UVC_REQUEST_STOP = 4;
+
+const int UVC_REQUEST_CLOSE = 5;
+
+const int UVC_VERIFY_NONE = 0;
+
+const int UVC_VERIFY_STABLE_FRAMES = 1;
+
+const int UVC_VERIFY_SEQUENCE_ONLY = 2;
 
 const int UVC_CTRL_ID_BRIGHTNESS = 1;
 

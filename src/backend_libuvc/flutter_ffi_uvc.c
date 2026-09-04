@@ -1,4 +1,7 @@
 #include "flutter_ffi_uvc.h"
+#include "../common/uvc_requests_internal.h"
+
+#include <stdatomic.h>
 
 #include <inttypes.h>
 #include <setjmp.h>
@@ -169,6 +172,8 @@ struct uvc_session {
   uint32_t callback_count;
   uint32_t mjpeg_warmup_drop_remaining;
   char last_error[256];  // guarded by error_mutex
+  // Stream errors reported to the error listener since creation.
+  _Atomic int64_t error_count;
   // Copy handed to uvc_last_error callers, so a concurrent set_last_error
   // never tears the text they read. Written only by uvc_last_error.
   char last_error_snapshot[256];
@@ -638,6 +643,7 @@ static void dispatch_frame(uvc_session_t *s, int64_t sequence) {
 }
 
 static void dispatch_error(uvc_session_t *s, const char *message) {
+  atomic_fetch_add(&s->error_count, 1);
   pthread_mutex_lock(&s->listener_mutex);
   if (s->error_listener != NULL) {
     s->error_listener(s->error_listener_user_data, message);
@@ -1581,12 +1587,22 @@ FFI_PLUGIN_EXPORT uvc_session_t *uvc_session_create(void) {
 }
 
 FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t *session) {
-  if (session == NULL || !registry_retire(session)) {
+  if (session == NULL || !uvc_session_acquire(session)) {
     return;
   }
   UVC_LOGD("UVC_NATIVE", "uvc_session_destroy session=%p", (void *)session);
-  // Stops recording and preview, closes the device, releases the preview
-  // window, and frees the frame buffers. No callback or listener runs afterwards.
+  // Drains the request worker and closes the device while the session still
+  // counts as live, so the platform gets device_released before the id is
+  // gone. Stops recording and preview, releases the preview window, and
+  // frees the frame buffers.
+  uvc_requests_shutdown(session);
+  uvc_close_device(session);
+  uvc_session_release(session);
+  if (!registry_retire(session)) {
+    return;
+  }
+  // Nothing opens a session that is being destroyed, so this is a no-op
+  // unless a pinned caller slipped an open in before the retire.
   uvc_close_device(session);
   pthread_mutex_lock(&session->listener_mutex);
   session->frame_listener = NULL;
@@ -1939,6 +1955,69 @@ static int write_modes_json_locked(uvc_session_t *s, uint8_t *buffer, int buffer
   return (int)offset;
 }
 
+FFI_PLUGIN_EXPORT int64_t uvc_error_count(uvc_session_t *s) {
+  if (s == NULL) {
+    return 0;
+  }
+  return atomic_load(&s->error_count);
+}
+
+// Caller holds the main mutex. Same walk as write_modes_json_locked.
+static int collect_modes_locked(uvc_session_t *s, uvc_mode_t *out, int max_modes) {
+  int count = 0;
+  const uvc_format_desc_t *format_desc = uvc_get_format_descs(s->devh);
+  for (; format_desc != NULL; format_desc = format_desc->next) {
+    enum uvc_frame_format frame_format = format_desc_to_frame_format(format_desc);
+    if (frame_format == UVC_FRAME_FORMAT_UNKNOWN) {
+      continue;
+    }
+#if !defined(__ANDROID__)
+    if (frame_format == UVC_FRAME_FORMAT_H264) {
+      continue;
+    }
+#endif
+    const uvc_frame_desc_t *frame_desc = format_desc->frame_descs;
+    for (; frame_desc != NULL; frame_desc = frame_desc->next) {
+      if (frame_desc->intervals != NULL) {
+        for (uint32_t *interval = frame_desc->intervals; *interval != 0; ++interval) {
+          if (count >= max_modes) {
+            return count;
+          }
+          out[count].frame_format = (int)frame_format;
+          out[count].width = frame_desc->wWidth;
+          out[count].height = frame_desc->wHeight;
+          out[count].fps = (int)(10000000u / *interval);
+          count += 1;
+        }
+      } else if (frame_desc->dwDefaultFrameInterval != 0) {
+        if (count >= max_modes) {
+          return count;
+        }
+        out[count].frame_format = (int)frame_format;
+        out[count].width = frame_desc->wWidth;
+        out[count].height = frame_desc->wHeight;
+        out[count].fps = (int)(10000000u / frame_desc->dwDefaultFrameInterval);
+        count += 1;
+      }
+    }
+  }
+  return count;
+}
+
+FFI_PLUGIN_EXPORT int uvc_get_supported_modes(uvc_session_t *s, uvc_mode_t *out_modes, int max_modes) {
+  if (s == NULL || out_modes == NULL || max_modes <= 0) {
+    return UVC_ERROR_INVALID_PARAM;
+  }
+  pthread_mutex_lock(&s->mutex);
+  if (s->devh == NULL) {
+    pthread_mutex_unlock(&s->mutex);
+    return UVC_ERROR_NO_DEVICE;
+  }
+  const int count = collect_modes_locked(s, out_modes, max_modes);
+  pthread_mutex_unlock(&s->mutex);
+  return count;
+}
+
 FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uvc_session_t *s, uint8_t *buffer, int buffer_length) {
   if (s == NULL || buffer == NULL || buffer_length <= 0) {
     return 0;
@@ -2185,36 +2264,111 @@ Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeAttachSurface(
   return UVC_SUCCESS;
 }
 
-JNIEXPORT jboolean JNICALL
-Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeSessionIsLive(
+// Hands the platform's fd to a queued open. Returns 0 when the session
+// took it (see uvc_supply_fd).
+JNIEXPORT jint JNICALL
+Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeSupplyFd(
     JNIEnv *env,
     jobject thiz,
-    jlong session) {
+    jlong session,
+    jlong request_id,
+    jint fd) {
   (void)env;
   (void)thiz;
   uvc_session_t *s = uvc_session_acquire_id((uint64_t)session);
   if (s == NULL) {
-    return JNI_FALSE;
+    return UVC_ERROR_INVALID_PARAM;
   }
+  const int result = uvc_supply_fd(s, (int64_t)request_id, (int)fd);
   uvc_session_release(s);
-  return JNI_TRUE;
+  return result;
 }
 
-// Closes the device of a live session. The Kotlin layer calls this before
-// it closes the USB connection so libuvc never runs on a released fd.
-JNIEXPORT void JNICALL
-Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeCloseDevice(
-    JNIEnv *env,
-    jobject thiz,
-    jlong session) {
-  (void)env;
-  (void)thiz;
-  uvc_session_t *s = uvc_session_acquire_id((uint64_t)session);
-  if (s == NULL) {
+// Platform listener bridged to the plugin's static Kotlin hooks. Runs on
+// the worker or destroying thread, so it attaches that thread to the VM.
+static JavaVM *g_jvm = NULL;
+static jclass g_plugin_class = NULL;
+static jmethodID g_on_device_released = NULL;
+static jmethodID g_on_session_destroyed = NULL;
+
+static JNIEnv *jni_env_for_this_thread(int *attached) {
+  JNIEnv *env = NULL;
+  *attached = 0;
+  if (g_jvm == NULL) {
+    return NULL;
+  }
+  const jint status = (*g_jvm)->GetEnv(g_jvm, (void **)&env, JNI_VERSION_1_6);
+  if (status == JNI_OK) {
+    return env;
+  }
+  if (status != JNI_EDETACHED) {
+    return NULL;
+  }
+  if ((*g_jvm)->AttachCurrentThread(g_jvm, &env, NULL) != JNI_OK) {
+    return NULL;
+  }
+  *attached = 1;
+  return env;
+}
+
+static void jni_device_released(void *user_data, uint64_t session_id, int64_t request_id) {
+  (void)user_data;
+  int attached = 0;
+  JNIEnv *env = jni_env_for_this_thread(&attached);
+  if (env == NULL || g_plugin_class == NULL || g_on_device_released == NULL) {
     return;
   }
-  uvc_close_device(s);
-  uvc_session_release(s);
+  (*env)->CallStaticVoidMethod(env, g_plugin_class, g_on_device_released,
+                               (jlong)session_id, (jlong)request_id);
+  if ((*env)->ExceptionCheck(env)) {
+    (*env)->ExceptionClear(env);
+  }
+  if (attached) {
+    (*g_jvm)->DetachCurrentThread(g_jvm);
+  }
+}
+
+static void jni_session_destroyed(void *user_data, uint64_t session_id) {
+  (void)user_data;
+  int attached = 0;
+  JNIEnv *env = jni_env_for_this_thread(&attached);
+  if (env == NULL || g_plugin_class == NULL || g_on_session_destroyed == NULL) {
+    return;
+  }
+  (*env)->CallStaticVoidMethod(env, g_plugin_class, g_on_session_destroyed,
+                               (jlong)session_id);
+  if ((*env)->ExceptionCheck(env)) {
+    (*env)->ExceptionClear(env);
+  }
+  if (attached) {
+    (*g_jvm)->DetachCurrentThread(g_jvm);
+  }
+}
+
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+  (void)reserved;
+  JNIEnv *env = NULL;
+  if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+    return JNI_ERR;
+  }
+  g_jvm = vm;
+  jclass local = (*env)->FindClass(env, "com/cornpip/flutter_ffi_uvc/FlutterFfiUvcPlugin");
+  if (local == NULL) {
+    return JNI_ERR;
+  }
+  g_plugin_class = (jclass)(*env)->NewGlobalRef(env, local);
+  (*env)->DeleteLocalRef(env, local);
+  g_on_device_released = (*env)->GetStaticMethodID(env, g_plugin_class, "onDeviceReleased", "(JJ)V");
+  g_on_session_destroyed = (*env)->GetStaticMethodID(env, g_plugin_class, "onSessionDestroyed", "(J)V");
+  if (g_on_device_released == NULL || g_on_session_destroyed == NULL) {
+    return JNI_ERR;
+  }
+  static const uvc_platform_listener_t hooks = {
+      jni_device_released,
+      jni_session_destroyed,
+  };
+  uvc_set_platform_listener(&hooks, NULL);
+  return JNI_VERSION_1_6;
 }
 
 JNIEXPORT void JNICALL

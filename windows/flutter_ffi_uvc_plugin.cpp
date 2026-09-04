@@ -306,20 +306,6 @@ void FlutterFfiUvcPlugin::HandleTextureCall(
     return;
   }
 
-  if (method == "detachPreviewSession") {
-    // Called before the Dart layer destroys the session so no texture keeps
-    // its listener registered.
-    const int64_t session_id = SessionIdFromArgs(args);
-    if (session_id != 0) {
-      for (auto& entry : preview_textures_) {
-        PreviewTexture* texture = entry.second.get();
-        if (texture->session.load() == session_id) DetachTexture(texture);
-      }
-    }
-    result->Success();
-    return;
-  }
-
   result->NotImplemented();
 }
 
@@ -346,27 +332,26 @@ void FlutterFfiUvcPlugin::HandleUsbCall(
   }
 
   if (method == "openUsbDevice") {
-    // sessionHandle is accepted but not needed here. The Dart layer opens
-    // the device on its session through uvc_open_fd with the returned id.
+    const int64_t session_id = SessionIdFromArgs(args);
+    const int64_t request_id =
+        args != nullptr ? Int64FromArg(*args, "requestId") : 0;
     int64_t device_id = args != nullptr ? Int64FromArg(*args, "deviceId") : -1;
+    if (session_id == 0 || request_id <= 0) {
+      result->Error("invalid_args", "sessionHandle and requestId are required.");
+      return;
+    }
     if (device_id < 0 || !uvc_win::DeviceExists(static_cast<int>(device_id))) {
       result->Error("device_not_found",
                     "No UVC device with id " + std::to_string(device_id));
       return;
     }
-    // There is no fd on Windows; the Dart layer passes this value straight to
-    // uvc_open_fd, where it is interpreted as the device id.
-    result->Success(flutter::EncodableValue(flutter::EncodableMap{
-        {flutter::EncodableValue("fileDescriptor"),
-         flutter::EncodableValue(device_id)},
-    }));
-    return;
-  }
-
-  if (method == "closeUsbDevice") {
-    // The native session is closed by the Dart layer through uvc_close_device;
-    // there is no separate OS-level connection to release on Windows. The
-    // sessionHandle argument is accepted and ignored.
+    // There is no fd on Windows. The device id goes to the queued open,
+    // where uvc_open_fd interprets it. Nothing to release afterwards, so
+    // the plugin registers no platform listener.
+    SessionPin pin(session_id);
+    if (pin.get() != nullptr) {
+      uvc_supply_fd(pin.get(), request_id, static_cast<int>(device_id));
+    }
     result->Success();
     return;
   }

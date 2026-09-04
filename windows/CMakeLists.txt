@@ -18,6 +18,7 @@ add_library(${PLUGIN_NAME} SHARED
   "flutter_ffi_uvc_plugin.h"
   "flutter_ffi_uvc_plugin_c_api.cpp"
   "uvc_mf_backend.cpp"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/common/uvc_requests.cpp"
   "uvc_mf_backend.h"
 )
 

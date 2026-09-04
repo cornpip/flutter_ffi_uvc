@@ -12,7 +12,7 @@ topics:
   - usb
   - uvc
   - webcam
-  - libuvc
+  - capture
 
 dependencies:
   flutter:

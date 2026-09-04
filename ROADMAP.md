@@ -1,11 +1,12 @@
 # Roadmap
 
-- Native completion callbacks. Run open and stream start on a per-session
-  native worker thread and report completion through the listener, so the
-  Dart layer keeps no worker isolates or queue.
-- Session release hook. Let `uvc_session_destroy` call a hook the platform
-  plugin registers, so the plugin releases its fd, USB connection, and
-  texture binding there and the Dart layer keeps no platform finalizer.
+- Teardown as a request. Post session destruction to the worker instead of
+  blocking the caller, so a native thread calling into Dart never waits on
+  the isolate that started the teardown.
+- Native device claim. Move the open-device claim into the session registry
+  so the `UvcErrorCode.busy` check is decided in one place at request time.
+- Listener cleanup on collection. Close the two `NativeCallable`s of an
+  instance that is garbage collected without `dispose()`.
 - Windows zero-copy preview path. Render NV12/YUY2 to a DXGI shared texture
   instead of the CPU RGBA pixel-buffer path.
 

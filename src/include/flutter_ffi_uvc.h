@@ -1,3 +1,6 @@
+#ifndef FLUTTER_FFI_UVC_H_
+#define FLUTTER_FFI_UVC_H_
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,8 +38,9 @@ typedef struct uvc_session uvc_session_t;
 // Allocates an idle session. Returns NULL on allocation failure.
 FFI_PLUGIN_EXPORT uvc_session_t *uvc_session_create(void);
 
-// Stops preview and recording, closes the device, and frees the session.
-// Waits for every acquire pin to be released. No listener fires afterwards.
+// Drains the request queue, stops preview and recording, closes the
+// device, and frees the session. Waits for every acquire pin to be
+// released. No listener fires afterwards.
 FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t *session);
 
 // For callers that hold a session pointer they do not own. uvc_session_acquire
@@ -53,8 +57,10 @@ FFI_PLUGIN_EXPORT uint64_t uvc_session_id(uvc_session_t *session);
 // when no live session has it. Release with uvc_session_release.
 FFI_PLUGIN_EXPORT uvc_session_t *uvc_session_acquire_id(uint64_t id);
 
-// Opens a device on the session. fd is a USB device node descriptor on
-// Android and Linux and the enumeration device id on Windows. A device
+// Synchronous lifecycle. These block the calling thread and bypass the
+// request queue below, which is built on them. The Dart layer uses the
+// queue. Opens a device on the session. fd is a USB device node descriptor
+// on Android and Linux and the enumeration device id on Windows. A device
 // already open on this session is closed first.
 FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t *session, int fd);
 
@@ -105,6 +111,161 @@ typedef void (*uvc_error_listener_t)(void *user_data, const char *message);
 FFI_PLUGIN_EXPORT void uvc_set_error_listener(
     uvc_session_t *session,
     uvc_error_listener_t listener,
+    void *user_data);
+
+// ---------------------------------------------------------------------------
+// Requests. The lifecycle that can block (open, stream start, verification,
+// stop, close) runs on one worker thread per session, one request at a
+// time in call order. Each request function returns a request id > 0 at
+// once, or a negative error code when nothing was queued. Completion
+// reaches the request listener with the same id.
+//
+// A stop or close request interrupts a start or auto request in progress:
+// its frame verification ends early and it completes with
+// UVC_ERROR_INTERRUPTED (-10), leaving the stream to the stop or close
+// queued behind it. An auto request also gives up before its next
+// candidate when any later request exists.
+//
+// uvc_session_destroy interrupts and drains the queue. It clears the
+// request listener first, so a request still queued or running when it is
+// called reports nothing and the caller resolves it itself once destroy
+// returns.
+// ---------------------------------------------------------------------------
+
+#define UVC_REQUEST_OPEN 1
+#define UVC_REQUEST_START 2
+#define UVC_REQUEST_START_AUTO 3
+#define UVC_REQUEST_STOP 4
+#define UVC_REQUEST_CLOSE 5
+
+// Verification policy of a start request. NONE completes when the stream
+// starts. SEQUENCE_ONLY waits for one frame. STABLE_FRAMES waits for
+// consecutive_frames frames with no stream error in between.
+#define UVC_VERIFY_NONE 0
+#define UVC_VERIFY_STABLE_FRAMES 1
+#define UVC_VERIFY_SEQUENCE_ONLY 2
+
+typedef struct {
+  int frame_format;
+  int width;
+  int height;
+  int fps;
+} uvc_mode_t;
+
+// Runs on the worker thread. op is a UVC_REQUEST_* value and result the
+// request's return code. Must not call back into this ABI.
+typedef void (*uvc_request_listener_t)(
+    void *user_data,
+    int64_t request_id,
+    int op,
+    int result);
+FFI_PLUGIN_EXPORT void uvc_set_request_listener(
+    uvc_session_t *session,
+    uvc_request_listener_t listener,
+    void *user_data);
+
+// Every request function returns an id unique for the life of the process
+// and never reused, so a platform plugin may key its own state by it.
+//
+// Queues an open. The worker closes the device the session holds, then
+// waits for uvc_supply_fd with this request id. A close queued meanwhile
+// ends the wait with UVC_ERROR_INTERRUPTED. An fd already supplied is
+// opened, and the close then takes it back. A stop leaves opens alone.
+FFI_PLUGIN_EXPORT int64_t uvc_request_open(uvc_session_t *session);
+
+// Hands the fd (or Windows device id) to a queued open. fd < 0 fails the
+// open with UVC_ERROR_NO_DEVICE. Returns 0 when the request took the fd,
+// which the session then owns until it reports device_released, and
+// UVC_ERROR_INVALID_PARAM when no such open is waiting, in which case the
+// caller still owns the fd.
+FFI_PLUGIN_EXPORT int uvc_supply_fd(
+    uvc_session_t *session,
+    int64_t request_id,
+    int fd);
+
+// Queues a stream start with verification. timeout_ms bounds the
+// verification. The result JSON is readable with
+// uvc_take_request_result_json until the next start or auto completes:
+// {"success":bool,"validFrameCount":n,"consecutiveValidFrames":n,
+//  "errorCount":n,"elapsedMs":n,"lastError":"..","nativeErrorCode":n,
+//  "frameFormat":n,"width":n,"height":n,"fps":n}
+// A verification that times out stops the stream. A native start that
+// fails may leave a previous stream running, as uvc_start_preview does.
+FFI_PLUGIN_EXPORT int64_t uvc_request_start(
+    uvc_session_t *session,
+    uvc_mode_t mode,
+    int policy,
+    int consecutive_frames,
+    int timeout_ms);
+
+// Queues a start that tries the modes in order until one verifies. With
+// modes == NULL the worker takes the device's modes, MJPEG first, then by
+// area and fps, ascending when prefer_quality is 0 and descending
+// otherwise, never H.264, at most max_candidates of them. Stops after a
+// success, an interrupted or no-device attempt, or when a later request
+// exists. Result JSON: {"attempts":[<start result>, ...]}
+FFI_PLUGIN_EXPORT int64_t uvc_request_start_auto(
+    uvc_session_t *session,
+    const uvc_mode_t *modes,
+    int mode_count,
+    int prefer_quality,
+    int max_candidates,
+    int policy,
+    int consecutive_frames,
+    int timeout_ms);
+
+FFI_PLUGIN_EXPORT int64_t uvc_request_stop(uvc_session_t *session);
+FFI_PLUGIN_EXPORT int64_t uvc_request_close(uvc_session_t *session);
+
+// Id of the most recently queued request, 0 before the first. A caller
+// that wants to act only if nothing else was requested since (a stall
+// restart) passes it as expected_latest to uvc_request_start_if.
+FFI_PLUGIN_EXPORT int64_t uvc_latest_request_id(uvc_session_t *session);
+
+// uvc_request_start that returns UVC_ERROR_INTERRUPTED without queuing
+// when the latest request id is not expected_latest.
+FFI_PLUGIN_EXPORT int64_t uvc_request_start_if(
+    uvc_session_t *session,
+    int64_t expected_latest,
+    uvc_mode_t mode,
+    int policy,
+    int consecutive_frames,
+    int timeout_ms);
+
+// Copies the result JSON of a completed start or auto request and drops
+// it. Returns bytes written, or 0 when there is none or it does not fit,
+// in which case it is kept for a larger buffer.
+FFI_PLUGIN_EXPORT int uvc_take_request_result_json(
+    uvc_session_t *session,
+    int64_t request_id,
+    uint8_t *buffer,
+    int buffer_length);
+
+// Count of stream errors the session reported since creation.
+FFI_PLUGIN_EXPORT int64_t uvc_error_count(uvc_session_t *session);
+
+// Modes the open device reports. Returns the count written, at most
+// max_modes, or a negative error code.
+FFI_PLUGIN_EXPORT int uvc_get_supported_modes(
+    uvc_session_t *session,
+    uvc_mode_t *out_modes,
+    int max_modes);
+
+// ---------------------------------------------------------------------------
+// Platform listener. Process-wide, set once by the platform plugin. The
+// callbacks run on any thread, including the worker and the thread that
+// destroys a session, and must not call back into this ABI. Setting NULL
+// returns only after a callback in progress has finished.
+// ---------------------------------------------------------------------------
+typedef struct {
+  // The session no longer uses the fd it took through uvc_supply_fd for
+  // this request. The platform closes it here and nowhere else.
+  void (*device_released)(void *user_data, uint64_t session_id, int64_t request_id);
+  // The session id is gone for good. Fires once per destroyed session.
+  void (*session_destroyed)(void *user_data, uint64_t session_id);
+} uvc_platform_listener_t;
+FFI_PLUGIN_EXPORT void uvc_set_platform_listener(
+    const uvc_platform_listener_t *listener,
     void *user_data);
 
 FFI_PLUGIN_EXPORT int uvc_get_stream_stats_json(
@@ -273,3 +434,5 @@ FFI_PLUGIN_EXPORT int uvc_set_region_of_interest_values(
 #ifdef __cplusplus
 }
 #endif
+
+#endif  // FLUTTER_FFI_UVC_H_

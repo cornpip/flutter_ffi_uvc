@@ -3,6 +3,10 @@ package com.cornpip.flutter_ffi_uvc
 import android.app.Activity
 import android.app.PendingIntent
 import android.content.BroadcastReceiver
+import android.os.Handler
+import android.os.Looper
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArraySet
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -38,6 +42,36 @@ class FlutterFfiUvcPlugin :
         init {
             System.loadLibrary("flutter_ffi_uvc")
         }
+
+        // Open request id -> the USB connection handed to that request. A
+        // native session owns the connection from a successful nativeSupplyFd
+        // until it reports onDeviceReleased. Process-wide, like sessions, so
+        // it outlives an engine and is reachable from the native hooks.
+        private val connections = ConcurrentHashMap<Long, OpenConnection>()
+
+        // Plugins attached to engines in this process, for texture
+        // bookkeeping. Sessions are not tied to an engine.
+        private val instances = CopyOnWriteArraySet<FlutterFfiUvcPlugin>()
+
+        private val mainHandler = Handler(Looper.getMainLooper())
+
+        // Native platform listener. JNI_OnLoad looks these up by name and
+        // nothing calls them from Kotlin, so consumer-rules.pro keeps them.
+        // They run on native threads.
+        @JvmStatic
+        @Suppress("UNUSED_PARAMETER")
+        fun onDeviceReleased(sessionHandle: Long, requestId: Long) {
+            connections.remove(requestId)?.connection?.close()
+        }
+
+        @JvmStatic
+        fun onSessionDestroyed(sessionHandle: Long) {
+            // The session released its surface itself. Only the id -> texture
+            // map is left to clear.
+            mainHandler.post {
+                instances.forEach { it.attachedTextures.remove(sessionHandle) }
+            }
+        }
     }
 
     // Texture
@@ -55,14 +89,20 @@ class FlutterFfiUvcPlugin :
     private var appContext: Context? = null
     private var activity: Activity? = null
     private var usbManager: UsbManager? = null
-    // Native session handle -> the USB connection that session opened.
-    private val connections = mutableMapOf<Long, OpenConnection>()
     // USB deviceId -> the open request waiting on the permission dialog.
     private val pendingUsbOpens = mutableMapOf<Int, PendingUsbOpen>()
     private val cameraPermissionResults = mutableListOf<MethodChannel.Result>()
 
-    private class OpenConnection(val device: UsbDevice, val connection: UsbDeviceConnection)
-    private class PendingUsbOpen(val sessionHandle: Long, val result: MethodChannel.Result)
+    private class OpenConnection(
+        val sessionHandle: Long,
+        val device: UsbDevice,
+        val connection: UsbDeviceConnection,
+    )
+    private class PendingUsbOpen(
+        val sessionHandle: Long,
+        val requestId: Long,
+        val result: MethodChannel.Result,
+    )
 
     private val usbPermissionAction: String
         get() = "${appContext?.packageName}.flutter_ffi_uvc.USB_PERMISSION"
@@ -93,7 +133,7 @@ class FlutterFfiUvcPlugin :
                 pending.result.error("permission_denied", "USB permission denied", null)
                 return
             }
-            openDevice(pending.sessionHandle, device, pending.result)
+            openDevice(pending.sessionHandle, pending.requestId, device, pending.result)
         }
     }
 
@@ -144,6 +184,7 @@ class FlutterFfiUvcPlugin :
     // ── FlutterPlugin ────────────────────────────────────────────────────────
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        instances.add(this)
         appContext = binding.applicationContext
         usbManager = binding.applicationContext.getSystemService(Context.USB_SERVICE) as UsbManager
         textureRegistry = binding.textureRegistry
@@ -191,7 +232,10 @@ class FlutterFfiUvcPlugin :
         deviceEventSink = null
         try { appContext?.unregisterReceiver(permissionReceiver) } catch (_: Exception) {}
         pendingUsbOpens.clear()
-        connections.keys.toList().forEach { closeConnection(it) }
+        // Connections stay with their sessions. A session this engine's
+        // isolate left behind is destroyed by its finalizer at isolate
+        // shutdown and releases its connection then.
+        instances.remove(this)
         appContext = null
         usbManager = null
     }
@@ -300,15 +344,6 @@ class FlutterFfiUvcPlugin :
                 }
             }
 
-            "detachPreviewSession" -> {
-                // Dart calls this before destroying the session.
-                val sessionHandle = sessionHandleArg(call, result) ?: return
-                if (attachedTextures.remove(sessionHandle) != null) {
-                    nativeDetachSurface(sessionHandle)
-                }
-                result.success(null)
-            }
-
             // USB ─────────────────────────────────────────────────────────────
 
             "listUsbDevices" -> {
@@ -325,6 +360,11 @@ class FlutterFfiUvcPlugin :
 
             "openUsbDevice" -> {
                 val sessionHandle = sessionHandleArg(call, result) ?: return
+                val requestId = call.argument<Number>("requestId")?.toLong() ?: 0L
+                if (requestId <= 0L) {
+                    result.error("invalid_args", "requestId is required.", null)
+                    return
+                }
                 val manager = usbManager ?: run {
                     result.error("unavailable", "UsbManager not available", null)
                     return
@@ -339,17 +379,21 @@ class FlutterFfiUvcPlugin :
                     return
                 }
                 if (manager.hasPermission(device)) {
-                    openDevice(sessionHandle, device, result)
+                    openDevice(sessionHandle, requestId, device, result)
                 } else {
-                    if (pendingUsbOpens.containsKey(deviceId)) {
-                        result.error("busy", "A USB permission request for this device is in progress", null)
-                        return
-                    }
                     val act = activity ?: run {
                         result.error("no_activity", "Activity not available for USB permission", null)
                         return
                     }
-                    pendingUsbOpens[deviceId] = PendingUsbOpen(sessionHandle, result)
+                    // Only now that a dialog can actually be raised. A request
+                    // still waiting on this device belongs to an open that was
+                    // cancelled meanwhile, or to a caller that will be answered
+                    // through this one. The grant names the device, so the
+                    // newest request takes it.
+                    pendingUsbOpens.remove(deviceId)?.result?.error(
+                        "superseded", "A newer open request took over the USB permission dialog", null,
+                    )
+                    pendingUsbOpens[deviceId] = PendingUsbOpen(sessionHandle, requestId, result)
                     val pendingIntent = PendingIntent.getBroadcast(
                         act,
                         deviceId,
@@ -358,16 +402,6 @@ class FlutterFfiUvcPlugin :
                     )
                     manager.requestPermission(device, pendingIntent)
                 }
-            }
-
-            "closeUsbDevice" -> {
-                val sessionHandle = sessionHandleArg(call, result) ?: return
-                // Cancel a permission request still pending for this session.
-                val cancelled = pendingUsbOpens.filterValues { it.sessionHandle == sessionHandle }
-                cancelled.keys.forEach { pendingUsbOpens.remove(it) }
-                cancelled.values.forEach { it.result.error("closed", "Session closed while waiting for USB permission", null) }
-                closeConnection(sessionHandle)
-                result.success(null)
             }
 
             "ensureCameraPermission" -> {
@@ -408,32 +442,33 @@ class FlutterFfiUvcPlugin :
         return handle
     }
 
-    private fun openDevice(sessionHandle: Long, device: UsbDevice, result: MethodChannel.Result) {
-        // A session holds one device. Opening another replaces it.
-        closeConnection(sessionHandle)
-        // A dead session still holding this device was leaked by a hot
-        // restart. Release its connection. A live session keeps its
-        // connection and this open fails at the USB interface claim.
-        connections.filterValues { it.device.deviceId == device.deviceId }.keys
-            .filterNot { nativeSessionIsLive(it) }
-            .forEach { closeConnection(it) }
+    private fun openDevice(
+        sessionHandle: Long,
+        requestId: Long,
+        device: UsbDevice,
+        result: MethodChannel.Result,
+    ) {
         val connection = usbManager?.openDevice(device)
         if (connection == null) {
             result.error("open_failed", "Unable to open USB device", null)
             return
         }
         logUsbDeviceLayout(device, connection)
-        connections[sessionHandle] = OpenConnection(device, connection)
-        result.success(mapOf("fileDescriptor" to connection.fileDescriptor))
-    }
-
-    private fun closeConnection(sessionHandle: Long) {
-        val open = connections.remove(sessionHandle) ?: return
-        // The Dart layer closes the native device before this call. The close
-        // here is for an instance collected without dispose(), so libuvc
-        // never runs on a released fd.
-        nativeCloseDevice(sessionHandle)
-        open.connection.close()
+        if (connection.fileDescriptor < 0) {
+            // Nothing to hand over. The open fails with noDevice.
+            connection.close()
+            nativeSupplyFd(sessionHandle, requestId, -1)
+            result.success(null)
+            return
+        }
+        // Registered before the hand-off so onDeviceReleased always finds it.
+        // The outcome of the open reaches Dart through the request listener.
+        connections[requestId] = OpenConnection(sessionHandle, device, connection)
+        if (nativeSupplyFd(sessionHandle, requestId, connection.fileDescriptor) != 0) {
+            // No open waits for it any more. Still ours to close.
+            connections.remove(requestId)?.connection?.close()
+        }
+        result.success(null)
     }
 
     private fun detachTextureOwners(textureId: Long) {
@@ -524,6 +559,5 @@ class FlutterFfiUvcPlugin :
 
     private external fun nativeAttachSurface(sessionHandle: Long, surface: Surface): Int
     private external fun nativeDetachSurface(sessionHandle: Long)
-    private external fun nativeCloseDevice(sessionHandle: Long)
-    private external fun nativeSessionIsLive(sessionHandle: Long): Boolean
+    private external fun nativeSupplyFd(sessionHandle: Long, requestId: Long, fd: Int): Int
 }

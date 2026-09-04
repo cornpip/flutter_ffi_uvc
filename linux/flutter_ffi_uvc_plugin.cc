@@ -260,6 +260,11 @@ struct KnownVideoDevice {
   int product_id;
 };
 
+struct OpenFd {
+  int64_t session_id;
+  int fd;
+};
+
 struct _FlutterFfiUvcPlugin {
   GObject parent_instance;
 
@@ -273,9 +278,11 @@ struct _FlutterFfiUvcPlugin {
   // texture id -> FfiUvcTexture* (owns a ref).
   GHashTable* textures;
 
-  // int64 session handle -> fd handed to uvc_open_fd, owned until
-  // closeUsbDevice. Stored as fd + 1 so descriptor 0 is not a null value.
-  GHashTable* session_fds;
+  // int64 open request id -> OpenFd handed to the session through
+  // uvc_supply_fd, owned until the session reports device_released.
+  // Guarded by fd_mutex: the release hook runs on native threads.
+  GHashTable* request_fds;
+  GMutex fd_mutex;
 
   // Video devices seen via enumeration or attach events, keyed by the sysfs
   // device basename (e.g. "1-2"), so detach events can be classified after
@@ -350,31 +357,45 @@ int64_t SessionIdFromArgs(FlValue* args) {
   return id > 0 ? id : 0;
 }
 
-// Releases fds of sessions that a hot restart leaked and a finalizer has
-// since destroyed.
-void CloseDeadSessionFds(FlutterFfiUvcPlugin* self) {
-  GHashTableIter iter;
-  gpointer key = nullptr;
-  gpointer value = nullptr;
-  g_hash_table_iter_init(&iter, self->session_fds);
-  while (g_hash_table_iter_next(&iter, &key, &value)) {
-    uvc_session_t* session = uvc_session_acquire_id(
-        static_cast<uint64_t>(*static_cast<int64_t*>(key)));
-    if (session != nullptr) {
-      uvc_session_release(session);
-      continue;
-    }
-    close(GPOINTER_TO_INT(value) - 1);
-    g_hash_table_iter_remove(&iter);
-  }
+// Platform listener. Both run on native threads (the session worker or the
+// thread destroying the session) with the plugin as user_data. The plugin
+// unregisters them in dispose, which returns only after a call in progress
+// has finished.
+void OnDeviceReleased(void* user_data, uint64_t /*session_id*/,
+                      int64_t request_id) {
+  FlutterFfiUvcPlugin* self = FLUTTER_FFI_UVC_PLUGIN(user_data);
+  g_mutex_lock(&self->fd_mutex);
+  OpenFd* open = static_cast<OpenFd*>(
+      g_hash_table_lookup(self->request_fds, &request_id));
+  const int fd = open != nullptr ? open->fd : -1;
+  if (open != nullptr) g_hash_table_remove(self->request_fds, &request_id);
+  g_mutex_unlock(&self->fd_mutex);
+  if (fd >= 0) close(fd);
 }
 
-void CloseSessionFd(FlutterFfiUvcPlugin* self, int64_t session_id) {
-  const int64_t key = session_id;
-  gpointer value = g_hash_table_lookup(self->session_fds, &key);
-  if (value == nullptr) return;
-  close(GPOINTER_TO_INT(value) - 1);
-  g_hash_table_remove(self->session_fds, &key);
+struct SessionDestroyedMessage {
+  FlutterFfiUvcPlugin* plugin;  // owns a ref
+  uint64_t session_id;
+};
+
+// Main thread. The session cleared its own listener slot, so only the
+// texture bookkeeping is left.
+gboolean SessionDestroyedIdle(gpointer user_data) {
+  SessionDestroyedMessage* message =
+      static_cast<SessionDestroyedMessage*>(user_data);
+  FlutterFfiUvcPlugin* self = message->plugin;
+  if (self->textures != nullptr) UnbindSession(self, message->session_id);
+  g_object_unref(self);
+  g_free(message);
+  return G_SOURCE_REMOVE;
+}
+
+void OnSessionDestroyed(void* user_data, uint64_t session_id) {
+  FlutterFfiUvcPlugin* self = FLUTTER_FFI_UVC_PLUGIN(user_data);
+  SessionDestroyedMessage* message = g_new0(SessionDestroyedMessage, 1);
+  message->plugin = FLUTTER_FFI_UVC_PLUGIN(g_object_ref(self));
+  message->session_id = session_id;
+  g_idle_add(SessionDestroyedIdle, message);
 }
 
 int64_t* Int64KeyNew(int64_t value) {
@@ -471,11 +492,12 @@ void HandleUsbCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   } else if (strcmp(method, "openUsbDevice") == 0) {
     const int64_t session_id = SessionIdFromArgs(args);
+    const int64_t request_id = Int64FromArgs(args, "requestId");
     const int64_t device_id = Int64FromArgs(args, "deviceId");
     char devnode[64];
-    if (session_id == 0) {
+    if (session_id == 0 || request_id <= 0) {
       response = FL_METHOD_RESPONSE(fl_method_error_response_new(
-          "invalid_args", "sessionHandle is required.", nullptr));
+          "invalid_args", "sessionHandle and requestId are required.", nullptr));
     } else if (device_id < 0 || !DevnodeForDeviceId(device_id, devnode, sizeof(devnode))) {
       g_autofree gchar* message = g_strdup_printf(
           "No UVC device with id %" G_GINT64_FORMAT, device_id);
@@ -492,33 +514,32 @@ void HandleUsbCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
         response = FL_METHOD_RESPONSE(
             fl_method_error_response_new("open_failed", message, nullptr));
       } else {
-        // A session holds one device. Opening another replaces it.
-        CloseSessionFd(self, session_id);
-        CloseDeadSessionFds(self);
-        g_hash_table_replace(self->session_fds, Int64KeyNew(session_id),
-                             GINT_TO_POINTER(fd + 1));
-        // The Dart layer passes this value straight to uvc_open_fd, the same
-        // flow as Android's UsbDeviceConnection file descriptor.
-        g_autoptr(FlValue) result = fl_value_new_map();
-        fl_value_set_string_take(result, "fileDescriptor", fl_value_new_int(fd));
-        response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
+        // Registered before the hand-off so device_released always finds
+        // it. The session owns the fd from a successful supply on, and the
+        // outcome of the open reaches Dart through the request listener.
+        OpenFd* open = g_new0(OpenFd, 1);
+        open->session_id = session_id;
+        open->fd = fd;
+        g_mutex_lock(&self->fd_mutex);
+        g_hash_table_replace(self->request_fds, Int64KeyNew(request_id), open);
+        g_mutex_unlock(&self->fd_mutex);
+        uvc_session_t* session =
+            uvc_session_acquire_id(static_cast<uint64_t>(session_id));
+        int supplied = -1;
+        if (session != nullptr) {
+          supplied = uvc_supply_fd(session, request_id, fd);
+          uvc_session_release(session);
+        }
+        if (supplied != 0) {
+          // No open waits for it any more. Still ours to close.
+          g_mutex_lock(&self->fd_mutex);
+          g_hash_table_remove(self->request_fds, &request_id);
+          g_mutex_unlock(&self->fd_mutex);
+          close(fd);
+        }
+        response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
       }
     }
-  } else if (strcmp(method, "closeUsbDevice") == 0) {
-    // The Dart layer closes the native device before this call. The close
-    // here is for an instance collected without dispose(), so libuvc never
-    // runs on a released fd.
-    const int64_t session_id = SessionIdFromArgs(args);
-    if (session_id != 0) {
-      uvc_session_t* session =
-          uvc_session_acquire_id(static_cast<uint64_t>(session_id));
-      if (session != nullptr) {
-        uvc_close_device(session);
-        uvc_session_release(session);
-      }
-      CloseSessionFd(self, session_id);
-    }
-    response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   } else {
     response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
   }
@@ -587,11 +608,6 @@ void HandleTextureCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
       uvc_session_release(session);
       response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
     }
-  } else if (strcmp(method, "detachPreviewSession") == 0) {
-    // Dart calls this before destroying the session.
-    const int64_t session_id = SessionIdFromArgs(args);
-    if (session_id != 0) UnbindSession(self, static_cast<uint64_t>(session_id));
-    response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   } else {
     response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
   }
@@ -885,6 +901,9 @@ void UsbChannelCb(FlMethodChannel* /*channel*/, FlMethodCall* method_call,
 static void flutter_ffi_uvc_plugin_dispose(GObject* object) {
   FlutterFfiUvcPlugin* self = FLUTTER_FFI_UVC_PLUGIN(object);
 
+  // Returns after a hook in progress has finished, so nothing below races
+  // the fd table.
+  uvc_set_platform_listener(nullptr, nullptr);
   StopDeviceNotifications(self);
 
   if (self->textures != nullptr) {
@@ -899,24 +918,28 @@ static void flutter_ffi_uvc_plugin_dispose(GObject* object) {
     }
     g_clear_pointer(&self->textures, g_hash_table_unref);
   }
-  if (self->session_fds != nullptr) {
-    // Close each native session before its fd, or libuvc's transfer threads
-    // keep using a closed fd during engine teardown.
+  if (self->request_fds != nullptr) {
+    // Engine teardown with sessions still alive (a Dart isolate that never
+    // disposed them). Close each native device before its fd, or libuvc's
+    // transfer threads keep using a closed fd.
     GHashTableIter iter;
     gpointer key = nullptr;
     gpointer value = nullptr;
-    g_hash_table_iter_init(&iter, self->session_fds);
+    g_mutex_lock(&self->fd_mutex);
+    g_hash_table_iter_init(&iter, self->request_fds);
     while (g_hash_table_iter_next(&iter, &key, &value)) {
-      // A session leaked by Dart may already be destroyed by its finalizer.
-      uvc_session_t* session = uvc_session_acquire_id(
-          static_cast<uint64_t>(*static_cast<int64_t*>(key)));
+      OpenFd* open = static_cast<OpenFd*>(value);
+      uvc_session_t* session =
+          uvc_session_acquire_id(static_cast<uint64_t>(open->session_id));
       if (session != nullptr) {
         uvc_close_device(session);
         uvc_session_release(session);
       }
-      close(GPOINTER_TO_INT(value) - 1);
+      close(open->fd);
     }
-    g_clear_pointer(&self->session_fds, g_hash_table_unref);
+    g_mutex_unlock(&self->fd_mutex);
+    g_clear_pointer(&self->request_fds, g_hash_table_unref);
+    g_mutex_clear(&self->fd_mutex);
   }
   g_clear_pointer(&self->known_video_devices, g_hash_table_unref);
   g_clear_object(&self->device_event_channel);
@@ -934,7 +957,8 @@ static void flutter_ffi_uvc_plugin_init(FlutterFfiUvcPlugin* self) {
   self->uevent_wakeup_pipe[1] = -1;
   self->textures =
       g_hash_table_new_full(Int64Hash, Int64Equal, g_free, g_object_unref);
-  self->session_fds = g_hash_table_new_full(Int64Hash, Int64Equal, g_free, nullptr);
+  self->request_fds = g_hash_table_new_full(Int64Hash, Int64Equal, g_free, g_free);
+  g_mutex_init(&self->fd_mutex);
   self->known_video_devices =
       g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 }
@@ -961,6 +985,10 @@ void flutter_ffi_uvc_plugin_register_with_registrar(
   fl_method_channel_set_method_call_handler(usb_channel, UsbChannelCb,
                                             g_object_ref(plugin),
                                             g_object_unref);
+
+  static const uvc_platform_listener_t hooks = {OnDeviceReleased,
+                                                OnSessionDestroyed};
+  uvc_set_platform_listener(&hooks, plugin);
 
   plugin->device_event_channel = fl_event_channel_new(
       messenger, "flutter_ffi_uvc/device_events", FL_METHOD_CODEC(codec));

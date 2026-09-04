@@ -95,6 +95,7 @@ add_dependencies(uvc_static jpeg_turbo_external usb_vendored)
 add_library(${PLUGIN_NAME} SHARED
   "flutter_ffi_uvc_plugin.cc"
   "${CMAKE_CURRENT_SOURCE_DIR}/../src/backend_libuvc/flutter_ffi_uvc.c"
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/common/uvc_requests.cpp"
 )
 
 apply_standard_settings(${PLUGIN_NAME})

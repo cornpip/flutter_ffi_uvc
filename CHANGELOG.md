@@ -15,12 +15,11 @@
   - `deviceEvents` is shared by all instances
   - `openUsbDevice()` fails with `UvcErrorCode.busy` for a device another
     instance already holds open
-  - the camera itself is released when an undisposed instance is garbage
-    collected or lost to a hot restart. Everything else is released by
-    `dispose()`
+  - an undisposed instance that is garbage collected or lost to a hot
+    restart releases its camera and platform connection
 - add `openedDeviceId`
-- improve `openUsbDevice()`, `startPreview()`, and `startPreviewAuto()` to
-  run the native open and stream start off the UI thread
+- improve `openFd()`, `stopPreview()`, `closeFd()`, and `closeUsbDevice()`
+  to run off the UI thread
 - change detach handling: an instance whose device is unplugged closes the
   device itself, after the `deviceEvents` event is delivered
 - change `lastError` on Windows to clear once frames are delivered again,
@@ -32,6 +31,27 @@
 - fix Windows detach events not matching the opened device
 - fix mode switching on Windows failing with `MF_E_INVALIDREQUEST`
 - example: add camera slots for previewing several cameras at once
+
+### Migrating from 0.12
+
+- `await` the lifecycle calls that now return a `Future`: `openPreview()`,
+  `stopPreview()`, `openFd()`, and `closeFd()`
+- replace checks of an int return code with `try` / `on UvcException`:
+  ```dart
+  // 0.12
+  final int code = await uvcCamera.openUsbDevice(id);
+  if (code != 0) print(uvcCamera.lastError);
+  // 1.0
+  try {
+    await uvcCamera.openUsbDevice(id);
+  } on UvcException catch (error) {
+    print(error.message);
+  }
+  ```
+  `error.code` is the `UvcErrorCode`, `error.nativeCode` the raw int
+- replace `closeDevice()` with `closeFd()`
+- `startPreview()` and `startPreviewAuto()` are unchanged and still return a
+  result instead of throwing
 
 ## 0.12.1
 

@@ -1110,10 +1110,10 @@ class UvcAutoPreviewResult {
 ///
 /// Lifecycle calls ([openUsbDevice], [openFd], [openPreview], [startPreview],
 /// [startPreviewAuto], [stopPreview], [closeFd], [closeUsbDevice], [dispose])
-/// run one at a time per instance, in call order. A call made while another
-/// is in progress waits for it. Only [stopPreview], [closeFd],
-/// [closeUsbDevice], and [dispose] act early: they end the frame
-/// verification of a start in progress, which then reports
+/// run one at a time per instance, in call order, on the native session's
+/// own thread. A call made while another is in progress waits for it. Only
+/// [stopPreview], [closeFd], [closeUsbDevice], and [dispose] act early: they
+/// end the frame verification of a start in progress, which then reports
 /// [UvcErrorCode.interrupted].
 ///
 /// Calls that can fail throw [UvcException], except [startPreview] and
@@ -1131,9 +1131,9 @@ abstract interface class UvcCamera {
   /// texture, and frees the native session. The instance is unusable
   /// afterwards. Textures still need [disposePreviewTexture].
   ///
-  /// An instance that is garbage collected or lost to a hot restart without
-  /// this call still releases the camera itself. Its platform connection
-  /// and event subscription are released on the next open in this process.
+  /// An instance that is garbage collected or lost to a hot restart still
+  /// releases the camera and its platform connection without this call. Its
+  /// device event subscription ends when the last listener does.
   Future<void> dispose();
 
   /// Sets the package-wide native UVC log level.

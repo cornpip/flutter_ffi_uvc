@@ -3,7 +3,9 @@
 # the plugin to fail to compile for some customers of the plugin.
 cmake_minimum_required(VERSION 3.10)
 
-project(flutter_ffi_uvc_library VERSION 0.0.1 LANGUAGES C)
+project(flutter_ffi_uvc_library VERSION 0.0.1 LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Build libuvc as part of the plugin so Flutter bundles a single native library.
 set(BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
@@ -73,6 +75,7 @@ add_subdirectory(backend_libuvc/libuvc)
 
 add_library(flutter_ffi_uvc SHARED
   "backend_libuvc/flutter_ffi_uvc.c"
+  "common/uvc_requests.cpp"
 )
 
 set_target_properties(flutter_ffi_uvc PROPERTIES

@@ -48,6 +48,7 @@
 #include <vector>
 
 #include "../src/include/flutter_ffi_uvc.h"
+#include "../src/common/uvc_requests_internal.h"
 
 namespace {
 
@@ -190,6 +191,8 @@ struct Session {
   // Guarded by error_mutex.
   std::mutex error_mutex;
   char last_error[512] = {0};
+  // Stream errors reported to the error listener since creation.
+  std::atomic<int64_t> error_count{0};
   // Copy handed to uvc_last_error callers. Written only by uvc_last_error.
   char last_error_snapshot[512] = {0};
 
@@ -282,6 +285,7 @@ void ReportError(Session& s, const char* fmt, ...) {
     std::lock_guard<std::mutex> lock(s.error_mutex);
     strncpy_s(s.last_error, message, _TRUNCATE);
   }
+  s.error_count.fetch_add(1);
   std::lock_guard<std::mutex> lock(s.listener_mutex);
   if (s.error_listener != nullptr) {
     s.error_listener(s.error_listener_data, message);
@@ -290,7 +294,7 @@ void ReportError(Session& s, const char* fmt, ...) {
 
 // Caller holds process.mutex.
 bool EnsureMediaFoundationLocked() {
-  // Entry points run on the Flutter platform thread and on Dart worker
+  // Entry points run on the Flutter platform thread and on session worker
   // threads. Media Foundation objects are free-threaded, so a worker thread
   // joins the MTA. The platform thread is already STA and reports
   // RPC_E_CHANGED_MODE, which is fine.
@@ -1267,6 +1271,12 @@ FFI_PLUGIN_EXPORT void uvc_session_release(uvc_session_t* session) {
 
 FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t* session) {
   if (session == nullptr) return;
+  // Drains the request worker while the session is still live, so its
+  // completions and the platform's session_destroyed fire before the id is
+  // gone. A pointer that is not a live session returns at once.
+  if (uvc_session_acquire(session) == 0) return;
+  uvc_requests_shutdown(session);
+  uvc_session_release(session);
   // Refuse new pins, wait for existing ones, then unlink. Only after this
   // point is it safe to dereference the wrapper.
   {
@@ -1944,6 +1954,31 @@ FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uvc_session_t* session,
     return 0;
   }
   return static_cast<int>(offset);
+}
+
+FFI_PLUGIN_EXPORT int64_t uvc_error_count(uvc_session_t* session) {
+  std::shared_ptr<Session> s = Impl(session);
+  if (!s) return 0;
+  return s->error_count.load();
+}
+
+FFI_PLUGIN_EXPORT int uvc_get_supported_modes(uvc_session_t* session,
+                                              uvc_mode_t* out_modes,
+                                              int max_modes) {
+  std::shared_ptr<Session> s = Impl(session);
+  if (!s || out_modes == nullptr || max_modes <= 0) return kErrorInvalidParam;
+  std::lock_guard<std::mutex> lock(s->mutex);
+  if (s->symlink.empty()) return kErrorNoDevice;
+  int count = 0;
+  for (const ModeInfo& mode : s->modes) {
+    if (count >= max_modes) break;
+    out_modes[count].frame_format = mode.format;
+    out_modes[count].width = static_cast<int>(mode.width);
+    out_modes[count].height = static_cast<int>(mode.height);
+    out_modes[count].fps = static_cast<int>(mode.fps);
+    count += 1;
+  }
+  return count;
 }
 
 FFI_PLUGIN_EXPORT const char* uvc_last_error(uvc_session_t* session) {
