@@ -834,6 +834,9 @@ class UvcPreviewStartResult {
   ///
   /// Verification failures (stream started but frames never became valid)
   /// keep this at 0; inspect [lastError] and the frame counters instead.
+  /// A start refused before reaching the native layer carries
+  /// [UvcErrorCode.busy] or [UvcErrorCode.noDevice], and one cancelled by
+  /// stop, close, or dispose carries [UvcErrorCode.interrupted].
   final int nativeErrorCode;
 
   /// Typed error code for [nativeErrorCode], or null when it is 0.
@@ -1173,28 +1176,34 @@ abstract interface class UvcCamera {
   /// caller: follow a successful open with [startPreviewAuto] or
   /// [startPreview].
   ///
-  /// Returns 0 on success, or a negative native error code. A
-  /// [closeUsbDevice] or [dispose] issued while this call is in flight wins,
-  /// and the call then reports [UvcErrorCode.noDevice].
+  /// Returns 0 on success, or a negative native error code. While an open or
+  /// preview start is already in progress this returns [UvcErrorCode.busy].
+  /// A [closeUsbDevice] or [dispose] issued while this call is in flight
+  /// cancels it, and the call then reports [UvcErrorCode.noDevice].
   /// Throws [PlatformException] if the USB layer fails (e.g. permission denied,
   /// device not found).
   Future<int> openUsbDevice(int deviceId);
 
-  /// Closes the active USB device connection.
+  /// Closes the active USB device connection. Also cancels an open or start
+  /// in progress.
   Future<void> closeUsbDevice();
 
   /// Opens a UVC device using an already acquired platform file descriptor.
   /// Android only — use [openUsbDevice] on Windows and Linux. Throws
   /// [UnsupportedError] on other platforms. A device this instance opened
   /// through [openUsbDevice] is closed first, and [openedDeviceId] becomes
-  /// null. Throws [StateError] while an [openUsbDevice] call is still in
-  /// progress.
+  /// null. Returns [UvcErrorCode.busy] while an open or preview start is in
+  /// progress or a previous one is still finishing in the native layer.
   int openFd(int fd);
 
   /// Starts the native preview stream for [mode] without frame verification.
   ///
   /// Returns 0 on success, or a non-zero error code. To also verify that
-  /// frames are delivered correctly, use [startPreview] instead.
+  /// frames are delivered correctly, use [startPreview] instead. Returns
+  /// [UvcErrorCode.noDevice] when no device is open and [UvcErrorCode.busy]
+  /// while an open or start is in progress or a previous one is still
+  /// finishing in the native layer, including a stall auto-restart. Await
+  /// that call, or retry after the next [stallEvents] event.
   int openPreview(UvcCameraMode mode);
 
   /// Starts the preview stream for [mode] and verifies frame delivery.
@@ -1203,9 +1212,10 @@ abstract interface class UvcCamera {
   /// observed without an intervening stream error, or until [timeout] elapses.
   ///
   /// On success, the preview stream remains running. On failure, the preview
-  /// is stopped before the result is returned. A [stopPreview],
-  /// [closeUsbDevice], [openUsbDevice], [dispose], or later start issued
-  /// while this call is in flight wins, and this call then reports a failure.
+  /// is stopped before the result is returned. While an open or another
+  /// start is in progress the result carries [UvcErrorCode.busy]. A
+  /// [stopPreview], [closeUsbDevice], or [dispose] issued while this call is
+  /// in flight cancels it, and the result carries [UvcErrorCode.interrupted].
   Future<UvcPreviewStartResult> startPreview(
     UvcCameraMode mode, {
     UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
@@ -1231,8 +1241,8 @@ abstract interface class UvcCamera {
   /// On success the preview stream remains running in the returned
   /// [UvcAutoPreviewResult.mode]. On total failure all attempts are stopped
   /// and the per-mode results are available in [UvcAutoPreviewResult.attempts].
-  /// A [stopPreview], [closeUsbDevice], [openUsbDevice], [dispose], or start
-  /// issued while an attempt runs wins, and no further candidate is tried.
+  /// A [stopPreview], [closeUsbDevice], or [dispose] issued while an attempt
+  /// runs cancels it, and no further candidate is tried.
   Future<UvcAutoPreviewResult> startPreviewAuto({
     List<UvcCameraMode>? candidates,
     UvcAutoPreviewPreference preference = UvcAutoPreviewPreference.reliability,
@@ -1243,6 +1253,9 @@ abstract interface class UvcCamera {
   });
 
   /// Stops the active preview stream.
+  ///
+  /// Also cancels a [startPreview] or [startPreviewAuto] in progress, which
+  /// then reports [UvcErrorCode.interrupted].
   void stopPreview();
 
   /// Closes the native UVC session opened via [openFd].

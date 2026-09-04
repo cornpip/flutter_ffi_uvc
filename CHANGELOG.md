@@ -11,7 +11,9 @@
   mocks): add `dispose()` and `openedDeviceId`. Callers are unaffected
 - improve `openUsbDevice()`, `startPreview()`, and `startPreviewAuto()` to
   run the native open and stream start off the UI thread
-  - a later stop, close, dispose, or start wins over one still in flight
+- change overlapping lifecycle calls: a second open or start is refused with
+  `UvcErrorCode.busy`, and stop, close, or dispose cancel the one in progress
+  with `UvcErrorCode.interrupted`
 - change detach handling: an instance whose device is unplugged stops its
   preview and closes the device itself
 - change `lastError` on Windows to clear once frames are delivered again,

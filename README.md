@@ -540,9 +540,10 @@ if (!result.success) {
 }
 ```
 
-`UvcPreviewStartResult.nativeErrorCode` is non-zero only when stream startup
-itself failed; verification failures report through `lastError` and the frame
-counters instead.
+`UvcPreviewStartResult.nativeErrorCode` is non-zero when stream startup
+itself failed, when the start was refused (`busy`, `noDevice`), or when it was
+cancelled by a stop, close, or dispose (`interrupted`). Verification failures
+report through `lastError` and the frame counters instead.
 
 ### Logging
 
