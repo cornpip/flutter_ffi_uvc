@@ -208,7 +208,7 @@ enum UvcErrorCode {
   /// Access denied.
   access(-3),
 
-  /// No such device — including a device that was disconnected mid-session.
+  /// No such device, including one that was disconnected mid-session.
   noDevice(-4),
 
   /// Entity not found.
@@ -635,8 +635,8 @@ class UvcRegionOfInterestControl {
 
 /// An error reported by the native frame pipeline during streaming.
 ///
-/// These are errors that occur inside the frame callback — decode failures,
-/// buffer allocation failures, undersized frames, etc. — and are delivered
+/// These are errors that occur inside the frame callback (decode failures,
+/// buffer allocation failures, undersized frames) and are delivered
 /// proactively via [UvcCamera.streamErrors] rather than being silently stored
 /// in [UvcCamera.lastError].
 class UvcStreamError {
@@ -852,7 +852,7 @@ enum UvcPreviewPolicy {
 /// Preview transform applied to the live Flutter Texture output.
 ///
 /// [rotation] is a clockwise angle in degrees; only 0, 90, 180, and 270 are
-/// accepted — other values are normalised to 0 by the native layer.
+/// accepted. Other values are normalised to 0 by the native layer.
 /// [flipHorizontal] mirrors the rendered image left-right.
 /// [flipVertical] mirrors the rendered image top-bottom.
 ///
@@ -1068,8 +1068,8 @@ class UvcStallEvent {
 /// Ordering strategy for the default candidate list of
 /// [UvcCamera.startPreviewAuto].
 ///
-/// Both strategies try MJPEG before uncompressed formats — compressed modes
-/// are far less likely to exceed USB bandwidth — and differ only in
+/// Both strategies try MJPEG before uncompressed formats, since compressed
+/// modes are far less likely to exceed USB bandwidth, and differ only in
 /// how resolutions are ordered within each format group. Ignored when an
 /// explicit `candidates` list is passed.
 enum UvcAutoPreviewPreference {
@@ -1199,7 +1199,7 @@ abstract interface class UvcCamera {
   Future<void> closeUsbDevice();
 
   /// Opens a UVC device using an already acquired platform file descriptor.
-  /// Android only — use [openUsbDevice] on Windows and Linux. Throws
+  /// Android only. Use [openUsbDevice] on Windows and Linux. Throws
   /// [UnsupportedError] on other platforms. A device this instance opened
   /// through [openUsbDevice] is closed first, and [openedDeviceId] becomes
   /// null. Throws [UvcException] when the native open fails.
@@ -1233,15 +1233,15 @@ abstract interface class UvcCamera {
   /// Tries candidate modes in order and keeps the first one that streams and
   /// verifies successfully.
   ///
-  /// Descriptor-reported modes are candidates, not guaranteed-safe defaults —
-  /// a mode may negotiate but never deliver decodable frames. This helper
+  /// Descriptor-reported modes are candidates, not guaranteed-safe defaults.
+  /// A mode may negotiate but never deliver decodable frames. This helper
   /// encodes the recommended fallback loop: each candidate goes through the
   /// same verification as [startPreview] and is rejected on failure.
   ///
-  /// [candidates] defaults to [supportedModes] ordered by [preference] —
+  /// [candidates] defaults to [supportedModes] ordered by [preference],
   /// MJPEG-first, then by resolution and frame rate ascending for
   /// [UvcAutoPreviewPreference.reliability] (the default) or descending for
-  /// [UvcAutoPreviewPreference.quality] — capped at [maxCandidates]. Pass an
+  /// [UvcAutoPreviewPreference.quality], capped at [maxCandidates]. Pass an
   /// explicit [candidates] list to control the order yourself; [preference] is
   /// then ignored.
   ///
@@ -1274,7 +1274,7 @@ abstract interface class UvcCamera {
   /// session without touching the Android USB channel.
   ///
   /// If the device was opened with [openUsbDevice], use [closeUsbDevice]
-  /// instead — it closes both the native session and the USB connection.
+  /// instead. It closes both the native session and the USB connection.
   /// Android only, like [openFd]; throws [UnsupportedError] elsewhere.
   Future<void> closeFd();
 
@@ -1360,7 +1360,7 @@ abstract interface class UvcCamera {
 
   /// Starts MP4 (H.264) video recording of the preview stream to [path].
   ///
-  /// Requires an active preview with delivered frames — call after a
+  /// Requires an active preview with delivered frames. Call after a
   /// successful [startPreview] / [startPreviewAuto]. Frames are encoded
   /// natively; nothing crosses into Dart per frame. The preview keeps running
   /// while recording. Not available on Linux: there this throws.
@@ -1422,7 +1422,7 @@ abstract interface class UvcCamera {
   /// Returns controls present in descriptor bmControls without GET_* probing.
   ///
   /// Intended for debugging device quirks where descriptor exposure and
-  /// readable/writable behavior differ. Android and Linux only — the Windows
+  /// readable/writable behavior differ. Android and Linux only. The Windows
   /// backend has no raw descriptor access and returns an empty list.
   List<UvcBmControlInfo> debugBmControls();
 
@@ -1460,7 +1460,7 @@ abstract interface class UvcCamera {
   /// On Android this includes the device's H.264 modes (previewable via
   /// [startPreview], decoded by the hardware decoder). On Windows H.264 is
   /// deliberately excluded from this list (an inter-frame codec breaks the
-  /// per-frame validation model — see `doc/windows-backend.md`) and on Linux
+  /// per-frame validation model, see `doc/windows-backend.md`) and on Linux
   /// as well.
   List<UvcCameraMode> supportedModes();
 
