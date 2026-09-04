@@ -3,6 +3,7 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
+import 'package:flutter_ffi_uvc/testing.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 
@@ -14,11 +15,17 @@ import 'test_library.dart';
 // ---------------------------------------------------------------------------
 
 typedef _NativeInjectFrame = ffi.Void Function(
+  ffi.Pointer<ffi.Void>,
   ffi.Pointer<ffi.Uint8>,
   ffi.Int,
   ffi.Int,
 );
-typedef _DartInjectFrame = void Function(ffi.Pointer<ffi.Uint8>, int, int);
+typedef _DartInjectFrame = void Function(
+  ffi.Pointer<ffi.Void>,
+  ffi.Pointer<ffi.Uint8>,
+  int,
+  int,
+);
 
 class _UvcTransformTestBindings {
   _UvcTransformTestBindings() {
@@ -30,6 +37,9 @@ class _UvcTransformTestBindings {
 
   late final ffi.DynamicLibrary _lib;
   late final _DartInjectFrame _inject;
+  // The shared instance's native session, the one the tests read back from.
+  final ffi.Pointer<ffi.Void> _session =
+      ffi.Pointer<ffi.Void>.fromAddress(nativeSessionHandleOf(uvcCamera));
 
   // Injects a flat list of pixel R values as an RGBA buffer.
   // G=B=0, A=255 for each pixel, so R uniquely identifies the pixel.
@@ -43,7 +53,7 @@ class _UvcTransformTestBindings {
         buf[i * 4 + 2] = 0;          // B
         buf[i * 4 + 3] = 255;        // A
       }
-      _inject(buf, width, height);
+      _inject(_session, buf, width, height);
     } finally {
       calloc.free(buf);
     }

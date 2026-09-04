@@ -5,10 +5,14 @@
 // Flutter plugin layer. The Dart-facing surface of the backend is the C ABI
 // declared in ../src/include/flutter_ffi_uvc.h; this header only carries what the
 // plugin needs beyond that ABI (device enumeration for the platform channels
-// and the texture frame-available hook).
+// and the per-session texture frame-available hook).
 
 #include <string>
 #include <vector>
+
+// Session handle from ../src/include/flutter_ffi_uvc.h. Redeclared here so
+// this header does not pull in windows.h before the backend sets NOMINMAX.
+typedef struct uvc_session uvc_session_t;
 
 namespace uvc_win {
 
@@ -31,11 +35,10 @@ bool DeviceExists(int device_id);
 // Used by detach notifications, where the device is no longer enumerable.
 int IdForSymbolicLink(const std::wstring& symbolic_link);
 
-void GetPreviewTransform(int* rotation, int* flip_h, int* flip_v);
-
-// Called from the frame delivery thread whenever a new preview frame landed
-// in the shared RGBA buffer. Pass nullptr to clear.
-void SetFrameAvailableCallback(void (*callback)(void* context), void* context);
+// Reads the preview transform of one session. A null session reads as
+// identity.
+void GetPreviewTransform(uvc_session_t* session, int* rotation, int* flip_h,
+                         int* flip_v);
 
 }  // namespace uvc_win
 

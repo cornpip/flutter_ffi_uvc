@@ -2,12 +2,15 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:ffi/ffi.dart';
 import 'package:flutter/services.dart';
 
 import 'flutter_ffi_uvc_bindings_generated.dart';
 import 'uvc_camera_api.dart';
+
+enum _State { closed, open, previewing, disposed }
 
 class _PreviewRequest {
   const _PreviewRequest({
@@ -23,8 +26,9 @@ class _PreviewRequest {
   final Duration timeout;
 }
 
-class _FlutterFfiUvcCamera implements UvcCamera {
-  _FlutterFfiUvcCamera();
+/// Package implementation of [UvcCamera]. Construct through `UvcCamera()`.
+class FfiUvcCamera implements UvcCamera, Finalizable {
+  FfiUvcCamera();
   static const MethodChannel _textureChannel = MethodChannel(
     'flutter_ffi_uvc/texture',
   );
@@ -33,22 +37,203 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     'flutter_ffi_uvc/device_events',
   );
 
+  // Device events are process-wide. One channel subscription feeds every
+  // instance and the app-facing stream. The stream is synchronous so an app
+  // handler runs before the holding instance closes the detached device and
+  // still sees it in openedDeviceId.
+  static StreamController<UvcDeviceEvent>? _deviceEventController;
+  static StreamSubscription<dynamic>? _channelDeviceEvents;
+
+  static StreamController<UvcDeviceEvent> _deviceEvents() {
+    return _deviceEventController ??=
+        StreamController<UvcDeviceEvent>.broadcast(
+          onListen: _ensureChannelDeviceEvents,
+          onCancel: _releaseChannelDeviceEvents,
+          sync: true,
+        );
+  }
+
+  static void _ensureChannelDeviceEvents() {
+    _channelDeviceEvents ??= _deviceEventChannel
+        .receiveBroadcastStream()
+        .listen(
+          (dynamic raw) {
+            final UvcDeviceEvent event = UvcDeviceEvent.fromMap(
+              (raw as Map<Object?, Object?>?) ?? <Object?, Object?>{},
+            );
+            final FfiUvcCamera? holder =
+                event.type == UvcDeviceEventType.detached
+                ? _deviceHolder(event.device.deviceId)
+                : null;
+            try {
+              _deviceEventController?.add(event);
+            } finally {
+              holder?._onOwnDeviceDetached(event.device.deviceId);
+            }
+          },
+          onError: (Object error, StackTrace stack) {
+            _deviceEventController?.addError(error, stack);
+          },
+        );
+  }
+
+  // Keeps the platform receiver only while someone needs it.
+  static void _releaseChannelDeviceEvents() {
+    final bool appListening = _deviceEventController?.hasListener ?? false;
+    _openDevices.removeWhere(
+      (_, WeakReference<FfiUvcCamera> claim) => claim.target == null,
+    );
+    if (appListening || _openDevices.isNotEmpty) return;
+    _channelDeviceEvents?.cancel();
+    _channelDeviceEvents = null;
+  }
+
+  // Devices open or being opened in this process, so two instances never
+  // open the same one. Weak so an undisposed instance can still be collected.
+  static final Map<int, WeakReference<FfiUvcCamera>> _openDevices =
+      <int, WeakReference<FfiUvcCamera>>{};
+  int? _openedDeviceId;
+
+  static FfiUvcCamera? _deviceHolder(int deviceId) {
+    final FfiUvcCamera? holder = _openDevices[deviceId]?.target;
+    if (holder == null) _openDevices.remove(deviceId);
+    return holder;
+  }
+
+  void _releaseDeviceClaim(int deviceId) {
+    if (_openDevices[deviceId]?.target == this) {
+      _openDevices.remove(deviceId);
+      _releaseChannelDeviceEvents();
+    }
+  }
+
+  // Set when a call is rejected before reaching the native layer.
+  String? _dartLastError;
+
+  @override
+  int? get openedDeviceId => _openedDeviceId;
+
+  void _forgetOpenedDevice() {
+    final int? deviceId = _openedDeviceId;
+    _openedDeviceId = null;
+    if (deviceId != null) _releaseDeviceClaim(deviceId);
+  }
+
+  void _rememberOpenedDevice(int deviceId) {
+    _openedDeviceId = deviceId;
+    _ensureChannelDeviceEvents();
+  }
+
+  // The transport is gone, so the session cannot be used again. An app
+  // handler for the same event may already have queued an open of another
+  // device, so the close only runs while the detached one is still open.
+  void _onOwnDeviceDetached(int deviceId) {
+    if (_disposed) return;
+    _lifecycleCalls += 1;
+    _cancelRequests += 1;
+    unawaited(
+      _serialized(() async {
+        if (_disposed || _openedDeviceId != deviceId) return;
+        _dartLastError = null;
+        _stopPreviewNative();
+        await _closeUsbDeviceInternal();
+      }),
+    );
+  }
+
+  // Created on first native use so construction never loads the library.
+  Pointer<uvc_session_t>? _session;
+  bool _disposed = false;
+
+  Pointer<uvc_session_t> get _s {
+    if (_disposed) {
+      throw StateError('This UvcCamera has been disposed.');
+    }
+    return _session ??= _createSession();
+  }
+
+  // Destroys the native session, which releases the camera, of an instance
+  // that is garbage collected or lost to a hot restart without dispose().
+  // Everything else the instance holds is released by dispose() or evicted
+  // by the platform side on the next open.
+  static final NativeFinalizer _finalizer = NativeFinalizer(
+    _dylib.lookup<NativeFunction<Void Function(Pointer<Void>)>>(
+      'uvc_session_destroy',
+    ),
+  );
+
+  Pointer<uvc_session_t> _createSession() {
+    final Pointer<uvc_session_t> session = _bindings.uvc_session_create();
+    if (session == nullptr) {
+      throw StateError('Native session allocation failed.');
+    }
+    _finalizer.attach(this, session.cast<Void>(), detach: this);
+    return session;
+  }
+
+  /// Registry id of the native session, passed to the platform channels.
+  /// Never reused within the process, unlike the address.
+  int get nativeSessionHandle => _bindings.uvc_session_id(_s);
+
+  /// Native session address, for test-only backend entry points.
+  int get nativeSessionAddress => _s.address;
+
   UvcPreviewTransform _previewTransform = UvcPreviewTransform.identity;
 
   final StreamController<UvcStreamError> _streamErrorController =
       StreamController<UvcStreamError>.broadcast();
-  NativeCallable<Void Function(Pointer<Char>)>? _errorCallable;
+  NativeCallable<Void Function(Pointer<Void>, Pointer<Char>)>? _errorCallable;
 
-  Stream<UvcDeviceEvent>? _deviceEventStream;
-
-  // Stall detection state. The session epoch increments whenever the user
-  // starts/stops/closes the preview session so an in-flight automatic restart
-  // can detect it has been superseded and abort.
+  // Stall detection state.
   final StreamController<UvcStallEvent> _stallEventController =
       StreamController<UvcStallEvent>.broadcast();
   UvcStallDetectionConfig? _stallConfig;
   Timer? _stallTimer;
-  int _sessionEpoch = 0;
+  // Lifecycle state. Every call that changes it runs as a command on one
+  // queue per instance, in call order, so the state and the native session
+  // move together. Between commands the state is one of these.
+  _State _state = _State.closed;
+
+  Future<void> _nativeQueue = Future<void>.value();
+
+  Future<T> _serialized<T>(Future<T> Function() command) {
+    final Future<T> result = _nativeQueue.then((_) => command());
+    _nativeQueue = result.then((_) {}, onError: (_) {});
+    return result;
+  }
+
+  // Bumped by stop, close, and dispose at call time. A preview verification
+  // in progress ends early with interrupted when it sees a newer value. The
+  // queued command that bumped it then runs and stops the stream.
+  int _cancelRequests = 0;
+
+  // Bumped by every app lifecycle call at call time. A stall auto-restart
+  // stops retrying when the app has moved on.
+  int _lifecycleCalls = 0;
+
+  // True while an open command waits on the platform (Android permission
+  // dialog). close and dispose cancel that immediately instead of waiting.
+  bool _openWaitingOnPlatform = false;
+
+  String _nativeLastError() {
+    final Pointer<Char> pointer = _bindings.uvc_last_error(_s).cast<Char>();
+    return pointer == nullptr ? '' : pointer.cast<Utf8>().toDartString();
+  }
+
+  // Builds the exception for a failed call and mirrors it in lastError.
+  UvcException _fail(UvcErrorCode code, String message) {
+    _dartLastError = message;
+    return UvcException.fromNativeCode(code.nativeValue, message: message);
+  }
+
+  // Throws for a non-zero native code, with the native message. lastError
+  // then reads that message too.
+  void _check(int code) {
+    if (code == 0) return;
+    _dartLastError = null;
+    throw UvcException.fromNativeCode(code, message: _nativeLastError());
+  }
+
   int _stallLastSequence = 0;
   // Monotonic clock for stall timing so wall-clock adjustments (NTP, manual
   // time changes) can neither fake nor mask a stall.
@@ -59,19 +244,38 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   int _restartAttempts = 0;
   _PreviewRequest? _lastPreviewRequest;
 
+  // Registers the Dart callable on the native session. Always re-registers
+  // because the native layer clears the slot when a device closes.
   void _setupNativeErrorListener() {
-    if (_errorCallable != null) return;
-    _errorCallable = NativeCallable<Void Function(Pointer<Char>)>.listener(_onNativeError);
-    _bindings.uvc_set_error_listener(_errorCallable!.nativeFunction);
+    if (_disposed) return;
+    if (_errorCallable == null) {
+      // Weak so an undisposed instance can still be collected and finalized.
+      final WeakReference<FfiUvcCamera> weak = WeakReference<FfiUvcCamera>(
+        this,
+      );
+      _errorCallable =
+          NativeCallable<Void Function(Pointer<Void>, Pointer<Char>)>.listener(
+            (Pointer<Void> data, Pointer<Char> message) =>
+                weak.target?._onNativeError(data, message),
+          );
+    }
+    _bindings.uvc_set_error_listener(
+      _s,
+      _errorCallable!.nativeFunction,
+      nullptr,
+    );
   }
 
-  void _tearDownNativeErrorListener() {
-    _bindings.uvc_set_error_listener(nullptr);
+  void _tearDownNativeErrorListener([Pointer<uvc_session_t>? session]) {
+    session ??= _disposed ? null : _session;
+    if (session != null) {
+      _bindings.uvc_set_error_listener(session, nullptr, nullptr);
+    }
     _errorCallable?.close();
     _errorCallable = null;
   }
 
-  void _onNativeError(Pointer<Char> messagePtr) {
+  void _onNativeError(Pointer<Void> _, Pointer<Char> messagePtr) {
     final String message = messagePtr.cast<Utf8>().toDartString();
     if (message.isNotEmpty) {
       _streamErrorController.add(UvcStreamError(message: message));
@@ -80,22 +284,31 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   void _resetPreviewState() {}
 
+  // Runs inside a queued command.
   Future<UvcPreviewStartResult> _startPreviewInternal(
     UvcCameraMode mode, {
     required UvcPreviewPolicy policy,
     required int requiredConsecutiveValidFrames,
     required Duration timeout,
   }) async {
-    if (policy == UvcPreviewPolicy.stableFrames &&
-        requiredConsecutiveValidFrames <= 0) {
-      throw ArgumentError.value(
-        requiredConsecutiveValidFrames,
-        'requiredConsecutiveValidFrames',
-        'Must be greater than 0.',
+    final Stopwatch stopwatch = Stopwatch()..start();
+    if (_disposed || _state == _State.closed) {
+      final String message = _disposed
+          ? 'UvcCamera has been disposed'
+          : 'Camera is not open';
+      _dartLastError = message;
+      return UvcPreviewStartResult(
+        mode: mode,
+        success: false,
+        validFrameCount: 0,
+        consecutiveValidFrames: 0,
+        errorCount: 0,
+        elapsed: stopwatch.elapsed,
+        lastError: message,
+        nativeErrorCode: UvcErrorCode.noDevice.nativeValue,
       );
     }
-
-    final Stopwatch stopwatch = Stopwatch()..start();
+    final int cancelGeneration = _cancelRequests;
     final Stream<UvcStreamError> errors = streamErrors;
     int errorCount = 0;
     int observedErrorGeneration = 0;
@@ -117,9 +330,14 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     });
 
     try {
-      final int startResult = openPreview(mode);
+      final int startResult = await _openPreviewOffThread(mode);
+      if (_disposed) {
+        // The dispose command queued behind this one stops the stream.
+        return _interrupted(mode, stopwatch, 0, 0, errorCount);
+      }
       if (startResult != 0) {
-        final String error = this.lastError;
+        _state = _afterFailedStart();
+        final String error = _nativeLastError();
         return UvcPreviewStartResult(
           mode: mode,
           success: false,
@@ -131,8 +349,21 @@ class _FlutterFfiUvcCamera implements UvcCamera {
           nativeErrorCode: startResult,
         );
       }
+      // The stream runs from here. A stop, close, or dispose queued behind
+      // this command will stop it, so an interrupted verification only
+      // returns early.
+      _state = _State.previewing;
 
       while (stopwatch.elapsed < timeout) {
+        if (_cancelRequests != cancelGeneration) {
+          return _interrupted(
+            mode,
+            stopwatch,
+            totalValidFrames,
+            consecutiveValidFrames,
+            errorCount,
+          );
+        }
         if (policy == UvcPreviewPolicy.sequenceOnly) {
           final int latestSequence = latestFrameSequence();
           if (latestSequence > 0) {
@@ -181,8 +412,18 @@ class _FlutterFfiUvcCamera implements UvcCamera {
         ]);
       }
 
-      final String error = lastError ?? this.lastError;
+      if (_cancelRequests != cancelGeneration) {
+        return _interrupted(
+          mode,
+          stopwatch,
+          totalValidFrames,
+          consecutiveValidFrames,
+          errorCount,
+        );
+      }
+      final String error = lastError ?? _nativeLastError();
       _stopPreviewNative();
+      _state = _State.open;
       return UvcPreviewStartResult(
         mode: mode,
         success: false,
@@ -198,6 +439,23 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     }
   }
 
+  UvcPreviewStartResult _interrupted(
+    UvcCameraMode mode,
+    Stopwatch stopwatch,
+    int validFrames,
+    int consecutive,
+    int errors,
+  ) => UvcPreviewStartResult(
+    mode: mode,
+    success: false,
+    validFrameCount: validFrames,
+    consecutiveValidFrames: consecutive,
+    errorCount: errors,
+    elapsed: stopwatch.elapsed,
+    lastError: 'Preview start interrupted by a later lifecycle call',
+    nativeErrorCode: UvcErrorCode.interrupted.nativeValue,
+  );
+
   UvcPreviewFrame? _copyFrameWithMetadata(
     int Function(
       Pointer<Uint8> buffer,
@@ -208,44 +466,65 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     )
     nativeCopy,
   ) {
-    final int width = _bindings.uvc_frame_width();
-    final int height = _bindings.uvc_frame_height();
-    if (width <= 0 || height <= 0) {
-      return null;
-    }
-
-    final int expectedBytes = width * height * 4;
-    final Pointer<Uint8> nativeBuffer = calloc<Uint8>(expectedBytes);
-    final Pointer<Int> nativeWidth = calloc<Int>();
-    final Pointer<Int> nativeHeight = calloc<Int>();
-    final Pointer<Int64> nativeSequence = calloc<Int64>();
-    try {
-      final int copiedBytes = nativeCopy(
-        nativeBuffer,
-        expectedBytes,
-        nativeWidth,
-        nativeHeight,
-        nativeSequence,
-      );
-      if (copiedBytes <= 0) {
+    int width = _bindings.uvc_frame_width(_s);
+    int height = _bindings.uvc_frame_height(_s);
+    // A mode switch on the worker isolate can change the frame size between
+    // the size query and the copy. A copy that does not match the size it
+    // reports is retried once with that size.
+    for (int attempt = 0; attempt < 2; attempt++) {
+      if (width <= 0 || height <= 0) {
         return null;
       }
-      return UvcPreviewFrame(
-        width: nativeWidth.value,
-        height: nativeHeight.value,
-        rgbaBytes: Uint8List.fromList(nativeBuffer.asTypedList(copiedBytes)),
-        sequence: nativeSequence.value,
-      );
-    } finally {
-      calloc.free(nativeBuffer);
-      calloc.free(nativeWidth);
-      calloc.free(nativeHeight);
-      calloc.free(nativeSequence);
+      final int expectedBytes = width * height * 4;
+      final Pointer<Uint8> nativeBuffer = calloc<Uint8>(expectedBytes);
+      final Pointer<Int> nativeWidth = calloc<Int>();
+      final Pointer<Int> nativeHeight = calloc<Int>();
+      final Pointer<Int64> nativeSequence = calloc<Int64>();
+      try {
+        final int copiedBytes = nativeCopy(
+          nativeBuffer,
+          expectedBytes,
+          nativeWidth,
+          nativeHeight,
+          nativeSequence,
+        );
+        if (copiedBytes <= 0) {
+          return null;
+        }
+        final int copiedWidth = nativeWidth.value;
+        final int copiedHeight = nativeHeight.value;
+        if (copiedBytes == copiedWidth * copiedHeight * 4) {
+          return UvcPreviewFrame(
+            width: copiedWidth,
+            height: copiedHeight,
+            rgbaBytes: Uint8List.fromList(
+              nativeBuffer.asTypedList(copiedBytes),
+            ),
+            sequence: nativeSequence.value,
+          );
+        }
+        width = copiedWidth;
+        height = copiedHeight;
+      } finally {
+        calloc.free(nativeBuffer);
+        calloc.free(nativeWidth);
+        calloc.free(nativeHeight);
+        calloc.free(nativeSequence);
+      }
     }
+    return null;
   }
 
   UvcPreviewFrame? _copyLatestFrameInternal() => _copyFrameWithMetadata(
-    _bindings.uvc_copy_latest_frame_rgba_with_metadata,
+    (buffer, bufferLength, width, height, sequence) =>
+        _bindings.uvc_copy_latest_frame_rgba_with_metadata(
+          _s,
+          buffer,
+          bufferLength,
+          width,
+          height,
+          sequence,
+        ),
   );
 
   @override
@@ -254,13 +533,18 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   T? _readJsonObject<T>(
-    int Function(Pointer<Uint8> buffer, int bufferLength) nativeCall,
+    int Function(
+      Pointer<uvc_session_t> session,
+      Pointer<Uint8> buffer,
+      int bufferLength,
+    )
+    nativeCall,
     T Function(Map<String, dynamic> json) fromJson,
   ) {
     const int bufferLength = 1024;
     final Pointer<Uint8> nativeBuffer = calloc<Uint8>(bufferLength);
     try {
-      final int copiedBytes = nativeCall(nativeBuffer, bufferLength);
+      final int copiedBytes = nativeCall(_s, nativeBuffer, bufferLength);
       if (copiedBytes <= 0) {
         return null;
       }
@@ -283,8 +567,9 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   @override
   Future<List<UvcUsbDevice>> listUsbDevices() async {
     _ensureSupportedPlatform();
-    final List<Object?>? raw =
-        await _usbChannel.invokeListMethod<Object?>('listUsbDevices');
+    final List<Object?>? raw = await _usbChannel.invokeListMethod<Object?>(
+      'listUsbDevices',
+    );
     return (raw ?? <Object?>[])
         .whereType<Map<Object?, Object?>>()
         .map(UvcUsbDevice.fromMap)
@@ -292,64 +577,263 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   @override
-  Future<int> openUsbDevice(int deviceId) async {
+  Future<void> openUsbDevice(int deviceId) {
     _ensureSupportedPlatform();
-    // Tear down any existing session first: the package wraps a single shared
-    // native session, so opening a device always means making it the active
-    // one. Both calls are safe no-ops when nothing is open.
-    if (isPreviewing) {
-      stopPreview();
+    _lifecycleCalls += 1;
+    return _serialized(() => _openUsbDeviceCommand(deviceId));
+  }
+
+  Future<void> _openUsbDeviceCommand(int deviceId) async {
+    if (_disposed)
+      throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+    _dartLastError = null;
+    // An instance holds one device. Close this instance's device first.
+    _stopPreviewNative();
+    await _closeUsbDeviceInternal();
+    if (_disposed) {
+      throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
     }
-    await closeUsbDevice();
-    final Map<Object?, Object?>? result = await _usbChannel
-        .invokeMapMethod<Object?, Object?>(
-      'openUsbDevice',
-      <String, Object?>{'deviceId': deviceId},
-    );
-    final int fd = result?['fileDescriptor'] as int? ?? -1;
-    final int openResult = _openFdNative(fd);
-    if (openResult != 0) {
-      // The platform-side open succeeded but the native session failed to
-      // attach; close it so any failure leaves nothing open.
-      try {
-        await closeUsbDevice();
-      } catch (_) {
-        // Cleanup failure must not mask the original open error.
+    final FfiUvcCamera? holder = _deviceHolder(deviceId);
+    if (holder != null && holder != this) {
+      throw _fail(
+        UvcErrorCode.busy,
+        'Device $deviceId is open in another UvcCamera instance',
+      );
+    }
+    // Claim the device before the first await so a concurrent open on
+    // another instance sees it as busy. Released again on failure.
+    _openDevices[deviceId] = WeakReference<FfiUvcCamera>(this);
+    final int handle = nativeSessionHandle;
+    final int address = nativeSessionAddress;
+    final Map<Object?, Object?>? result;
+    _openWaitingOnPlatform = true;
+    try {
+      result = await _usbChannel.invokeMapMethod<Object?, Object?>(
+        'openUsbDevice',
+        <String, Object?>{'sessionHandle': handle, 'deviceId': deviceId},
+      );
+    } on PlatformException catch (error) {
+      _releaseDeviceClaim(deviceId);
+      if (error.code == 'closed') {
+        // closeUsbDevice() or dispose() cancelled this open.
+        throw _fail(
+          UvcErrorCode.noDevice,
+          'Open cancelled: the instance was closed',
+        );
       }
+      rethrow;
+    } finally {
+      _openWaitingOnPlatform = false;
     }
-    return openResult;
-  }
-
-  @override
-  Future<void> closeUsbDevice() async {
-    _ensureSupportedPlatform();
-    _sessionEpoch += 1;
-    _resetStallTracking();
-    _tearDownNativeErrorListener();
-    _bindings.uvc_close_device();
-    await _usbChannel.invokeMethod<void>('closeUsbDevice');
-  }
-
-  @override
-  int openFd(int fd) {
-    _ensureAndroidOnlyApi('openFd');
-    return _openFdNative(fd);
-  }
-
-  /// Shared native-open step. On Android the value is a real file descriptor;
-  /// on Windows the native layer interprets it as the enumeration device id
-  /// handed back by the openUsbDevice platform channel. That mapping is an
-  /// internal detail — the public [openFd] stays Android-only.
-  int _openFdNative(int fd) {
-    final int result = _bindings.uvc_open_fd(fd);
-    if (result == 0) {
+    if (_disposed) {
+      _releaseDeviceClaim(deviceId);
+      await _platformClose(handle);
+      throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+    }
+    final int fd = result?['fileDescriptor'] as int? ?? -1;
+    // Opening can block for seconds while the OS finishes initialising a
+    // freshly plugged camera, so it runs on a worker isolate.
+    final int openResult = await Isolate.run(
+      () => _bindings.uvc_open_fd(
+        Pointer<uvc_session_t>.fromAddress(address),
+        fd,
+      ),
+    );
+    if (_disposed) {
+      // The dispose command queued behind this one closes the device.
+      _releaseDeviceClaim(deviceId);
+      throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+    }
+    if (openResult == 0) {
       _setupNativeErrorListener();
+      _rememberOpenedDevice(deviceId);
+      _state = _State.open;
+      return;
     }
-    return result;
+    // The platform-side open succeeded but the native session failed to
+    // attach. Close it so a failure leaves nothing open.
+    _releaseDeviceClaim(deviceId);
+    final String message = _nativeLastError();
+    try {
+      await _closeUsbDeviceInternal();
+    } catch (_) {
+      // The original error is the one to report.
+    }
+    throw UvcException.fromNativeCode(openResult, message: message);
+  }
+
+  Future<void> _platformClose(int handle) async {
+    try {
+      await _usbChannel.invokeMethod<void>('closeUsbDevice', <String, Object?>{
+        'sessionHandle': handle,
+      });
+    } catch (_) {
+      // Nothing left to release.
+    }
   }
 
   @override
-  int openPreview(UvcCameraMode mode) {
+  Future<void> closeUsbDevice() {
+    _ensureSupportedPlatform();
+    _lifecycleCalls += 1;
+    _cancelRequests += 1;
+    // An open waiting on the platform is cancelled now instead of after it.
+    if (_openWaitingOnPlatform && !_disposed) {
+      unawaited(_platformClose(nativeSessionHandle));
+    }
+    return _serialized(() async {
+      if (_disposed) return;
+      _dartLastError = null;
+      _stopPreviewNative();
+      await _closeUsbDeviceInternal();
+    });
+  }
+
+  // Runs inside a queued command.
+  Future<void> _closeUsbDeviceInternal() async {
+    _forgetOpenedDevice();
+    _resetStallTracking();
+    _state = _State.closed;
+    // Closing joins the stream thread, so do it before the callable goes away.
+    _bindings.uvc_close_device(_s);
+    _tearDownNativeErrorListener();
+    await _usbChannel.invokeMethod<void>('closeUsbDevice', <String, Object?>{
+      'sessionHandle': nativeSessionHandle,
+    });
+  }
+
+  Future<void>? _disposing;
+
+  @override
+  Future<void> dispose() => _disposing ??= _disposeImpl();
+
+  Future<void> _disposeImpl() async {
+    final int handle = _session == null ? 0 : nativeSessionHandle;
+    // Mark disposed before the first await so a re-entrant dispose() or a
+    // concurrent open cannot see the session.
+    _disposed = true;
+    _lifecycleCalls += 1;
+    _cancelRequests += 1;
+    _forgetOpenedDevice();
+    final Pointer<uvc_session_t>? session = _session;
+    _session = null;
+    _stallTimer?.cancel();
+    _stallTimer = null;
+    _stallConfig = null;
+    if (session == null) {
+      _state = _State.disposed;
+      await _streamErrorController.close();
+      await _stallEventController.close();
+      return;
+    }
+    _finalizer.detach(this);
+    // An open waiting on the platform is cancelled now instead of after it.
+    if (_openWaitingOnPlatform) await _platformClose(handle);
+    // Queued commands run first and skip themselves. The session goes away
+    // only after them.
+    await _serialized(() async {
+      _state = _State.disposed;
+      try {
+        _bindings.uvc_stop_preview(session);
+        _bindings.uvc_close_device(session);
+        _tearDownNativeErrorListener(session);
+        await _platformClose(handle);
+        await _textureChannel.invokeMethod<void>(
+          'detachPreviewSession',
+          <String, Object?>{'sessionHandle': handle},
+        );
+      } finally {
+        _bindings.uvc_session_destroy(session);
+        await _streamErrorController.close();
+        await _stallEventController.close();
+      }
+    });
+  }
+
+  @override
+  Future<void> openFd(int fd) {
+    _ensureAndroidOnlyApi('openFd');
+    if (fd < 0) {
+      throw _fail(UvcErrorCode.invalidParam, 'Invalid file descriptor: $fd');
+    }
+    _lifecycleCalls += 1;
+    return _serialized(() async {
+      if (_disposed)
+        throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+      _dartLastError = null;
+      _resetStallTracking();
+      // A device opened through openUsbDevice is replaced by the raw
+      // descriptor. Close it natively first, then release its platform
+      // connection.
+      if (_openedDeviceId != null) {
+        _stopPreviewNative();
+        _bindings.uvc_close_device(_s);
+        _tearDownNativeErrorListener();
+        _state = _State.closed;
+        _forgetOpenedDevice();
+        await _platformClose(nativeSessionHandle);
+        if (_disposed) {
+          throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+        }
+      }
+      final int result = _bindings.uvc_open_fd(_s, fd);
+      if (result != 0) {
+        _state = _State.closed;
+        _check(result);
+      }
+      _setupNativeErrorListener();
+      _state = _State.open;
+    });
+  }
+
+  @override
+  Future<void> openPreview(UvcCameraMode mode) {
+    _lifecycleCalls += 1;
+    return _serialized(() async {
+      if (_disposed)
+        throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+      if (_state == _State.closed) {
+        throw _fail(UvcErrorCode.noDevice, 'Camera is not open');
+      }
+      final int result = await _openPreviewOffThread(mode);
+      if (_disposed) {
+        throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+      }
+      if (result != 0) {
+        _state = _afterFailedStart();
+        _check(result);
+      }
+      _state = _State.previewing;
+    });
+  }
+
+  // The state a failed start leaves behind. A native start that fails
+  // before it stops the running stream leaves that stream running.
+  _State _afterFailedStart() =>
+      _bindings.uvc_is_previewing(_s) != 0 ? _State.previewing : _State.open;
+
+  // Native start on a worker isolate so the device negotiation does not
+  // block the UI.
+  Future<int> _openPreviewOffThread(UvcCameraMode mode) {
+    _recordPreviewRequest(mode);
+    final int session = _s.address;
+    final int format = mode.frameFormat;
+    final int width = mode.width;
+    final int height = mode.height;
+    final int fps = mode.fps;
+    return Isolate.run(
+      () => _bindings.uvc_start_preview(
+        Pointer<uvc_session_t>.fromAddress(session),
+        format,
+        width,
+        height,
+        fps,
+      ),
+    );
+  }
+
+  void _recordPreviewRequest(UvcCameraMode mode) {
+    _dartLastError = null;
     _resetPreviewState();
     // Record the mode so stall detection can report and restart previews
     // started through openPreview directly, using default verification.
@@ -365,12 +849,6 @@ class _FlutterFfiUvcCamera implements UvcCamera {
         timeout: const Duration(seconds: 2),
       );
     }
-    return _bindings.uvc_start_preview(
-      mode.frameFormat,
-      mode.width,
-      mode.height,
-      mode.fps,
-    );
   }
 
   @override
@@ -380,20 +858,54 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     int consecutiveValidFrames = 3,
     Duration timeout = const Duration(seconds: 2),
   }) {
-    _sessionEpoch += 1;
+    _checkConsecutiveValidFrames(policy, consecutiveValidFrames);
+    _lifecycleCalls += 1;
+    return _queueStart(
+      mode,
+      policy: policy,
+      consecutiveValidFrames: consecutiveValidFrames,
+      timeout: timeout,
+    );
+  }
+
+  static void _checkConsecutiveValidFrames(UvcPreviewPolicy policy, int count) {
+    if (policy == UvcPreviewPolicy.stableFrames && count <= 0) {
+      throw ArgumentError.value(
+        count,
+        'consecutiveValidFrames',
+        'Must be greater than 0.',
+      );
+    }
+  }
+
+  // Queues one verified start. With [autoCalls], the start belongs to a
+  // startPreviewAuto sequence and gives up when a later lifecycle call has
+  // been made since that sequence began.
+  Future<UvcPreviewStartResult> _queueStart(
+    UvcCameraMode mode, {
+    required UvcPreviewPolicy policy,
+    required int consecutiveValidFrames,
+    required Duration timeout,
+    int? autoCalls,
+  }) {
     _lastPreviewRequest = _PreviewRequest(
       mode: mode,
       policy: policy,
       consecutiveValidFrames: consecutiveValidFrames,
       timeout: timeout,
     );
-    _resetStallTracking();
-    return _startPreviewInternal(
-      mode,
-      policy: policy,
-      requiredConsecutiveValidFrames: consecutiveValidFrames,
-      timeout: timeout,
-    );
+    return _serialized(() async {
+      if (autoCalls != null && _lifecycleCalls != autoCalls) {
+        return _interrupted(mode, Stopwatch(), 0, 0, 0);
+      }
+      if (!_disposed) _resetStallTracking();
+      return _startPreviewInternal(
+        mode,
+        policy: policy,
+        requiredConsecutiveValidFrames: consecutiveValidFrames,
+        timeout: timeout,
+      );
+    });
   }
 
   @override
@@ -412,34 +924,50 @@ class _FlutterFfiUvcCamera implements UvcCamera {
         'Must be greater than 0.',
       );
     }
-    final List<UvcCameraMode> modes = (candidates ??
-            _defaultAutoCandidates(preference))
-        .take(maxCandidates)
-        .toList();
+    _checkConsecutiveValidFrames(policy, consecutiveValidFrames);
+    _lifecycleCalls += 1;
+    final int calls = _lifecycleCalls;
+    // Enumerated on the queue so an open still in progress has finished.
+    final List<UvcCameraMode> modes = await _serialized(
+      () async => _disposed
+          ? <UvcCameraMode>[]
+          : (candidates ?? _defaultAutoCandidates(preference))
+                .take(maxCandidates)
+                .toList(),
+    );
     final List<UvcPreviewStartResult> attempts = <UvcPreviewStartResult>[];
     for (final UvcCameraMode mode in modes) {
-      final UvcPreviewStartResult result = await startPreview(
+      final UvcPreviewStartResult result = await _queueStart(
         mode,
         policy: policy,
         consecutiveValidFrames: consecutiveValidFrames,
         timeout: perModeTimeout,
+        autoCalls: calls,
       );
       attempts.add(result);
       if (result.success) break;
+      // A failed attempt leaves the device open for the next candidate.
+      // Interrupted or no device means the app moved on.
+      final int code = result.nativeErrorCode;
+      if (code == UvcErrorCode.interrupted.nativeValue ||
+          code == UvcErrorCode.noDevice.nativeValue) {
+        break;
+      }
     }
     return UvcAutoPreviewResult(attempts: attempts);
   }
 
   /// Orders descriptor-reported modes MJPEG before uncompressed formats, then
-  /// by resolution and frame rate — ascending for
+  /// by resolution and frame rate. Ascending for
   /// [UvcAutoPreviewPreference.reliability], descending for
   /// [UvcAutoPreviewPreference.quality].
   List<UvcCameraMode> _defaultAutoCandidates(
     UvcAutoPreviewPreference preference,
   ) {
     int formatRank(UvcCameraMode mode) => mode.formatName == 'MJPEG' ? 0 : 1;
-    final int direction =
-        preference == UvcAutoPreviewPreference.reliability ? 1 : -1;
+    final int direction = preference == UvcAutoPreviewPreference.reliability
+        ? 1
+        : -1;
     // H264 modes are opt-in via an explicit startPreview: keyframe timing and
     // decoder behavior vary too much per device for the auto sequence.
     final List<UvcCameraMode> modes = supportedModes()
@@ -457,36 +985,52 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   void _stopPreviewNative() {
-    _bindings.uvc_stop_preview();
+    _bindings.uvc_stop_preview(_s);
     _resetPreviewState();
+    if (_state == _State.previewing) _state = _State.open;
   }
 
   @override
-  void stopPreview() {
-    _sessionEpoch += 1;
-    _resetStallTracking();
-    _stopPreviewNative();
+  Future<void> stopPreview() {
+    _lifecycleCalls += 1;
+    _cancelRequests += 1;
+    return _serialized(() async {
+      if (_disposed) return;
+      _dartLastError = null;
+      _resetStallTracking();
+      _stopPreviewNative();
+    });
   }
 
   @override
-  void closeFd() {
+  Future<void> closeFd() {
     _ensureAndroidOnlyApi('closeFd');
-    _sessionEpoch += 1;
-    _resetStallTracking();
-    _tearDownNativeErrorListener();
-    _bindings.uvc_close_device();
-    _resetPreviewState();
+    _lifecycleCalls += 1;
+    _cancelRequests += 1;
+    if (_openWaitingOnPlatform && !_disposed) {
+      unawaited(_platformClose(nativeSessionHandle));
+    }
+    return _serialized(() async {
+      if (_disposed) return;
+      _dartLastError = null;
+      _stopPreviewNative();
+      final bool platformHeld = _openedDeviceId != null;
+      _forgetOpenedDevice();
+      _resetStallTracking();
+      _state = _State.closed;
+      _bindings.uvc_close_device(_s);
+      _tearDownNativeErrorListener();
+      _resetPreviewState();
+      if (platformHeld) await _platformClose(nativeSessionHandle);
+    });
   }
 
   @override
-  void closeDevice() => closeFd();
-
-  @override
-  bool get isPreviewing => _bindings.uvc_is_previewing() != 0;
+  bool get isPreviewing => _bindings.uvc_is_previewing(_s) != 0;
 
   @override
   Stream<UvcStreamError> get streamErrors {
-    if (_errorCallable == null) {
+    if (_errorCallable == null && !_disposed) {
       _setupNativeErrorListener();
     }
     return _streamErrorController.stream;
@@ -495,13 +1039,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   @override
   Stream<UvcDeviceEvent> get deviceEvents {
     _ensureSupportedPlatform();
-    return _deviceEventStream ??= _deviceEventChannel
-        .receiveBroadcastStream()
-        .map(
-          (dynamic event) => UvcDeviceEvent.fromMap(
-            (event as Map<Object?, Object?>?) ?? <Object?, Object?>{},
-          ),
-        );
+    return _deviceEvents().stream;
   }
 
   @override
@@ -514,7 +1052,16 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     _stallConfig = config;
     _resetStallTracking();
     _stallTimer?.cancel();
-    _stallTimer = Timer.periodic(config.checkInterval, (_) => _stallTick());
+    // Weak so an undisposed instance can still be collected and finalized.
+    final WeakReference<FfiUvcCamera> weak = WeakReference<FfiUvcCamera>(this);
+    _stallTimer = Timer.periodic(config.checkInterval, (Timer timer) {
+      final FfiUvcCamera? self = weak.target;
+      if (self == null) {
+        timer.cancel();
+        return;
+      }
+      self._stallTick();
+    });
   }
 
   @override
@@ -575,21 +1122,35 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     Duration silence,
   ) async {
     _restartInProgress = true;
-    final int epoch = _sessionEpoch;
+    final int calls = _lifecycleCalls;
     try {
       while (_restartAttempts < config.maxRestartAttempts) {
+        // The first attempt restarts a stalled preview. Later attempts follow
+        // our own failed ones, which leave the device open. Any app
+        // lifecycle call in between means the app moved on.
+        final _State required = _restartAttempts == 0
+            ? _State.previewing
+            : _State.open;
+        if (_state != required || _lifecycleCalls != calls) return;
         _restartAttempts += 1;
         final int attempt = _restartAttempts;
-        _stopPreviewNative();
-        final UvcPreviewStartResult result = await _startPreviewInternal(
-          request.mode,
-          policy: request.policy,
-          requiredConsecutiveValidFrames: request.consecutiveValidFrames,
-          timeout: request.timeout,
-        );
-        // The user started/stopped/closed the session while the restart was
-        // in flight; their call supersedes this recovery attempt.
-        if (_sessionEpoch != epoch || _stallConfig == null) return;
+        final UvcPreviewStartResult result = await _serialized(() async {
+          if (_disposed || _lifecycleCalls != calls) {
+            return _interrupted(request.mode, Stopwatch(), 0, 0, 0);
+          }
+          _stopPreviewNative();
+          return _startPreviewInternal(
+            request.mode,
+            policy: request.policy,
+            requiredConsecutiveValidFrames: request.consecutiveValidFrames,
+            timeout: request.timeout,
+          );
+        });
+        if (result.nativeErrorCode == UvcErrorCode.interrupted.nativeValue ||
+            _lifecycleCalls != calls ||
+            _stallConfig == null) {
+          return;
+        }
         if (result.success) {
           _stallLastSequence = latestFrameSequence();
           _stallLastProgress = _stallClock.elapsed;
@@ -622,13 +1183,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   @override
-  String get lastError {
-    final Pointer<Char> pointer = _bindings.uvc_last_error().cast<Char>();
-    if (pointer == nullptr) {
-      return '';
-    }
-    return pointer.cast<Utf8>().toDartString();
-  }
+  String get lastError => _dartLastError ?? _nativeLastError();
 
   @override
   UvcPreviewFrame? copyLatestFrame() => _copyLatestFrameInternal();
@@ -638,8 +1193,8 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     if (transform == UvcPreviewTransform.identity) {
       return _copyLatestFrameInternal();
     }
-    final int srcWidth = _bindings.uvc_frame_width();
-    final int srcHeight = _bindings.uvc_frame_height();
+    final int srcWidth = _bindings.uvc_frame_width(_s);
+    final int srcHeight = _bindings.uvc_frame_height(_s);
     if (srcWidth <= 0 || srcHeight <= 0) return null;
 
     final int expectedBytes = srcWidth * srcHeight * 4;
@@ -649,6 +1204,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     final Pointer<Int64> nativeSequence = calloc<Int64>();
     try {
       final int copiedBytes = _bindings.uvc_copy_latest_frame_rgba_transformed(
+        _s,
         nativeBuffer,
         expectedBytes,
         transform.rotation,
@@ -679,8 +1235,8 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     UvcPreviewTransform? transform,
   }) {
     final UvcPreviewTransform effective = transform ?? _previewTransform;
-    final int srcWidth = _bindings.uvc_frame_width();
-    final int srcHeight = _bindings.uvc_frame_height();
+    final int srcWidth = _bindings.uvc_frame_width(_s);
+    final int srcHeight = _bindings.uvc_frame_height(_s);
     if (srcWidth <= 0 || srcHeight <= 0) return null;
 
     // RGBA size is a generous upper bound for JPEG output at any quality.
@@ -691,6 +1247,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     final Pointer<Int64> nativeSequence = calloc<Int64>();
     try {
       final int encodedBytes = _bindings.uvc_take_picture_jpeg(
+        _s,
         nativeBuffer,
         bufferLength,
         quality,
@@ -705,9 +1262,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
       return UvcStillPicture(
         width: nativeWidth.value,
         height: nativeHeight.value,
-        jpegBytes: Uint8List.fromList(
-          nativeBuffer.asTypedList(encodedBytes),
-        ),
+        jpegBytes: Uint8List.fromList(nativeBuffer.asTypedList(encodedBytes)),
         sequence: nativeSequence.value,
       );
     } finally {
@@ -719,7 +1274,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   @override
-  int startVideoRecording(
+  void startVideoRecording(
     String path, {
     int bitrateBps = 0,
     UvcPreviewTransform? transform,
@@ -729,13 +1284,16 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     final int fpsHint = _lastPreviewRequest?.mode.fps ?? 0;
     final Pointer<Utf8> nativePath = path.toNativeUtf8(allocator: calloc);
     try {
-      return _bindings.uvc_start_recording(
-        nativePath.cast(),
-        bitrateBps,
-        fpsHint,
-        effective.rotation,
-        effective.flipHorizontal ? 1 : 0,
-        effective.flipVertical ? 1 : 0,
+      _check(
+        _bindings.uvc_start_recording(
+          _s,
+          nativePath.cast(),
+          bitrateBps,
+          fpsHint,
+          effective.rotation,
+          effective.flipHorizontal ? 1 : 0,
+          effective.flipVertical ? 1 : 0,
+        ),
       );
     } finally {
       calloc.free(nativePath);
@@ -743,19 +1301,21 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   }
 
   @override
-  int stopVideoRecording() => _bindings.uvc_stop_recording();
+  void stopVideoRecording() => _check(_bindings.uvc_stop_recording(_s));
 
   @override
-  bool get isRecording => _bindings.uvc_is_recording() != 0;
+  bool get isRecording => _bindings.uvc_is_recording(_s) != 0;
 
   @override
-  int latestFrameSequence() => _bindings.uvc_latest_frame_sequence();
+  int latestFrameSequence() => _bindings.uvc_latest_frame_sequence(_s);
 
   @override
-  UvcStreamStats getStreamStats() => _readJsonObject(
-    _bindings.uvc_get_stream_stats_json,
-    UvcStreamStats.fromJson,
-  ) ?? const UvcStreamStats.zero();
+  UvcStreamStats getStreamStats() =>
+      _readJsonObject(
+        _bindings.uvc_get_stream_stats_json,
+        UvcStreamStats.fromJson,
+      ) ??
+      const UvcStreamStats.zero();
 
   @override
   Future<int> createPreviewTexture() async {
@@ -791,6 +1351,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     await _textureChannel.invokeMethod<void>(
       'attachPreviewTexture',
       <String, Object?>{
+        'sessionHandle': nativeSessionHandle,
         'textureId': textureId,
         ...?width == null ? null : <String, Object?>{'width': width},
         ...?height == null ? null : <String, Object?>{'height': height},
@@ -807,6 +1368,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     final Pointer<Uint8> nativeBuffer = calloc<Uint8>(bufferLength);
     try {
       final int copiedBytes = _bindings.uvc_ctrl_get_all_json(
+        _s,
         nativeBuffer,
         bufferLength,
       );
@@ -834,6 +1396,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     final Pointer<Uint8> nativeBuffer = calloc<Uint8>(bufferLength);
     try {
       final int copiedBytes = _bindings.uvc_ctrl_get_bm_controls_json(
+        _s,
         nativeBuffer,
         bufferLength,
       );
@@ -859,7 +1422,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   /// not open or the control is not supported.
   @override
   int? getControl(UvcControlId controlId) {
-    final int result = _bindings.uvc_ctrl_get(controlId.nativeValue);
+    final int result = _bindings.uvc_ctrl_get(_s, controlId.nativeValue);
     // INT32_MIN == -2147483648 signals an error from the native layer
     if (result == -2147483648) {
       return null;
@@ -869,8 +1432,8 @@ class _FlutterFfiUvcCamera implements UvcCamera {
 
   /// Sets [controlId] to [value]. Returns 0 on success, negative on error.
   @override
-  int setControl(UvcControlId controlId, int value) =>
-      _bindings.uvc_ctrl_set(controlId.nativeValue, value);
+  void setControl(UvcControlId controlId, int value) =>
+      _check(_bindings.uvc_ctrl_set(_s, controlId.nativeValue, value));
 
   @override
   UvcWhiteBalanceComponent? getWhiteBalanceComponent() => _readJsonObject(
@@ -879,8 +1442,9 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   );
 
   @override
-  int setWhiteBalanceComponent(UvcWhiteBalanceComponent value) =>
-      _bindings.uvc_set_white_balance_component_values(value.blue, value.red);
+  void setWhiteBalanceComponent(UvcWhiteBalanceComponent value) => _check(
+    _bindings.uvc_set_white_balance_component_values(_s, value.blue, value.red),
+  );
 
   @override
   UvcFocusRelativeControl? getFocusRelativeControl() => _readJsonObject(
@@ -889,8 +1453,9 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   );
 
   @override
-  int setFocusRelativeControl(UvcFocusRelativeControl value) =>
-      _bindings.uvc_set_focus_rel_values(value.focusRel, value.speed);
+  void setFocusRelativeControl(UvcFocusRelativeControl value) => _check(
+    _bindings.uvc_set_focus_rel_values(_s, value.focusRel, value.speed),
+  );
 
   @override
   UvcZoomRelativeControl? getZoomRelativeControl() => _readJsonObject(
@@ -899,8 +1464,14 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   );
 
   @override
-  int setZoomRelativeControl(UvcZoomRelativeControl value) => _bindings
-      .uvc_set_zoom_rel_values(value.zoomRel, value.digitalZoom, value.speed);
+  void setZoomRelativeControl(UvcZoomRelativeControl value) => _check(
+    _bindings.uvc_set_zoom_rel_values(
+      _s,
+      value.zoomRel,
+      value.digitalZoom,
+      value.speed,
+    ),
+  );
 
   @override
   UvcPanTiltAbsoluteControl? getPanTiltAbsoluteControl() => _readJsonObject(
@@ -909,8 +1480,8 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   );
 
   @override
-  int setPanTiltAbsoluteControl(UvcPanTiltAbsoluteControl value) =>
-      _bindings.uvc_set_pantilt_abs_values(value.pan, value.tilt);
+  void setPanTiltAbsoluteControl(UvcPanTiltAbsoluteControl value) =>
+      _check(_bindings.uvc_set_pantilt_abs_values(_s, value.pan, value.tilt));
 
   @override
   UvcPanTiltRelativeControl? getPanTiltRelativeControl() => _readJsonObject(
@@ -919,13 +1490,15 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   );
 
   @override
-  int setPanTiltRelativeControl(UvcPanTiltRelativeControl value) =>
-      _bindings.uvc_set_pantilt_rel_values(
-        value.panRel,
-        value.panSpeed,
-        value.tiltRel,
-        value.tiltSpeed,
-      );
+  void setPanTiltRelativeControl(UvcPanTiltRelativeControl value) => _check(
+    _bindings.uvc_set_pantilt_rel_values(
+      _s,
+      value.panRel,
+      value.panSpeed,
+      value.tiltRel,
+      value.tiltSpeed,
+    ),
+  );
 
   @override
   UvcRollRelativeControl? getRollRelativeControl() => _readJsonObject(
@@ -934,8 +1507,8 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   );
 
   @override
-  int setRollRelativeControl(UvcRollRelativeControl value) =>
-      _bindings.uvc_set_roll_rel_values(value.rollRel, value.speed);
+  void setRollRelativeControl(UvcRollRelativeControl value) =>
+      _check(_bindings.uvc_set_roll_rel_values(_s, value.rollRel, value.speed));
 
   @override
   UvcDigitalWindowControl? getDigitalWindowControl() => _readJsonObject(
@@ -944,15 +1517,17 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   );
 
   @override
-  int setDigitalWindowControl(UvcDigitalWindowControl value) =>
-      _bindings.uvc_set_digital_window_values(
-        value.windowTop,
-        value.windowLeft,
-        value.windowBottom,
-        value.windowRight,
-        value.numSteps,
-        value.numStepsUnits,
-      );
+  void setDigitalWindowControl(UvcDigitalWindowControl value) => _check(
+    _bindings.uvc_set_digital_window_values(
+      _s,
+      value.windowTop,
+      value.windowLeft,
+      value.windowBottom,
+      value.windowRight,
+      value.numSteps,
+      value.numStepsUnits,
+    ),
+  );
 
   @override
   UvcRegionOfInterestControl? getRegionOfInterestControl() => _readJsonObject(
@@ -961,14 +1536,16 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   );
 
   @override
-  int setRegionOfInterestControl(UvcRegionOfInterestControl value) =>
-      _bindings.uvc_set_region_of_interest_values(
-        value.roiTop,
-        value.roiLeft,
-        value.roiBottom,
-        value.roiRight,
-        value.autoControls,
-      );
+  void setRegionOfInterestControl(UvcRegionOfInterestControl value) => _check(
+    _bindings.uvc_set_region_of_interest_values(
+      _s,
+      value.roiTop,
+      value.roiLeft,
+      value.roiBottom,
+      value.roiRight,
+      value.autoControls,
+    ),
+  );
 
   @override
   UvcPreviewTransform get previewTransform => _previewTransform;
@@ -977,6 +1554,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   void setPreviewTransform(UvcPreviewTransform transform) {
     _previewTransform = transform;
     _bindings.uvc_set_preview_transform(
+      _s,
       transform.rotation,
       transform.flipHorizontal ? 1 : 0,
       transform.flipVertical ? 1 : 0,
@@ -1013,9 +1591,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
   @override
   void togglePreviewFlipVertical() {
     setPreviewTransform(
-      _previewTransform.copyWith(
-        flipVertical: !_previewTransform.flipVertical,
-      ),
+      _previewTransform.copyWith(flipVertical: !_previewTransform.flipVertical),
     );
   }
 
@@ -1025,6 +1601,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
     final Pointer<Uint8> nativeBuffer = calloc<Uint8>(bufferLength);
     try {
       final int copiedBytes = _bindings.uvc_get_supported_modes_json(
+        _s,
         nativeBuffer,
         bufferLength,
       );
@@ -1038,7 +1615,7 @@ class _FlutterFfiUvcCamera implements UvcCamera {
       final List<dynamic> decoded = jsonDecode(jsonString) as List<dynamic>;
       // The native layer emits one entry per descriptor interval, and integer
       // fps truncation can collapse distinct intervals into identical mode
-      // tuples — dedupe so consumers never see duplicates.
+      // tuples. Dedupe so consumers never see duplicates.
       return decoded
           .map(
             (dynamic item) =>
@@ -1096,9 +1673,5 @@ void _ensureAndroidOnlyApi(String apiName) {
 FlutterFfiUvcBindings get _bindings =>
     _cachedBindings ??= FlutterFfiUvcBindings(_dylib);
 
-/// Shared package-level UVC camera service.
-///
-/// Import `package:flutter_ffi_uvc/flutter_ffi_uvc.dart` and use this object
-/// directly instead of instantiating your own camera wrapper or using the
-/// generated bindings. The generated bindings are an implementation detail.
-final UvcCamera uvcCamera = _FlutterFfiUvcCamera();
+/// Shared default camera instance. Create more with `UvcCamera()`.
+final UvcCamera uvcCamera = FfiUvcCamera();

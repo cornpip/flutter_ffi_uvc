@@ -1,6 +1,37 @@
-## 0.12.2-wip
+## 1.0.0-wip
 
-- docs: roadmap.md update
+- **BREAKING** `stopPreview()`, `closeFd()`, `openFd()`, and `openPreview()`
+  return a `Future`. Lifecycle calls on one instance run one at a time in
+  call order. `stopPreview()`, `closeUsbDevice()`, and `dispose()` interrupt
+  a `startPreview()` in progress, which reports `UvcErrorCode.interrupted`
+- **BREAKING** calls that can fail throw `UvcException` instead of returning
+  an int code: `openUsbDevice()`, `openFd()`, `openPreview()`,
+  `startVideoRecording()`, `stopVideoRecording()`, `setControl()`, and the
+  compound control setters
+- **BREAKING** remove `closeDevice()`, deprecated since 0.1.0. Use
+  `closeFd()`
+- add multiple simultaneous cameras: `UvcCamera()` creates an independent
+  instance and `dispose()` releases it. `uvcCamera` stays the shared default
+  - `deviceEvents` is shared by all instances
+  - `openUsbDevice()` fails with `UvcErrorCode.busy` for a device another
+    instance already holds open
+  - the camera itself is released when an undisposed instance is garbage
+    collected or lost to a hot restart. Everything else is released by
+    `dispose()`
+- add `openedDeviceId`
+- improve `openUsbDevice()`, `startPreview()`, and `startPreviewAuto()` to
+  run the native open and stream start off the UI thread
+- change detach handling: an instance whose device is unplugged closes the
+  device itself, after the `deviceEvents` event is delivered
+- change `lastError` on Windows to clear once frames are delivered again,
+  matching Android and Linux
+- fix `ensureCameraPermission()` never completing for a second concurrent
+  caller on Android
+- fix an `openUsbDevice()` waiting on the Android USB permission dialog never
+  completing when the activity is recreated meanwhile
+- fix Windows detach events not matching the opened device
+- fix mode switching on Windows failing with `MF_E_INVALIDREQUEST`
+- example: add camera slots for previewing several cameras at once
 
 ## 0.12.1
 

@@ -12,10 +12,13 @@
 #include <flutter/standard_method_codec.h>
 #include <flutter/texture_registrar.h>
 
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <memory>
 #include <vector>
+
+#include "uvc_mf_backend.h"
 
 namespace flutter_ffi_uvc {
 
@@ -34,7 +37,15 @@ class FlutterFfiUvcPlugin : public flutter::Plugin {
   FlutterFfiUvcPlugin& operator=(const FlutterFfiUvcPlugin&) = delete;
 
  private:
+  // One registered Flutter texture. A texture is bound to at most one session
+  // and a session to at most one texture. The session's frame listener
+  // carries this struct as its user_data.
   struct PreviewTexture {
+    FlutterFfiUvcPlugin* plugin = nullptr;
+    int64_t texture_id = -1;
+    // Registry id of the bound session, 0 when unbound. Read on the raster
+    // thread by CopyPixelBuffer, written on the platform thread.
+    std::atomic<int64_t> session{0};
     std::unique_ptr<flutter::TextureVariant> variant;
     FlutterDesktopPixelBuffer pixel_buffer{};
     std::vector<uint8_t> pixels;
@@ -48,7 +59,11 @@ class FlutterFfiUvcPlugin : public flutter::Plugin {
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   const FlutterDesktopPixelBuffer* CopyPixelBuffer(PreviewTexture* texture);
-  static void OnNativeFrameAvailable(void* context);
+  // Frame listener registered with the backend. user_data is a
+  // PreviewTexture.
+  static void OnNativeFrameAvailable(void* context, int64_t sequence);
+  // Unbinds a texture from its session and clears the frame listener.
+  void DetachTexture(PreviewTexture* texture);
 
   // Device attach/detach notifications via a hidden window. Created while the
   // event channel has a listener.
@@ -61,7 +76,6 @@ class FlutterFfiUvcPlugin : public flutter::Plugin {
   flutter::PluginRegistrarWindows* registrar_ = nullptr;
   flutter::TextureRegistrar* textures_ = nullptr;
   std::map<int64_t, std::unique_ptr<PreviewTexture>> preview_textures_;
-  int64_t attached_texture_id_ = -1;
 
   std::unique_ptr<flutter::EventChannel<flutter::EncodableValue>>
       device_event_channel_;

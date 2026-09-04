@@ -83,13 +83,35 @@ did not fit the package's surface. If demand appears, the Sink Writer
 approach is known viable (same native media type as stream and input type,
 gate on `MFSampleExtension_CleanPoint`, rebase timestamps).
 
+## Sessions
+
+Every camera handle is a `uvc_session_t` declared in
+`src/include/flutter_ffi_uvc.h`. A session owns its own media source, Source
+Reader, RGBA frame buffer, preview state, recorder, listeners, and last-error
+text, so two sessions can stream two cameras at the same time without
+touching each other. The only process-wide state is Media Foundation
+startup, the stable device-id table used by enumeration, and the log level.
+The plugin layer binds a session to a Flutter texture through
+`attachPreviewTexture`, which takes the session pointer as an integer
+`sessionHandle`, and one session drives at most one texture. The
+device-enumeration channel calls carry no session.
+
+Entry points arrive on the Flutter platform thread and on Dart worker
+threads. Media Foundation objects are free-threaded, so every entry point
+initialises COM as MTA on a thread that has no apartment yet.
+
 ## Frame pipeline
 
+- A source that already streamed is activated again before the next preview
+  start, with a new Source Reader. The Frame Server rejects a native type
+  change on such a source with `MF_E_INVALIDREQUEST`, and releasing the
+  reader alone leaves the source shut down, so a mode switch reopens the
+  source.
 - The Source Reader is configured with
   `MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING` and an RGB32 output
   type, so Media Foundation performs MJPEG decode and YUV conversion. The
-  backend converts BGRX → RGBA into the shared frame buffer that
-  `copyLatestFrame*` and the Flutter texture read.
+  backend converts BGRX to RGBA into the session's frame buffer that
+  `copyLatestFrame*` and the attached Flutter texture read.
 - Because decode happens inside Media Foundation, the MJPEG-specific stream
   stats (`invalidMjpegCount`, `warmupDropCount`, `staleFrameCount`,
   `callbackLockDropCount`, `previewSurfaceFailureCount`) are structurally
@@ -116,7 +138,7 @@ iris, zoom, roll, and absolute pan/tilt.
 
 - Windows has no file descriptors. `openUsbDevice(deviceId)` resolves the id
   to a Media Foundation symbolic link; ids are stable for the process
-  lifetime. `openFd`/`closeFd` are Android-only and **throw
+  lifetime and shared by all sessions. `openFd`/`closeFd` are Android-only and **throw
   `UnsupportedError` on Windows** — internally the native open call reuses
   the same entry point with the device id, but that mapping is an
   implementation detail the public fd API deliberately does not expose.

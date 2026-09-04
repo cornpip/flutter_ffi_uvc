@@ -21,19 +21,23 @@ class _FakeCamera implements UvcCamera {
 
   // --- unused stubs ---
   @override
+  Future<void> dispose() async {}
+  @override
   void setLogLevel(UvcLogLevel level) {}
   @override
   Future<bool> ensureCameraPermission() async => false;
   @override
   Future<List<UvcUsbDevice>> listUsbDevices() async => const [];
   @override
-  Future<int> openUsbDevice(int deviceId) async => -1;
+  Future<void> openUsbDevice(int deviceId) async {}
   @override
   Future<void> closeUsbDevice() async {}
   @override
-  int openFd(int fd) => -1;
+  int? get openedDeviceId => null;
   @override
-  int openPreview(UvcCameraMode mode) => -1;
+  Future<void> openFd(int fd) async {}
+  @override
+  Future<void> openPreview(UvcCameraMode mode) async {}
   @override
   Future<UvcPreviewStartResult> startPreview(
     UvcCameraMode mode, {
@@ -68,12 +72,9 @@ class _FakeCamera implements UvcCamera {
   @override
   void disableStallDetection() {}
   @override
-  void stopPreview() {}
+  Future<void> stopPreview() async {}
   @override
-  void closeFd() {}
-  @override
-  @Deprecated('Use closeFd() instead.')
-  void closeDevice() {}
+  Future<void> closeFd() async {}
   @override
   bool get isPreviewing => false;
   @override
@@ -85,11 +86,10 @@ class _FakeCamera implements UvcCamera {
   @override
   UvcStillPicture? takePicture({int quality = 90, UvcPreviewTransform? transform}) => null;
   @override
-  int startVideoRecording(String path,
-          {int bitrateBps = 0, UvcPreviewTransform? transform}) =>
-      -1;
+  void startVideoRecording(String path,
+      {int bitrateBps = 0, UvcPreviewTransform? transform}) {}
   @override
-  int stopVideoRecording() => 0;
+  void stopVideoRecording() {}
   @override
   bool get isRecording => false;
   @override
@@ -110,39 +110,39 @@ class _FakeCamera implements UvcCamera {
   @override
   int? getControl(UvcControlId controlId) => null;
   @override
-  int setControl(UvcControlId controlId, int value) => -1;
+  void setControl(UvcControlId controlId, int value) {}
   @override
   UvcWhiteBalanceComponent? getWhiteBalanceComponent() => null;
   @override
-  int setWhiteBalanceComponent(UvcWhiteBalanceComponent value) => -1;
+  void setWhiteBalanceComponent(UvcWhiteBalanceComponent value) {}
   @override
   UvcFocusRelativeControl? getFocusRelativeControl() => null;
   @override
-  int setFocusRelativeControl(UvcFocusRelativeControl value) => -1;
+  void setFocusRelativeControl(UvcFocusRelativeControl value) {}
   @override
   UvcZoomRelativeControl? getZoomRelativeControl() => null;
   @override
-  int setZoomRelativeControl(UvcZoomRelativeControl value) => -1;
+  void setZoomRelativeControl(UvcZoomRelativeControl value) {}
   @override
   UvcPanTiltAbsoluteControl? getPanTiltAbsoluteControl() => null;
   @override
-  int setPanTiltAbsoluteControl(UvcPanTiltAbsoluteControl value) => -1;
+  void setPanTiltAbsoluteControl(UvcPanTiltAbsoluteControl value) {}
   @override
   UvcPanTiltRelativeControl? getPanTiltRelativeControl() => null;
   @override
-  int setPanTiltRelativeControl(UvcPanTiltRelativeControl value) => -1;
+  void setPanTiltRelativeControl(UvcPanTiltRelativeControl value) {}
   @override
   UvcRollRelativeControl? getRollRelativeControl() => null;
   @override
-  int setRollRelativeControl(UvcRollRelativeControl value) => -1;
+  void setRollRelativeControl(UvcRollRelativeControl value) {}
   @override
   UvcDigitalWindowControl? getDigitalWindowControl() => null;
   @override
-  int setDigitalWindowControl(UvcDigitalWindowControl value) => -1;
+  void setDigitalWindowControl(UvcDigitalWindowControl value) {}
   @override
   UvcRegionOfInterestControl? getRegionOfInterestControl() => null;
   @override
-  int setRegionOfInterestControl(UvcRegionOfInterestControl value) => -1;
+  void setRegionOfInterestControl(UvcRegionOfInterestControl value) {}
   @override
   List<UvcCameraMode> supportedModes() => const [];
   @override
