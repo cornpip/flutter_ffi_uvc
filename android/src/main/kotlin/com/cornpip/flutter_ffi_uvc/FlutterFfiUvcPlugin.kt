@@ -147,6 +147,17 @@ class FlutterFfiUvcPlugin :
         appContext = binding.applicationContext
         usbManager = binding.applicationContext.getSystemService(Context.USB_SERVICE) as UsbManager
         textureRegistry = binding.textureRegistry
+        // Registered on the application context so the permission dialog's
+        // answer still arrives while the activity is recreated.
+        val filter = IntentFilter(usbPermissionAction)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            binding.applicationContext.registerReceiver(
+                permissionReceiver, filter, Context.RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            binding.applicationContext.registerReceiver(permissionReceiver, filter)
+        }
 
         textureChannel = MethodChannel(binding.binaryMessenger, "flutter_ffi_uvc/texture")
         textureChannel.setMethodCallHandler(this)
@@ -178,6 +189,8 @@ class FlutterFfiUvcPlugin :
         unregisterDeviceEventReceiver()
         deviceEventChannel.setStreamHandler(null)
         deviceEventSink = null
+        try { appContext?.unregisterReceiver(permissionReceiver) } catch (_: Exception) {}
+        pendingUsbOpens.clear()
         connections.keys.toList().forEach { closeConnection(it) }
         appContext = null
         usbManager = null
@@ -188,27 +201,16 @@ class FlutterFfiUvcPlugin :
     override fun onAttachedToActivity(binding: ActivityPluginBinding) {
         activity = binding.activity
         binding.addRequestPermissionsResultListener(this)
-        val filter = IntentFilter(usbPermissionAction)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            binding.activity.registerReceiver(
-                permissionReceiver, filter, Context.RECEIVER_NOT_EXPORTED
-            )
-        } else {
-            @Suppress("DEPRECATION")
-            binding.activity.registerReceiver(permissionReceiver, filter)
-        }
     }
 
     override fun onDetachedFromActivity() {
-        detachActivity()
-        // The dialog's answer can no longer reach this listener. Fail the
-        // waiters so the next call shows a fresh dialog.
+        activity = null
+        // The CAMERA dialog's answer can no longer reach this listener. Fail
+        // the waiters so the next call shows a fresh dialog. USB permission
+        // waiters stay: their receiver lives on the application context.
         val waiting = cameraPermissionResults.toList()
         cameraPermissionResults.clear()
         waiting.forEach { it.success(false) }
-        val pending = pendingUsbOpens.values.toList()
-        pendingUsbOpens.clear()
-        pending.forEach { it.result.error("no_activity", "Activity detached during USB permission request", null) }
     }
 
     override fun onReattachedToActivityForConfigChanges(binding: ActivityPluginBinding) {
@@ -216,13 +218,6 @@ class FlutterFfiUvcPlugin :
     }
 
     override fun onDetachedFromActivityForConfigChanges() {
-        // The activity comes back. Keep the waiters so the dialog's answer
-        // still reaches them after reattach.
-        detachActivity()
-    }
-
-    private fun detachActivity() {
-        try { activity?.unregisterReceiver(permissionReceiver) } catch (_: Exception) {}
         activity = null
     }
 
@@ -433,7 +428,12 @@ class FlutterFfiUvcPlugin :
     }
 
     private fun closeConnection(sessionHandle: Long) {
-        connections.remove(sessionHandle)?.connection?.close()
+        val open = connections.remove(sessionHandle) ?: return
+        // The Dart layer closes the native device before this call. The close
+        // here is for an instance collected without dispose(), so libuvc
+        // never runs on a released fd.
+        nativeCloseDevice(sessionHandle)
+        open.connection.close()
     }
 
     private fun detachTextureOwners(textureId: Long) {
@@ -524,5 +524,6 @@ class FlutterFfiUvcPlugin :
 
     private external fun nativeAttachSurface(sessionHandle: Long, surface: Surface): Int
     private external fun nativeDetachSurface(sessionHandle: Long)
+    private external fun nativeCloseDevice(sessionHandle: Long)
     private external fun nativeSessionIsLive(sessionHandle: Long): Boolean
 }

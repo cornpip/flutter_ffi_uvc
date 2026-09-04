@@ -85,8 +85,10 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_transformed(
 FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(uvc_session_t *session);
 
 // Listeners run on native threads and receive user_data unchanged. A NULL
-// listener clears the slot. uvc_close_device keeps the frame listener and
-// clears the error listener.
+// listener clears the slot and returns only after a call in progress has
+// finished, so user_data may be freed afterwards. A listener must not call
+// back into this ABI. uvc_close_device keeps the frame listener and clears
+// the error listener.
 typedef void (*uvc_frame_listener_t)(void *user_data, int64_t sequence);
 FFI_PLUGIN_EXPORT void uvc_set_frame_listener(
     uvc_session_t *session,

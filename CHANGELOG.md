@@ -25,6 +25,8 @@
   matching Android and Linux
 - fix `ensureCameraPermission()` never completing for a second concurrent
   caller on Android
+- fix an `openUsbDevice()` waiting on the Android USB permission dialog never
+  completing when the activity is recreated meanwhile
 - fix Windows detach events not matching the opened device
 - fix mode switching on Windows failing with `MF_E_INVALIDREQUEST`
 - example: add camera slots for previewing several cameras at once

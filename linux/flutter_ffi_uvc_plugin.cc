@@ -291,26 +291,6 @@ G_DEFINE_TYPE(FlutterFfiUvcPlugin, flutter_ffi_uvc_plugin, g_object_get_type())
 
 namespace {
 
-// Textures a frame listener may still name. The backend calls the listener
-// unlocked, so OnNativeFrame only touches textures still in this set.
-GMutex g_live_textures_mutex;
-GHashTable* g_live_textures = nullptr;  // FfiUvcTexture* -> unused
-
-void LiveTexturesAdd(FfiUvcTexture* texture) {
-  g_mutex_lock(&g_live_textures_mutex);
-  if (g_live_textures == nullptr) {
-    g_live_textures = g_hash_table_new(g_direct_hash, g_direct_equal);
-  }
-  g_hash_table_add(g_live_textures, texture);
-  g_mutex_unlock(&g_live_textures_mutex);
-}
-
-void LiveTexturesRemove(FfiUvcTexture* texture) {
-  g_mutex_lock(&g_live_textures_mutex);
-  if (g_live_textures != nullptr) g_hash_table_remove(g_live_textures, texture);
-  g_mutex_unlock(&g_live_textures_mutex);
-}
-
 // Runs on the main thread with the ref taken in OnNativeFrame.
 gboolean MarkFrameIdle(gpointer user_data) {
   FfiUvcTexture* texture = FFI_UVC_TEXTURE(user_data);
@@ -324,18 +304,13 @@ gboolean MarkFrameIdle(gpointer user_data) {
 }
 
 // Frame listener. Runs on the native delivery thread with the bound texture
-// as user_data.
+// as user_data. The texture outlives this call: clearing the listener in
+// UnbindTexture returns only after it has finished.
 void OnNativeFrame(void* user_data, int64_t /*sequence*/) {
-  g_mutex_lock(&g_live_textures_mutex);
-  const gboolean live = g_live_textures != nullptr &&
-                        g_hash_table_contains(g_live_textures, user_data);
-  if (live) {
-    FfiUvcTexture* texture = FFI_UVC_TEXTURE(user_data);
-    if (g_atomic_int_compare_and_exchange(&texture->mark_pending, 0, 1)) {
-      g_idle_add(MarkFrameIdle, g_object_ref(texture));
-    }
+  FfiUvcTexture* texture = FFI_UVC_TEXTURE(user_data);
+  if (g_atomic_int_compare_and_exchange(&texture->mark_pending, 0, 1)) {
+    g_idle_add(MarkFrameIdle, g_object_ref(texture));
   }
-  g_mutex_unlock(&g_live_textures_mutex);
 }
 
 // Unbinds a texture from its session and clears the session's frame
@@ -532,10 +507,17 @@ void HandleUsbCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
       }
     }
   } else if (strcmp(method, "closeUsbDevice") == 0) {
-    // The native session is closed by the Dart layer through
-    // uvc_close_device before this call; only the fd remains to release.
+    // The Dart layer closes the native device before this call. The close
+    // here is for an instance collected without dispose(), so libuvc never
+    // runs on a released fd.
     uvc_session_t* session = SessionFromArgs(args);
-    if (session != nullptr) CloseSessionFd(self, session);
+    if (session != nullptr) {
+      if (uvc_session_acquire(session)) {
+        uvc_close_device(session);
+        uvc_session_release(session);
+      }
+      CloseSessionFd(self, session);
+    }
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   } else {
     response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
@@ -564,7 +546,6 @@ void HandleTextureCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
     } else {
       const int64_t texture_id = fl_texture_get_id(FL_TEXTURE(texture));
       texture->plugin = self;
-      LiveTexturesAdd(texture);
       g_hash_table_replace(self->textures, Int64KeyNew(texture_id), texture);
       g_autoptr(FlValue) result = fl_value_new_int(texture_id);
       response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
@@ -574,7 +555,6 @@ void HandleTextureCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
     gpointer texture = g_hash_table_lookup(self->textures, &texture_id);
     if (texture != nullptr) {
       UnbindTexture(FFI_UVC_TEXTURE(texture));
-      LiveTexturesRemove(FFI_UVC_TEXTURE(texture));
       fl_texture_registrar_unregister_texture(self->texture_registrar,
                                               FL_TEXTURE(texture));
       g_hash_table_remove(self->textures, &texture_id);
@@ -912,7 +892,6 @@ static void flutter_ffi_uvc_plugin_dispose(GObject* object) {
     g_hash_table_iter_init(&iter, self->textures);
     while (g_hash_table_iter_next(&iter, &key, &texture)) {
       UnbindTexture(FFI_UVC_TEXTURE(texture));
-      LiveTexturesRemove(FFI_UVC_TEXTURE(texture));
       fl_texture_registrar_unregister_texture(self->texture_registrar,
                                               FL_TEXTURE(texture));
     }

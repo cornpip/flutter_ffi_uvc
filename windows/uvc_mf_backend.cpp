@@ -176,19 +176,22 @@ struct Session {
   int flip_h = 0;
   int flip_v = 0;
 
-  // Guarded by mutex. Copied out and invoked without the lock.
+  // Guarded by listener_mutex, which is held while a listener runs so
+  // clearing a slot returns only after a call in progress has finished.
+  // Leaf lock. A listener must not call back into the ABI.
+  std::mutex listener_mutex;
   uvc_frame_listener_t frame_listener = nullptr;
   void* frame_listener_data = nullptr;
   void (*plugin_frame_cb)(void*) = nullptr;
   void* plugin_frame_ctx = nullptr;
+  uvc_error_listener_t error_listener = nullptr;
+  void* error_listener_data = nullptr;
 
   // Guarded by error_mutex.
   std::mutex error_mutex;
   char last_error[512] = {0};
   // Copy handed to uvc_last_error callers. Written only by uvc_last_error.
   char last_error_snapshot[512] = {0};
-  uvc_error_listener_t error_listener = nullptr;
-  void* error_listener_data = nullptr;
 
   // MP4 recording. rec_mutex serializes WriteSample against Finalize.
   IMFSinkWriter* sink_writer = nullptr;
@@ -275,16 +278,13 @@ void ReportError(Session& s, const char* fmt, ...) {
   va_start(args, fmt);
   vsnprintf(message, sizeof(message), fmt, args);
   va_end(args);
-  uvc_error_listener_t listener = nullptr;
-  void* user_data = nullptr;
   {
     std::lock_guard<std::mutex> lock(s.error_mutex);
     strncpy_s(s.last_error, message, _TRUNCATE);
-    listener = s.error_listener;
-    user_data = s.error_listener_data;
   }
-  if (listener != nullptr) {
-    listener(user_data, message);
+  std::lock_guard<std::mutex> lock(s.listener_mutex);
+  if (s.error_listener != nullptr) {
+    s.error_listener(s.error_listener_data, message);
   }
 }
 
@@ -620,19 +620,11 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
                   static_cast<unsigned long>(hr_status));
     }
     if (delivered) {
-      uvc_frame_listener_t listener = nullptr;
-      void* listener_data = nullptr;
-      void (*plugin_cb)(void*) = nullptr;
-      void* plugin_ctx = nullptr;
-      {
-        std::lock_guard<std::mutex> lock(s.mutex);
-        listener = s.frame_listener;
-        listener_data = s.frame_listener_data;
-        plugin_cb = s.plugin_frame_cb;
-        plugin_ctx = s.plugin_frame_ctx;
+      std::lock_guard<std::mutex> lock(s.listener_mutex);
+      if (s.frame_listener != nullptr) {
+        s.frame_listener(s.frame_listener_data, sequence);
       }
-      if (listener != nullptr) listener(listener_data, sequence);
-      if (plugin_cb != nullptr) plugin_cb(plugin_ctx);
+      if (s.plugin_frame_cb != nullptr) s.plugin_frame_cb(s.plugin_frame_ctx);
     }
     // Encode before requesting the next sample so this callback stays the
     // only writer of the recording snapshot buffer.
@@ -1215,7 +1207,7 @@ void SetFrameAvailableCallback(uvc_session_t* session,
                                void* context) {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
-  std::lock_guard<std::mutex> lock(s->mutex);
+  std::lock_guard<std::mutex> lock(s->listener_mutex);
   s->plugin_frame_cb = callback;
   s->plugin_frame_ctx = context;
 }
@@ -1285,13 +1277,13 @@ FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t* session) {
   {
     std::lock_guard<std::mutex> lock(s->mutex);
     CloseDeviceLocked(*s);
+  }
+  {
+    std::lock_guard<std::mutex> lock(s->listener_mutex);
     s->frame_listener = nullptr;
     s->frame_listener_data = nullptr;
     s->plugin_frame_cb = nullptr;
     s->plugin_frame_ctx = nullptr;
-  }
-  {
-    std::lock_guard<std::mutex> lock(s->error_mutex);
     s->error_listener = nullptr;
     s->error_listener_data = nullptr;
   }
@@ -1451,7 +1443,7 @@ FFI_PLUGIN_EXPORT void uvc_close_device(uvc_session_t* session) {
   }
   // The frame listener survives so a bound texture keeps working across a
   // device switch. The error listener belongs to the closed stream.
-  std::lock_guard<std::mutex> lock(s->error_mutex);
+  std::lock_guard<std::mutex> lock(s->listener_mutex);
   s->error_listener = nullptr;
   s->error_listener_data = nullptr;
 }
@@ -1833,7 +1825,7 @@ FFI_PLUGIN_EXPORT void uvc_set_frame_listener(uvc_session_t* session,
                                               void* user_data) {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
-  std::lock_guard<std::mutex> lock(s->mutex);
+  std::lock_guard<std::mutex> lock(s->listener_mutex);
   s->frame_listener = listener;
   s->frame_listener_data = listener != nullptr ? user_data : nullptr;
 }
@@ -1843,7 +1835,7 @@ FFI_PLUGIN_EXPORT void uvc_set_error_listener(uvc_session_t* session,
                                               void* user_data) {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
-  std::lock_guard<std::mutex> lock(s->error_mutex);
+  std::lock_guard<std::mutex> lock(s->listener_mutex);
   s->error_listener = listener;
   s->error_listener_data = listener != nullptr ? user_data : nullptr;
 }

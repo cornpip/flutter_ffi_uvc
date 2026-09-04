@@ -143,12 +143,31 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     ),
   );
 
+  // Releases the platform connection and texture binding of an instance
+  // that is garbage collected without dispose(). The platform close also
+  // closes the native device first, so it is safe in any order with
+  // _finalizer.
+  static final Finalizer<int> _platformFinalizer = Finalizer<int>((int handle) {
+    final Map<String, Object?> args = <String, Object?>{
+      'sessionHandle': handle,
+    };
+    unawaited(
+      _textureChannel
+          .invokeMethod<void>('detachPreviewSession', args)
+          .catchError((_) {}),
+    );
+    unawaited(
+      _usbChannel.invokeMethod<void>('closeUsbDevice', args).catchError((_) {}),
+    );
+  });
+
   Pointer<uvc_session_t> _createSession() {
     final Pointer<uvc_session_t> session = _bindings.uvc_session_create();
     if (session == nullptr) {
       throw StateError('Native session allocation failed.');
     }
     _finalizer.attach(this, session.cast<Void>(), detach: this);
+    _platformFinalizer.attach(this, session.address, detach: this);
     return session;
   }
 
@@ -680,6 +699,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       return;
     }
     _finalizer.detach(this);
+    _platformFinalizer.detach(this);
     // An open waiting on the platform is cancelled now instead of after it.
     if (_openWaitingOnPlatform) await _platformClose(session.address);
     // Queued commands run first and skip themselves. The session goes away
@@ -716,8 +736,13 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       _dartLastError = null;
       _resetStallTracking();
       // A device opened through openUsbDevice is replaced by the raw
-      // descriptor. Drop its tracking and release its platform connection.
+      // descriptor. Close it natively first, then release its platform
+      // connection.
       if (_openedDeviceId != null) {
+        _stopPreviewNative();
+        _bindings.uvc_close_device(_s);
+        _tearDownNativeErrorListener();
+        _state = _State.closed;
         _forgetOpenedDevice();
         await _platformClose(nativeSessionHandle);
       }

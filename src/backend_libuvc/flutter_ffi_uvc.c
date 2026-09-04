@@ -129,6 +129,8 @@ typedef struct {
 //   usb_mutex    held across every USB control transfer and across
 //                uvc_start_streaming / uvc_stop_streaming.
 //   error_mutex  leaf lock for last_error. Never takes the others.
+//   listener_mutex  leaf lock held while a listener slot is read, written,
+//                or running. A listener must not call back into the ABI.
 // devh is written only under both mutex and usb_mutex. A reader may hold either.
 // The frame callback trylocks mutex and takes error_mutex, never usb_mutex.
 // The stop path releases mutex before uvc_stop_streaming so the in-flight
@@ -142,6 +144,7 @@ struct uvc_session {
   pthread_mutex_t mutex;
   pthread_mutex_t usb_mutex;
   pthread_mutex_t error_mutex;
+  pthread_mutex_t listener_mutex;
   pthread_cond_t callback_cond;
   // Signaled after each delivered frame while a recording consumes frames.
   pthread_cond_t recording_cond;
@@ -157,6 +160,7 @@ struct uvc_session {
   int stopping_preview;
   uint32_t callbacks_inflight;
   int64_t latest_sequence;
+  // Guarded by listener_mutex.
   uvc_frame_listener_t frame_listener;
   void *frame_listener_user_data;
   uvc_error_listener_t error_listener;
@@ -594,7 +598,28 @@ static void close_device_resources_locked(uvc_session_t *s) {
   // The frame listener survives preview stops and device closes on purpose:
   // desktop plugin layers register it once per texture attach, independent of
   // the preview session lifecycle. It only changes via uvc_set_frame_listener.
+  pthread_mutex_lock(&s->listener_mutex);
   s->error_listener = NULL;
+  s->error_listener_user_data = NULL;
+  pthread_mutex_unlock(&s->listener_mutex);
+}
+
+// Listeners run under listener_mutex, so clearing a slot returns only after
+// a call in progress has finished. Callers hold no other session lock.
+static void dispatch_frame(uvc_session_t *s, int64_t sequence) {
+  pthread_mutex_lock(&s->listener_mutex);
+  if (s->frame_listener != NULL) {
+    s->frame_listener(s->frame_listener_user_data, sequence);
+  }
+  pthread_mutex_unlock(&s->listener_mutex);
+}
+
+static void dispatch_error(uvc_session_t *s, const char *message) {
+  pthread_mutex_lock(&s->listener_mutex);
+  if (s->error_listener != NULL) {
+    s->error_listener(s->error_listener_user_data, message);
+  }
+  pthread_mutex_unlock(&s->listener_mutex);
 }
 
 static int ensure_rgb_frame_locked(uvc_session_t *s, size_t required_bytes) {
@@ -1249,10 +1274,9 @@ static int h264_process_frame_locked(uvc_session_t *s, const uvc_frame_t *frame)
 
 // Shared bookkeeping once latest_rgba holds a new frame: preview surface
 // render, delivery stats, recording wake-up. Returns the delivered sequence;
-// the caller invokes *out_listener (if set) after releasing the mutex.
+// the caller runs dispatch_frame after releasing the mutex.
 static int64_t finish_frame_delivery_locked(uvc_session_t *s,
-    uint64_t callback_monotonic_ns, uvc_frame_listener_t *out_listener,
-    void **out_user_data) {
+    uint64_t callback_monotonic_ns) {
 #if defined(__ANDROID__)
   render_latest_rgba_to_preview_surface_locked(s);
 #endif
@@ -1279,8 +1303,6 @@ static int64_t finish_frame_delivery_locked(uvc_session_t *s,
   s->stats.last_delivered_monotonic_ns = callback_monotonic_ns;
   s->stats.delivered_frame_count += 1;
   s->stats.decode_success_count += 1;
-  *out_listener = s->frame_listener;
-  *out_user_data = s->frame_listener_user_data;
   if (s->recording_active) {
     pthread_cond_broadcast(&s->recording_cond);
   }
@@ -1314,8 +1336,6 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
   s->callback_count += 1;
   s->stats.input_frame_count += 1;
   uint32_t callback_count = s->callback_count;
-  uvc_error_listener_t error_listener = NULL;
-  void *error_user_data = NULL;
 
   if (s->stats.has_last_source_sequence &&
       frame->sequence <= s->stats.last_source_sequence) {
@@ -1357,11 +1377,9 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         expected_input_bytes,
         frame->data_bytes);
     const char *error_message = stage_error_ring_locked(s);
-    error_listener = s->error_listener;
-    error_user_data = s->error_listener_user_data;
     finish_callback_locked(s);
     pthread_mutex_unlock(&s->mutex);
-    if (error_listener) error_listener(error_user_data, error_message);
+    dispatch_error(s, error_message);
     return;
   }
 
@@ -1400,11 +1418,9 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
           frame->height,
           frame->data_bytes);
       const char *error_message = stage_error_ring_locked(s);
-      error_listener = s->error_listener;
-      error_user_data = s->error_listener_user_data;
       finish_callback_locked(s);
       pthread_mutex_unlock(&s->mutex);
-      if (error_listener) error_listener(error_user_data, error_message);
+      dispatch_error(s, error_message);
       return;
     }
   }
@@ -1424,14 +1440,12 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
     if (h264_result <= 0) {
       if (h264_result < 0) {
         const char *error_message = stage_error_ring_locked(s);
-        error_listener = s->error_listener;
-        error_user_data = s->error_listener_user_data;
         finish_callback_locked(s);
         pthread_mutex_unlock(&s->mutex);
         if (keyframe_devh != NULL) {
           h264_request_keyframe(keyframe_devh, keyframe_eu_unit_id);
         }
-        if (error_listener) error_listener(error_user_data, error_message);
+        dispatch_error(s, error_message);
         return;
       }
       finish_callback_locked(s);
@@ -1441,18 +1455,14 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
       }
       return;
     }
-    uvc_frame_listener_t h264_listener = NULL;
-    void *h264_user_data = NULL;
-    const int64_t h264_sequence = finish_frame_delivery_locked(
-        s, callback_monotonic_ns, &h264_listener, &h264_user_data);
+    const int64_t h264_sequence =
+        finish_frame_delivery_locked(s, callback_monotonic_ns);
     finish_callback_locked(s);
     pthread_mutex_unlock(&s->mutex);
     if (keyframe_devh != NULL) {
       h264_request_keyframe(keyframe_devh, keyframe_eu_unit_id);
     }
-    if (h264_listener != NULL) {
-      h264_listener(h264_user_data, h264_sequence);
-    }
+    dispatch_frame(s, h264_sequence);
     return;
   }
 #endif  // defined(__ANDROID__)
@@ -1468,11 +1478,9 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         frame->height,
         required_rgb_bytes);
     const char *error_message = stage_error_ring_locked(s);
-    error_listener = s->error_listener;
-    error_user_data = s->error_listener_user_data;
     finish_callback_locked(s);
     pthread_mutex_unlock(&s->mutex);
-    if (error_listener) error_listener(error_user_data, error_message);
+    dispatch_error(s, error_message);
     return;
   }
 
@@ -1490,30 +1498,23 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         frame->height,
         uvc_strerror(convert_result));
     const char *error_message = stage_error_ring_locked(s);
-    error_listener = s->error_listener;
-    error_user_data = s->error_listener_user_data;
     finish_callback_locked(s);
     pthread_mutex_unlock(&s->mutex);
-    if (error_listener) error_listener(error_user_data, error_message);
+    dispatch_error(s, error_message);
     return;
   }
 
   const size_t rgba_bytes = (size_t)s->rgb_frame->width * (size_t)s->rgb_frame->height * 4;
   int64_t delivered_sequence = 0;
-  uvc_frame_listener_t frame_listener = NULL;
-  void *frame_user_data = NULL;
 
   if (!update_latest_rgba_locked(s)) {
     const char *error_message = stage_error_ring_locked(s);
-    error_listener = s->error_listener;
-    error_user_data = s->error_listener_user_data;
     finish_callback_locked(s);
     pthread_mutex_unlock(&s->mutex);
-    if (error_listener) error_listener(error_user_data, error_message);
+    dispatch_error(s, error_message);
     return;
   }
-  delivered_sequence = finish_frame_delivery_locked(
-      s, callback_monotonic_ns, &frame_listener, &frame_user_data);
+  delivered_sequence = finish_frame_delivery_locked(s, callback_monotonic_ns);
   const int delivered_width = s->frame_width;
   const int delivered_height = s->frame_height;
   finish_callback_locked(s);
@@ -1529,9 +1530,7 @@ static void frame_callback(uvc_frame_t *frame, void *user_ptr) {
         rgba_bytes);
   }
 
-  if (frame_listener != NULL) {
-    frame_listener(frame_user_data, delivered_sequence);
-  }
+  dispatch_frame(s, delivered_sequence);
 }
 
 // ---------------------------------------------------------------------------
@@ -1546,6 +1545,7 @@ FFI_PLUGIN_EXPORT uvc_session_t *uvc_session_create(void) {
   pthread_mutex_init(&s->mutex, NULL);
   pthread_mutex_init(&s->usb_mutex, NULL);
   pthread_mutex_init(&s->error_mutex, NULL);
+  pthread_mutex_init(&s->listener_mutex, NULL);
   pthread_cond_init(&s->callback_cond, NULL);
   pthread_cond_init(&s->recording_cond, NULL);
 #if defined(__ANDROID__)
@@ -1571,6 +1571,7 @@ FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t *session) {
   pthread_mutex_unlock(&session->mutex);
   pthread_cond_destroy(&session->recording_cond);
   pthread_cond_destroy(&session->callback_cond);
+  pthread_mutex_destroy(&session->listener_mutex);
   pthread_mutex_destroy(&session->error_mutex);
   pthread_mutex_destroy(&session->usb_mutex);
   pthread_mutex_destroy(&session->mutex);
@@ -2174,6 +2175,23 @@ Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeSessionIsLive(
   return JNI_TRUE;
 }
 
+// Closes the device of a live session. The Kotlin layer calls this before
+// it closes the USB connection so libuvc never runs on a released fd.
+JNIEXPORT void JNICALL
+Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeCloseDevice(
+    JNIEnv *env,
+    jobject thiz,
+    jlong session) {
+  (void)env;
+  (void)thiz;
+  uvc_session_t *s = (uvc_session_t *)(intptr_t)session;
+  if (!uvc_session_acquire(s)) {
+    return;
+  }
+  uvc_close_device(s);
+  uvc_session_release(s);
+}
+
 JNIEXPORT void JNICALL
 Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeDetachSurface(
     JNIEnv *env,
@@ -2450,10 +2468,10 @@ FFI_PLUGIN_EXPORT void uvc_set_frame_listener(
   if (s == NULL) {
     return;
   }
-  pthread_mutex_lock(&s->mutex);
+  pthread_mutex_lock(&s->listener_mutex);
   s->frame_listener = listener;
   s->frame_listener_user_data = listener != NULL ? user_data : NULL;
-  pthread_mutex_unlock(&s->mutex);
+  pthread_mutex_unlock(&s->listener_mutex);
 }
 
 FFI_PLUGIN_EXPORT void uvc_set_error_listener(
@@ -2463,10 +2481,10 @@ FFI_PLUGIN_EXPORT void uvc_set_error_listener(
   if (s == NULL) {
     return;
   }
-  pthread_mutex_lock(&s->mutex);
+  pthread_mutex_lock(&s->listener_mutex);
   s->error_listener = listener;
   s->error_listener_user_data = listener != NULL ? user_data : NULL;
-  pthread_mutex_unlock(&s->mutex);
+  pthread_mutex_unlock(&s->listener_mutex);
 }
 
 // Test-only: injects an RGBA buffer directly into the shared frame state.

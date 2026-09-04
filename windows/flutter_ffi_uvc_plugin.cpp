@@ -6,7 +6,6 @@
 
 #include <cwctype>
 #include <mutex>
-#include <set>
 #include <string>
 #include <variant>
 
@@ -29,12 +28,6 @@ const GUID kVideoCameraClass = {
     {0x9B, 0x55, 0xB9, 0x46, 0x99, 0xC4, 0x6E, 0x44}};
 
 constexpr wchar_t kNotifyWindowClass[] = L"FlutterFfiUvcDeviceNotify";
-
-// Textures that an in-flight backend frame callback may still name. The
-// callback runs without the session lock, so OnNativeFrameAvailable only
-// touches a pointer that is still in this set.
-std::mutex live_textures_mutex;
-std::set<const void*> live_textures;
 
 // Pins a session for the scope so uvc_session_destroy waits until the ABI
 // calls made here have returned. Holds nothing when the handle is not a live
@@ -178,12 +171,6 @@ FlutterFfiUvcPlugin::FlutterFfiUvcPlugin(
 
 FlutterFfiUvcPlugin::~FlutterFfiUvcPlugin() {
   StopDeviceNotifications();
-  {
-    std::lock_guard<std::mutex> lock(live_textures_mutex);
-    for (auto& entry : preview_textures_) {
-      live_textures.erase(entry.second.get());
-    }
-  }
   for (auto& entry : preview_textures_) {
     DetachTexture(entry.second.get());
     // The raster thread may still be inside CopyPixelBuffer. Free the
@@ -196,9 +183,8 @@ FlutterFfiUvcPlugin::~FlutterFfiUvcPlugin() {
 // static
 void FlutterFfiUvcPlugin::OnNativeFrameAvailable(void* context) {
   // Called from the Media Foundation delivery thread;
-  // MarkTextureFrameAvailable is thread-safe.
-  std::lock_guard<std::mutex> lock(live_textures_mutex);
-  if (live_textures.count(context) == 0) return;
+  // MarkTextureFrameAvailable is thread-safe. The texture outlives this call:
+  // clearing the callback in DetachTexture returns only after it has finished.
   auto* texture = static_cast<PreviewTexture*>(context);
   texture->plugin->textures_->MarkTextureFrameAvailable(texture->texture_id);
 }
@@ -268,10 +254,6 @@ void FlutterFfiUvcPlugin::HandleTextureCall(
       return;
     }
     texture->texture_id = texture_id;
-    {
-      std::lock_guard<std::mutex> lock(live_textures_mutex);
-      live_textures.insert(raw);
-    }
     preview_textures_[texture_id] = std::move(texture);
     result->Success(flutter::EncodableValue(texture_id));
     return;
@@ -283,10 +265,6 @@ void FlutterFfiUvcPlugin::HandleTextureCall(
     if (it != preview_textures_.end()) {
       std::unique_ptr<PreviewTexture> texture = std::move(it->second);
       preview_textures_.erase(it);
-      {
-        std::lock_guard<std::mutex> lock(live_textures_mutex);
-        live_textures.erase(texture.get());
-      }
       DetachTexture(texture.get());
       // The raster thread may still be inside CopyPixelBuffer. Free the
       // texture only once the engine confirms it is unregistered.
