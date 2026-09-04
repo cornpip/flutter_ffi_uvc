@@ -68,7 +68,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
             try {
               _deviceEventController?.add(event);
             } finally {
-              holder?._onOwnDeviceDetached();
+              holder?._onOwnDeviceDetached(event.device.deviceId);
             }
           },
           onError: (Object error, StackTrace stack) {
@@ -124,10 +124,21 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     _ensureChannelDeviceEvents();
   }
 
-  // The transport is gone, so the session cannot be used again.
-  void _onOwnDeviceDetached() {
+  // The transport is gone, so the session cannot be used again. An app
+  // handler for the same event may already have queued an open of another
+  // device, so the close only runs while the detached one is still open.
+  void _onOwnDeviceDetached(int deviceId) {
     if (_disposed) return;
-    unawaited(closeUsbDevice());
+    _lifecycleCalls += 1;
+    _cancelRequests += 1;
+    unawaited(
+      _serialized(() async {
+        if (_disposed || _openedDeviceId != deviceId) return;
+        _dartLastError = null;
+        _stopPreviewNative();
+        await _closeUsbDeviceInternal();
+      }),
+    );
   }
 
   // Created on first native use so construction never loads the library.
@@ -154,6 +165,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   // id, which is never reused, and the platform close also closes the
   // native device first, so it is safe in any order with _finalizer.
   static final Finalizer<int> _platformFinalizer = Finalizer<int>((int handle) {
+    // The collected instance's device claim is dead now. Drop it and the
+    // device-event subscription if nothing else needs it.
+    _releaseChannelDeviceEvents();
     final Map<String, Object?> args = <String, Object?>{
       'sessionHandle': handle,
     };
