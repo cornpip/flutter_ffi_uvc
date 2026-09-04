@@ -15,7 +15,9 @@
   - `deviceEvents` is shared by all instances
   - `openUsbDevice()` fails with `UvcErrorCode.busy` for a device another
     instance already holds open
-  - an undisposed instance releases its camera when garbage collected
+  - the camera itself is released when an undisposed instance is garbage
+    collected or lost to a hot restart. Everything else is released by
+    `dispose()`
 - add `openedDeviceId`
 - improve `openUsbDevice()`, `startPreview()`, and `startPreviewAuto()` to
   run the native open and stream start off the UI thread

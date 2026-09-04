@@ -152,34 +152,15 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     return _session ??= _createSession();
   }
 
-  // Destroys the native session of an instance that is garbage collected or
-  // lost to a hot restart without dispose().
+  // Destroys the native session, which releases the camera, of an instance
+  // that is garbage collected or lost to a hot restart without dispose().
+  // Everything else the instance holds is released by dispose() or evicted
+  // by the platform side on the next open.
   static final NativeFinalizer _finalizer = NativeFinalizer(
     _dylib.lookup<NativeFunction<Void Function(Pointer<Void>)>>(
       'uvc_session_destroy',
     ),
   );
-
-  // Releases the platform connection and texture binding of an instance
-  // that is garbage collected without dispose(). The token is the registry
-  // id, which is never reused, and the platform close also closes the
-  // native device first, so it is safe in any order with _finalizer.
-  static final Finalizer<int> _platformFinalizer = Finalizer<int>((int handle) {
-    // The collected instance's device claim is dead now. Drop it and the
-    // device-event subscription if nothing else needs it.
-    _releaseChannelDeviceEvents();
-    final Map<String, Object?> args = <String, Object?>{
-      'sessionHandle': handle,
-    };
-    unawaited(
-      _textureChannel
-          .invokeMethod<void>('detachPreviewSession', args)
-          .catchError((_) {}),
-    );
-    unawaited(
-      _usbChannel.invokeMethod<void>('closeUsbDevice', args).catchError((_) {}),
-    );
-  });
 
   Pointer<uvc_session_t> _createSession() {
     final Pointer<uvc_session_t> session = _bindings.uvc_session_create();
@@ -187,11 +168,6 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       throw StateError('Native session allocation failed.');
     }
     _finalizer.attach(this, session.cast<Void>(), detach: this);
-    _platformFinalizer.attach(
-      this,
-      _bindings.uvc_session_id(session),
-      detach: this,
-    );
     return session;
   }
 
@@ -474,7 +450,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     consecutiveValidFrames: consecutive,
     errorCount: errors,
     elapsed: stopwatch.elapsed,
-    lastError: 'Preview start interrupted by stop, close, or dispose',
+    lastError: 'Preview start interrupted by a later lifecycle call',
     nativeErrorCode: UvcErrorCode.interrupted.nativeValue,
   );
 
@@ -731,7 +707,6 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       return;
     }
     _finalizer.detach(this);
-    _platformFinalizer.detach(this);
     // An open waiting on the platform is cancelled now instead of after it.
     if (_openWaitingOnPlatform) await _platformClose(handle);
     // Queued commands run first and skip themselves. The session goes away
@@ -869,6 +844,24 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       );
     }
     _lifecycleCalls += 1;
+    return _queueStart(
+      mode,
+      policy: policy,
+      consecutiveValidFrames: consecutiveValidFrames,
+      timeout: timeout,
+    );
+  }
+
+  // Queues one verified start. With [autoCalls], the start belongs to a
+  // startPreviewAuto sequence and gives up when a later lifecycle call has
+  // been made since that sequence began.
+  Future<UvcPreviewStartResult> _queueStart(
+    UvcCameraMode mode, {
+    required UvcPreviewPolicy policy,
+    required int consecutiveValidFrames,
+    required Duration timeout,
+    int? autoCalls,
+  }) {
     _lastPreviewRequest = _PreviewRequest(
       mode: mode,
       policy: policy,
@@ -876,6 +869,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       timeout: timeout,
     );
     return _serialized(() async {
+      if (autoCalls != null && _lifecycleCalls != autoCalls) {
+        return _interrupted(mode, Stopwatch(), 0, 0, 0);
+      }
       _resetStallTracking();
       return _startPreviewInternal(
         mode,
@@ -907,12 +903,15 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
             .take(maxCandidates)
             .toList();
     final List<UvcPreviewStartResult> attempts = <UvcPreviewStartResult>[];
+    _lifecycleCalls += 1;
+    final int calls = _lifecycleCalls;
     for (final UvcCameraMode mode in modes) {
-      final UvcPreviewStartResult result = await startPreview(
+      final UvcPreviewStartResult result = await _queueStart(
         mode,
         policy: policy,
         consecutiveValidFrames: consecutiveValidFrames,
         timeout: perModeTimeout,
+        autoCalls: calls,
       );
       attempts.add(result);
       if (result.success) break;

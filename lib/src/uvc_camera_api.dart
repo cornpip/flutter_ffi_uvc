@@ -1130,6 +1130,10 @@ abstract interface class UvcCamera {
   /// Stops preview and recording, closes the device, unbinds any attached
   /// texture, and frees the native session. The instance is unusable
   /// afterwards. Textures still need [disposePreviewTexture].
+  ///
+  /// An instance that is garbage collected or lost to a hot restart without
+  /// this call still releases the camera itself. Its platform connection
+  /// and event subscription are released on the next open in this process.
   Future<void> dispose();
 
   /// Sets the package-wide native UVC log level.
@@ -1244,8 +1248,9 @@ abstract interface class UvcCamera {
   /// On success the preview stream remains running in the returned
   /// [UvcAutoPreviewResult.mode]. On total failure all attempts are stopped
   /// and the per-mode results are available in [UvcAutoPreviewResult.attempts].
-  /// A [stopPreview], [closeUsbDevice], or [dispose] issued while an attempt
-  /// runs ends it early, and no further candidate is tried.
+  /// Any lifecycle call on this instance issued while the sequence runs ends
+  /// it. The running attempt reports [UvcErrorCode.interrupted] and no
+  /// further candidate is tried.
   Future<UvcAutoPreviewResult> startPreviewAuto({
     List<UvcCameraMode>? candidates,
     UvcAutoPreviewPreference preference = UvcAutoPreviewPreference.reliability,
