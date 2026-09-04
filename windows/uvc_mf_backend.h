@@ -35,6 +35,11 @@ bool DeviceExists(int device_id);
 // Used by detach notifications, where the device is no longer enumerable.
 int IdForSymbolicLink(const std::wstring& symbolic_link);
 
+// Friendly name last seen for that link, or empty when the device was never
+// enumerated. A detached device is gone from enumeration, so this is the
+// only place its name is still available.
+std::wstring NameForSymbolicLink(const std::wstring& symbolic_link);
+
 // Reads the preview transform of one session. A null session reads as
 // identity.
 void GetPreviewTransform(uvc_session_t* session, int* rotation, int* flip_h,

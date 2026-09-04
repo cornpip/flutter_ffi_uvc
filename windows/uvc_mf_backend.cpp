@@ -113,6 +113,9 @@ struct ProcessState {
 
   // Stable process-lifetime device ids keyed by symbolic link.
   std::map<std::wstring, int> id_by_symlink;
+  // Friendly names last seen for those links. A detached device cannot be
+  // enumerated any more, so its name comes from here.
+  std::map<std::wstring, std::wstring> name_by_symlink;
   int next_device_id = 1;
 
   std::atomic<int> log_level{1};
@@ -327,9 +330,17 @@ int ParseHexAfter(const std::wstring& haystack, const wchar_t* needle) {
 // Caller holds process.mutex.
 // Device paths are case-insensitive, and WM_DEVICECHANGE reports them in
 // upper case while enumeration reports lower case.
-int AssignIdLocked(const std::wstring& symlink) {
+std::wstring SymlinkKey(const std::wstring& symlink) {
   std::wstring key = symlink;
   for (wchar_t& c : key) c = towlower(c);
+  return key;
+}
+
+// Caller holds process.mutex.
+int AssignIdLocked(const std::wstring& symlink,
+                   const std::wstring& friendly_name = L"") {
+  const std::wstring key = SymlinkKey(symlink);
+  if (!friendly_name.empty()) process.name_by_symlink[key] = friendly_name;
   auto it = process.id_by_symlink.find(key);
   if (it != process.id_by_symlink.end()) return it->second;
   int id = process.next_device_id++;
@@ -373,7 +384,7 @@ std::vector<uvc_win::DeviceInfo> EnumerateLocked(
     info.friendly_name = friendly != nullptr ? friendly : L"";
     info.vendor_id = ParseHexAfter(info.symbolic_link, L"vid_");
     info.product_id = ParseHexAfter(info.symbolic_link, L"pid_");
-    info.device_id = AssignIdLocked(info.symbolic_link);
+    info.device_id = AssignIdLocked(info.symbolic_link, info.friendly_name);
     result.push_back(info);
 
     if (out_activate != nullptr && target_symlink != nullptr &&
@@ -1190,6 +1201,12 @@ bool DeviceExists(int device_id) {
 int IdForSymbolicLink(const std::wstring& symbolic_link) {
   std::lock_guard<std::mutex> lock(process.mutex);
   return AssignIdLocked(symbolic_link);
+}
+
+std::wstring NameForSymbolicLink(const std::wstring& symbolic_link) {
+  std::lock_guard<std::mutex> lock(process.mutex);
+  auto it = process.name_by_symlink.find(SymlinkKey(symbolic_link));
+  return it != process.name_by_symlink.end() ? it->second : L"";
 }
 
 void GetPreviewTransform(uvc_session_t* session, int* rotation, int* flip_h,

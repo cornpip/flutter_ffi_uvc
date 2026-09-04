@@ -442,6 +442,7 @@ void FlutterFfiUvcPlugin::OnDeviceChange(WPARAM wparam, LPARAM lparam) {
     // entry from the interface path alone.
     uvc_win::DeviceInfo info;
     info.symbolic_link = symbolic_link;
+    info.friendly_name = uvc_win::NameForSymbolicLink(symbolic_link);
     info.vendor_id = ParseHexAfter(symbolic_link, L"vid_");
     info.product_id = ParseHexAfter(symbolic_link, L"pid_");
     info.device_id = uvc_win::IdForSymbolicLink(symbolic_link);

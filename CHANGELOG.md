@@ -33,6 +33,7 @@
 - fix a freeze when a stream error arrived while the camera was being
   closed or released
 - fix Windows detach events not matching the opened device
+- fix Windows detach events carrying the device path instead of its name
 - fix mode switching on Windows failing with `MF_E_INVALIDREQUEST`
 - example: add camera slots for previewing several cameras at once
 
