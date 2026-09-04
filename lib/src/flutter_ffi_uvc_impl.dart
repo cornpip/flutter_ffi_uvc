@@ -226,9 +226,11 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     return UvcException.fromNativeCode(code.nativeValue, message: message);
   }
 
-  // Throws for a non-zero native code, with the native message.
+  // Throws for a non-zero native code, with the native message. lastError
+  // then reads that message too.
   void _check(int code) {
     if (code == 0) return;
+    _dartLastError = null;
     throw UvcException.fromNativeCode(code, message: _nativeLastError());
   }
 
@@ -848,14 +850,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     int consecutiveValidFrames = 3,
     Duration timeout = const Duration(seconds: 2),
   }) {
-    if (policy == UvcPreviewPolicy.stableFrames &&
-        consecutiveValidFrames <= 0) {
-      throw ArgumentError.value(
-        consecutiveValidFrames,
-        'consecutiveValidFrames',
-        'Must be greater than 0.',
-      );
-    }
+    _checkConsecutiveValidFrames(policy, consecutiveValidFrames);
     _lifecycleCalls += 1;
     return _queueStart(
       mode,
@@ -863,6 +858,16 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       consecutiveValidFrames: consecutiveValidFrames,
       timeout: timeout,
     );
+  }
+
+  static void _checkConsecutiveValidFrames(UvcPreviewPolicy policy, int count) {
+    if (policy == UvcPreviewPolicy.stableFrames && count <= 0) {
+      throw ArgumentError.value(
+        count,
+        'consecutiveValidFrames',
+        'Must be greater than 0.',
+      );
+    }
   }
 
   // Queues one verified start. With [autoCalls], the start belongs to a
@@ -911,13 +916,16 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
         'Must be greater than 0.',
       );
     }
+    _checkConsecutiveValidFrames(policy, consecutiveValidFrames);
     _lifecycleCalls += 1;
     final int calls = _lifecycleCalls;
     // Enumerated on the queue so an open still in progress has finished.
     final List<UvcCameraMode> modes = await _serialized(
-      () async => (candidates ?? _defaultAutoCandidates(preference))
-          .take(maxCandidates)
-          .toList(),
+      () async => _disposed
+          ? <UvcCameraMode>[]
+          : (candidates ?? _defaultAutoCandidates(preference))
+                .take(maxCandidates)
+                .toList(),
     );
     final List<UvcPreviewStartResult> attempts = <UvcPreviewStartResult>[];
     for (final UvcCameraMode mode in modes) {
