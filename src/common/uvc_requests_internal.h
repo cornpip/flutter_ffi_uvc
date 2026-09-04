@@ -9,13 +9,19 @@
 extern "C" {
 #endif
 
-// Called by uvc_session_destroy while the session is still live, before it
-// closes the device. Interrupts the request in progress, joins the worker,
-// completes the queued requests with UVC_ERROR_NO_DEVICE, closes the device
-// so the platform gets device_released, and reports session_destroyed.
-// Returns at once for a session that never made a request. Safe to call
-// more than once.
-void uvc_requests_shutdown(uvc_session_t *session);
+// Queues teardown of the session and returns at once. The worker drains the
+// queue, closes the device, and then calls uvc_session_finalize. Nothing
+// here waits on another thread, so a caller that is a Dart isolate never
+// blocks while a native thread is calling back into it. With notify zero
+// the request listener is cleared first and nothing is reported, which is
+// what a finalizer needs. A second call on the same session does nothing.
+void uvc_requests_destroy(uvc_session_t *session, int notify);
+
+// Implemented by the backend. Runs on the session worker once the queue has
+// drained and the device is closed. Waits for outstanding acquire pins,
+// clears the listener slots, and frees the session. The pointer is invalid
+// afterwards.
+void uvc_session_finalize(uvc_session_t *session);
 
 #ifdef __cplusplus
 }

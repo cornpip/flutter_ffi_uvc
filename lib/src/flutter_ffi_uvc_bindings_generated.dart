@@ -34,9 +34,9 @@ class FlutterFfiUvcBindings {
   late final _uvc_session_create = _uvc_session_createPtr
       .asFunction<ffi.Pointer<uvc_session_t> Function()>();
 
-  /// Drains the request queue, stops preview and recording, closes the
-  /// device, and frees the session. Waits for every acquire pin to be
-  /// released. No listener fires afterwards.
+  /// uvc_request_destroy without a report. Queues the teardown and returns at
+  /// once, so it is safe to call from a garbage collector or any thread that
+  /// must not block. No listener fires afterwards.
   void uvc_session_destroy(ffi.Pointer<uvc_session_t> session) {
     return _uvc_session_destroy(session);
   }
@@ -415,9 +415,13 @@ class FlutterFfiUvcBindings {
         )
       >();
 
+  /// Every request function returns an id unique for the life of the process
+  /// and never reused, so a platform plugin may key its own state by it.
+  ///
   /// Queues an open. The worker closes the device the session holds, then
-  /// waits for uvc_supply_fd with this request id. A stop or close queued
-  /// meanwhile interrupts the wait.
+  /// waits for uvc_supply_fd with this request id. A close queued meanwhile
+  /// ends the wait with UVC_ERROR_INTERRUPTED. An fd already supplied is
+  /// opened, and the close then takes it back. A stop leaves opens alone.
   int uvc_request_open(ffi.Pointer<uvc_session_t> session) {
     return _uvc_request_open(session);
   }
@@ -571,6 +575,21 @@ class FlutterFfiUvcBindings {
   late final _uvc_request_close = _uvc_request_closePtr
       .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
 
+  /// Queues the teardown. Requests still queued complete with
+  /// UVC_ERROR_NO_DEVICE, then this one completes once the device is closed,
+  /// and the session is freed after that. Every later request is refused.
+  /// The session pointer must not be used once this has completed.
+  int uvc_request_destroy(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_request_destroy(session);
+  }
+
+  late final _uvc_request_destroyPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Int64 Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_request_destroy');
+  late final _uvc_request_destroy = _uvc_request_destroyPtr
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
+
   /// Id of the most recently queued request, 0 before the first. A caller
   /// that wants to act only if nothing else was requested since (a stall
   /// restart) passes it as expected_latest to uvc_request_start_if.
@@ -624,7 +643,8 @@ class FlutterFfiUvcBindings {
       >();
 
   /// Copies the result JSON of a completed start or auto request and drops
-  /// it. Returns bytes written, or 0 when there is none.
+  /// it. Returns bytes written, or 0 when there is none or it does not fit,
+  /// in which case it is kept for a larger buffer.
   int uvc_take_request_result_json(
     ffi.Pointer<uvc_session_t> session,
     int request_id,
@@ -1589,6 +1609,8 @@ const int UVC_REQUEST_START_AUTO = 3;
 const int UVC_REQUEST_STOP = 4;
 
 const int UVC_REQUEST_CLOSE = 5;
+
+const int UVC_REQUEST_DESTROY = 6;
 
 const int UVC_VERIFY_NONE = 0;
 

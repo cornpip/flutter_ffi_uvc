@@ -1,8 +1,5 @@
 # Roadmap
 
-- Teardown as a request. Post session destruction to the worker instead of
-  blocking the caller, so a native thread calling into Dart never waits on
-  the isolate that started the teardown.
 - Native device claim. Move the open-device claim into the session registry
   so the `UvcErrorCode.busy` check is decided in one place at request time.
 - Listener cleanup on collection. Close the two `NativeCallable`s of an

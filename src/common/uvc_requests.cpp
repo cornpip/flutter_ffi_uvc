@@ -2,9 +2,10 @@
 // of the ABI (uvc_request_*) on the synchronous calls a backend implements
 // (uvc_open_fd, uvc_start_preview, uvc_stop_preview, uvc_close_device).
 //
-// One worker thread per session, started on the first request. State lives
-// in a process-wide table keyed by session id, so backends keep no field
-// for it. uvc_requests_shutdown removes the entry.
+// One detached worker thread per session, started on the first request.
+// State lives in a process-wide table keyed by session id, so backends keep
+// no field for it. The worker runs the teardown request last and frees the
+// session through uvc_session_finalize, so no caller ever joins it.
 //
 // Locks: State::mutex guards the queue and flags and is never held while a
 // backend call or a listener runs. State::listener_mutex is held while the
@@ -50,6 +51,8 @@ struct Request {
   std::vector<uvc_mode_t> modes;
   int prefer_quality = 0;
   int max_candidates = 0;
+  // Destroy only. Zero for a teardown whose caller is already gone.
+  bool notify = true;
 };
 
 struct State {
@@ -59,7 +62,6 @@ struct State {
   std::mutex mutex;
   std::condition_variable cv;
   std::deque<Request> queue;
-  std::thread worker;
   bool worker_started = false;
   bool shutting_down = false;
   int64_t latest_id = 0;
@@ -383,20 +385,80 @@ int RunOpen(State &st, const Request &r) {
   return 0;
 }
 
+// Last request of a session. Drains what is left, closes the device, and
+// frees the session. Runs on the worker, so waiting here never blocks a
+// caller that a native thread may be reporting into.
+void RunDestroy(const std::shared_ptr<State> &state, const Request &r) {
+  State &st = *state;
+  uvc_session_t *session = st.session;
+  const uint64_t id = st.session_id;
+
+  std::deque<Request> leftover;
+  std::vector<int64_t> unused_fds;
+  {
+    std::lock_guard<std::mutex> lock(st.mutex);
+    leftover.swap(st.queue);
+    for (const auto &entry : st.open_fds) {
+      if (entry.second >= 0) unused_fds.push_back(entry.first);
+    }
+    st.open_fds.clear();
+    st.results.clear();
+  }
+  for (int64_t request : unused_fds) NotifyDeviceReleased(id, request);
+  for (const Request &queued : leftover) Complete(st, queued, kErrorNoDevice);
+
+  CloseDeviceAndRelease(st);
+  // The device is closed, so no callback can be in flight and clearing the
+  // slot returns at once.
+  uvc_set_error_listener(session, nullptr, nullptr);
+  // Clear the slot before reporting. The caller frees its callable as soon
+  // as it hears, and nothing may reach the old pointer after that.
+  uvc_request_listener_t listener = nullptr;
+  void *listener_data = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(st.listener_mutex);
+    listener = st.listener;
+    listener_data = st.listener_data;
+    st.listener = nullptr;
+    st.listener_data = nullptr;
+  }
+  if (listener != nullptr) listener(listener_data, r.id, r.op, 0);
+  {
+    std::lock_guard<std::mutex> lock(g_states_mutex);
+    g_states.erase(id);
+  }
+  uvc_session_finalize(session);
+  NotifySessionDestroyed(id);
+}
+
 void WorkerMain(std::shared_ptr<State> state) {
   State &st = *state;
   for (;;) {
     Request r;
     {
       std::unique_lock<std::mutex> lock(st.mutex);
-      st.cv.wait(lock, [&] { return st.shutting_down || !st.queue.empty(); });
-      if (st.shutting_down) return;
+      st.cv.wait(lock, [&] { return !st.queue.empty(); });
       r = std::move(st.queue.front());
       st.queue.pop_front();
       if (r.op == UVC_REQUEST_STOP || r.op == UVC_REQUEST_CLOSE) {
         st.pending_interrupts -= 1;
       }
       if (r.op == UVC_REQUEST_CLOSE) st.pending_closes -= 1;
+    }
+    if (r.op == UVC_REQUEST_DESTROY) {
+      RunDestroy(state, r);
+      return;
+    }
+    bool draining = false;
+    {
+      std::lock_guard<std::mutex> lock(st.mutex);
+      draining = st.shutting_down;
+    }
+    if (draining) {
+      // Queued ahead of a teardown, so it never reaches the device. Its fd,
+      // if one was supplied, goes back in RunDestroy.
+      Complete(st, r, kErrorNoDevice);
+      continue;
     }
     int result = 0;
     switch (r.op) {
@@ -431,7 +493,7 @@ void WorkerMain(std::shared_ptr<State> state) {
 int64_t Enqueue(const std::shared_ptr<State> &state, Request r) {
   State &st = *state;
   std::lock_guard<std::mutex> lock(st.mutex);
-  if (st.shutting_down) return kErrorNoDevice;
+  if (st.shutting_down && r.op != UVC_REQUEST_DESTROY) return kErrorNoDevice;
   r.id = g_next_request_id.fetch_add(1);
   st.latest_id = r.id;
   if (r.op == UVC_REQUEST_STOP || r.op == UVC_REQUEST_CLOSE) {
@@ -439,13 +501,51 @@ int64_t Enqueue(const std::shared_ptr<State> &state, Request r) {
   }
   if (r.op == UVC_REQUEST_CLOSE) st.pending_closes += 1;
   if (r.op == UVC_REQUEST_OPEN) st.open_fds[r.id] = -2;
+  if (r.op == UVC_REQUEST_DESTROY) {
+    // Interrupts whatever is running and refuses everything after it.
+    st.shutting_down = true;
+    st.pending_interrupts += 1;
+    st.pending_closes += 1;
+  }
   st.queue.push_back(std::move(r));
   if (!st.worker_started) {
     st.worker_started = true;
-    st.worker = std::thread(WorkerMain, state);
+    std::thread(WorkerMain, state).detach();
   }
   st.cv.notify_all();
   return st.latest_id;
+}
+
+// Queues the one teardown a session gets. Returns its request id, or a
+// negative code when the pointer is not a live session or a teardown is
+// already under way.
+int64_t QueueDestroy(uvc_session_t *session, bool notify) {
+  if (session == nullptr) return kErrorInvalidParam;
+  // Validates the pointer against the registry, as the synchronous destroy
+  // used to. Anything else is not ours to free.
+  if (uvc_session_acquire(session) == 0) return kErrorInvalidParam;
+  const uint64_t id = uvc_session_id(session);
+  // A session that never made a request gets a worker here, so teardown
+  // never runs on the caller's thread.
+  std::shared_ptr<State> state = FindState(session, true);
+  bool first = false;
+  {
+    std::lock_guard<std::mutex> lock(g_states_mutex);
+    first = g_shut_down.insert(id).second;
+  }
+  uvc_session_release(session);
+  if (!state || !first) return kErrorNoDevice;
+  if (!notify) {
+    // Nobody is left to hear from this session, and the worker still has
+    // the queue to walk.
+    std::lock_guard<std::mutex> lock(state->listener_mutex);
+    state->listener = nullptr;
+    state->listener_data = nullptr;
+  }
+  Request r;
+  r.op = UVC_REQUEST_DESTROY;
+  r.notify = notify;
+  return Enqueue(state, std::move(r));
 }
 
 int64_t EnqueueStart(uvc_session_t *session, int64_t expected_latest,
@@ -561,6 +661,10 @@ FFI_PLUGIN_EXPORT int64_t uvc_request_close(uvc_session_t *session) {
   return Enqueue(state, std::move(r));
 }
 
+FFI_PLUGIN_EXPORT int64_t uvc_request_destroy(uvc_session_t *session) {
+  return QueueDestroy(session, true);
+}
+
 FFI_PLUGIN_EXPORT int64_t uvc_latest_request_id(uvc_session_t *session) {
   std::shared_ptr<State> state = FindState(session, false);
   if (!state) return 0;
@@ -599,55 +703,8 @@ FFI_PLUGIN_EXPORT void uvc_set_platform_listener(
   }
 }
 
-void uvc_requests_shutdown(uvc_session_t *session) {
-  if (session == nullptr) return;
-  const uint64_t id = uvc_session_id(session);
-  std::shared_ptr<State> state;
-  {
-    std::lock_guard<std::mutex> lock(g_states_mutex);
-    g_shut_down.insert(id);
-    auto it = g_states.find(id);
-    if (it != g_states.end()) {
-      state = it->second;
-      g_states.erase(it);
-    }
-  }
-  if (!state) {
-    // Never made a request, so nothing to drain. The id still goes away
-    // and a texture may be bound to it.
-    NotifySessionDestroyed(id);
-    return;
-  }
-  State &st = *state;
-  std::deque<Request> leftover;
-  std::vector<int64_t> unused_fds;
-  // Clear the listener before joining. The worker reports completion last,
-  // and the thread destroying a session is usually the one that receives
-  // it, so leaving it installed makes each wait for the other.
-  {
-    std::lock_guard<std::mutex> lock(st.listener_mutex);
-    st.listener = nullptr;
-    st.listener_data = nullptr;
-  }
-  {
-    std::lock_guard<std::mutex> lock(st.mutex);
-    st.shutting_down = true;
-    st.cv.notify_all();
-  }
-  if (st.worker.joinable()) st.worker.join();
-  {
-    std::lock_guard<std::mutex> lock(st.mutex);
-    leftover.swap(st.queue);
-    for (const auto &entry : st.open_fds) {
-      if (entry.second >= 0) unused_fds.push_back(entry.first);
-    }
-    st.open_fds.clear();
-    st.results.clear();
-  }
-  for (int64_t request : unused_fds) NotifyDeviceReleased(id, request);
-  for (const Request &r : leftover) Complete(st, r, kErrorNoDevice);
-  CloseDeviceAndRelease(st);
-  NotifySessionDestroyed(id);
+void uvc_requests_destroy(uvc_session_t *session, int notify) {
+  QueueDestroy(session, notify != 0);
 }
 
 }  // extern "C"

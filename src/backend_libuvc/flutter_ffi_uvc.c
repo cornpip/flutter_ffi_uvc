@@ -1587,22 +1587,22 @@ FFI_PLUGIN_EXPORT uvc_session_t *uvc_session_create(void) {
 }
 
 FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t *session) {
-  if (session == NULL || !uvc_session_acquire(session)) {
+  uvc_requests_destroy(session, 0);
+}
+
+void uvc_session_finalize(uvc_session_t *session) {
+  if (session == NULL) {
     return;
   }
-  UVC_LOGD("UVC_NATIVE", "uvc_session_destroy session=%p", (void *)session);
-  // Drains the request worker and closes the device while the session still
-  // counts as live, so the platform gets device_released before the id is
-  // gone. Stops recording and preview, releases the preview window, and
-  // frees the frame buffers.
-  uvc_requests_shutdown(session);
+  UVC_LOGD("UVC_NATIVE", "uvc_session_finalize session=%p", (void *)session);
+  // Closing first leaves the session locks free while the retire waits for
+  // pins a plugin still holds. Stops recording and preview, releases the
+  // preview window, and frees the frame buffers.
   uvc_close_device(session);
-  uvc_session_release(session);
   if (!registry_retire(session)) {
     return;
   }
-  // Nothing opens a session that is being destroyed, so this is a no-op
-  // unless a pinned caller slipped an open in before the retire.
+  // A pinned caller may have reopened the device between the two.
   uvc_close_device(session);
   pthread_mutex_lock(&session->listener_mutex);
   session->frame_listener = NULL;

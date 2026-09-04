@@ -450,8 +450,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   int _restartAttempts = 0;
   _PreviewRequest? _lastPreviewRequest;
 
-  // Registers the Dart callable on the native session. Always re-registers
-  // because the native layer clears the slot when a device closes.
+  // Registers the Dart callable on the native session. The slot survives a
+  // close, so re-registering on the next open only rewrites the same
+  // pointer. The session clears it as part of its teardown.
   void _setupNativeErrorListener() {
     if (_disposed) return;
     if (_errorCallable == null) {
@@ -470,15 +471,6 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       _errorCallable!.nativeFunction,
       nullptr,
     );
-  }
-
-  void _tearDownNativeErrorListener([Pointer<uvc_session_t>? session]) {
-    session ??= _disposed ? null : _session;
-    if (session != null) {
-      _bindings.uvc_set_error_listener(session, nullptr, nullptr);
-    }
-    _errorCallable?.close();
-    _errorCallable = null;
   }
 
   void _onNativeError(Pointer<Void> _, Pointer<Char> messagePtr) {
@@ -720,7 +712,6 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   // the close took it back.
   void _afterClosed() {
     _forgetOpenedDevice();
-    _tearDownNativeErrorListener();
     _resetPreviewState();
   }
 
@@ -745,16 +736,19 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       return;
     }
     _finalizer.detach(this);
-    // The close interrupts a start in progress and runs after the queued
-    // requests, so destroy finds the worker idle. Requests it drained
-    // complete with noDevice through the listener before it returns.
-    await _awaitRequest(_bindings.uvc_request_close(session));
+    // Teardown is a request like any other. It interrupts a start in
+    // progress, reports the requests it drains, and completes once the
+    // device is closed. Waiting for it never blocks this isolate, so the
+    // native threads reporting into it stay free to finish.
+    await _awaitRequest(_bindings.uvc_request_destroy(session));
     try {
-      _tearDownNativeErrorListener(session);
-      _bindings.uvc_session_destroy(session);
-    } finally {
       _requestCallable?.close();
       _requestCallable = null;
+      // The session cleared its listener slots before completing, so no
+      // callback can reach these any more.
+      _errorCallable?.close();
+      _errorCallable = null;
+    } finally {
       _failPendingRequests();
       await _streamErrorController.close();
       await _stallEventController.close();

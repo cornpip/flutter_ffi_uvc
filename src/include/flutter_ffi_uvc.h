@@ -38,9 +38,9 @@ typedef struct uvc_session uvc_session_t;
 // Allocates an idle session. Returns NULL on allocation failure.
 FFI_PLUGIN_EXPORT uvc_session_t *uvc_session_create(void);
 
-// Drains the request queue, stops preview and recording, closes the
-// device, and frees the session. Waits for every acquire pin to be
-// released. No listener fires afterwards.
+// uvc_request_destroy without a report. Queues the teardown and returns at
+// once, so it is safe to call from a garbage collector or any thread that
+// must not block. No listener fires afterwards.
 FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t *session);
 
 // For callers that hold a session pointer they do not own. uvc_session_acquire
@@ -126,10 +126,10 @@ FFI_PLUGIN_EXPORT void uvc_set_error_listener(
 // queued behind it. An auto request also gives up before its next
 // candidate when any later request exists.
 //
-// uvc_session_destroy interrupts and drains the queue. It clears the
-// request listener first, so a request still queued or running when it is
-// called reports nothing and the caller resolves it itself once destroy
-// returns.
+// Teardown is a request too. uvc_request_destroy reports the requests it
+// drains and then itself, and the session is freed after that. Nothing
+// blocks the caller, so a native thread reporting into a Dart isolate
+// never waits on the isolate that asked for the teardown.
 // ---------------------------------------------------------------------------
 
 #define UVC_REQUEST_OPEN 1
@@ -137,6 +137,7 @@ FFI_PLUGIN_EXPORT void uvc_set_error_listener(
 #define UVC_REQUEST_START_AUTO 3
 #define UVC_REQUEST_STOP 4
 #define UVC_REQUEST_CLOSE 5
+#define UVC_REQUEST_DESTROY 6
 
 // Verification policy of a start request. NONE completes when the stream
 // starts. SEQUENCE_ONLY waits for one frame. STABLE_FRAMES waits for
@@ -216,6 +217,12 @@ FFI_PLUGIN_EXPORT int64_t uvc_request_start_auto(
 
 FFI_PLUGIN_EXPORT int64_t uvc_request_stop(uvc_session_t *session);
 FFI_PLUGIN_EXPORT int64_t uvc_request_close(uvc_session_t *session);
+
+// Queues the teardown. Requests still queued complete with
+// UVC_ERROR_NO_DEVICE, then this one completes once the device is closed,
+// and the session is freed after that. Every later request is refused.
+// The session pointer must not be used once this has completed.
+FFI_PLUGIN_EXPORT int64_t uvc_request_destroy(uvc_session_t *session);
 
 // Id of the most recently queued request, 0 before the first. A caller
 // that wants to act only if nothing else was requested since (a stall

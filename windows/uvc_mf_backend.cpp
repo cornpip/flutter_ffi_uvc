@@ -1270,15 +1270,24 @@ FFI_PLUGIN_EXPORT void uvc_session_release(uvc_session_t* session) {
 }
 
 FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t* session) {
+  uvc_requests_destroy(session, 0);
+}
+
+void uvc_session_finalize(uvc_session_t* session) {
   if (session == nullptr) return;
-  // Drains the request worker while the session is still live, so its
-  // completions and the platform's session_destroyed fire before the id is
-  // gone. A pointer that is not a live session returns at once.
-  if (uvc_session_acquire(session) == 0) return;
-  uvc_requests_shutdown(session);
-  uvc_session_release(session);
+  // Closing first leaves Session::mutex free while the retire below waits
+  // for pins a plugin still holds.
+  {
+    std::shared_ptr<Session> s = Impl(session);
+    if (s) {
+      StopPreviewInternal(*s);
+      std::lock_guard<std::mutex> lock(s->mutex);
+      CloseDeviceLocked(*s);
+      s->symlink.clear();
+    }
+  }
   // Refuse new pins, wait for existing ones, then unlink. Only after this
-  // point is it safe to dereference the wrapper.
+  // point is it safe to delete the wrapper.
   {
     std::unique_lock<std::mutex> lock(registry.mutex);
     auto it = registry.live.find(session);
@@ -1288,16 +1297,7 @@ FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t* session) {
     registry.live.erase(it);
   }
   std::shared_ptr<Session> s = Impl(session);
-  if (!s) {
-    delete session;
-    return;
-  }
-  StopPreviewInternal(*s);
-  {
-    std::lock_guard<std::mutex> lock(s->mutex);
-    CloseDeviceLocked(*s);
-  }
-  {
+  if (s) {
     std::lock_guard<std::mutex> lock(s->listener_mutex);
     s->frame_listener = nullptr;
     s->frame_listener_data = nullptr;
