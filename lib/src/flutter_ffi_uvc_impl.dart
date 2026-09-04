@@ -590,6 +590,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     // An instance holds one device. Close this instance's device first.
     _stopPreviewNative();
     await _closeUsbDeviceInternal();
+    if (_disposed) {
+      throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+    }
     final FfiUvcCamera? holder = _deviceHolder(deviceId);
     if (holder != null && holder != this) {
       throw _fail(
@@ -675,7 +678,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     _lifecycleCalls += 1;
     _cancelRequests += 1;
     // An open waiting on the platform is cancelled now instead of after it.
-    if (_openWaitingOnPlatform) unawaited(_platformClose(nativeSessionHandle));
+    if (_openWaitingOnPlatform && !_disposed) {
+      unawaited(_platformClose(nativeSessionHandle));
+    }
     return _serialized(() async {
       if (_disposed) return;
       _dartLastError = null;
@@ -767,6 +772,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
         _state = _State.closed;
         _forgetOpenedDevice();
         await _platformClose(nativeSessionHandle);
+        if (_disposed) {
+          throw _fail(UvcErrorCode.noDevice, 'UvcCamera has been disposed');
+        }
       }
       final int result = _bindings.uvc_open_fd(_s, fd);
       if (result != 0) {
@@ -890,7 +898,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       if (autoCalls != null && _lifecycleCalls != autoCalls) {
         return _interrupted(mode, Stopwatch(), 0, 0, 0);
       }
-      _resetStallTracking();
+      if (!_disposed) _resetStallTracking();
       return _startPreviewInternal(
         mode,
         policy: policy,
@@ -999,7 +1007,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     _ensureAndroidOnlyApi('closeFd');
     _lifecycleCalls += 1;
     _cancelRequests += 1;
-    if (_openWaitingOnPlatform) unawaited(_platformClose(nativeSessionHandle));
+    if (_openWaitingOnPlatform && !_disposed) {
+      unawaited(_platformClose(nativeSessionHandle));
+    }
     return _serialized(() async {
       if (_disposed) return;
       _dartLastError = null;
