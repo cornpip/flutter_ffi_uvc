@@ -1,6 +1,6 @@
 name: flutter_ffi_uvc
 description: Control USB(UVC) cameras. Preview, capture, record, adjust settings, and read raw frames, for one camera or several.
-version: 1.0.0-wip
+version: 1.0.0
 repository: https://github.com/cornpip/flutter_ffi_uvc
 
 environment:
@@ -12,7 +12,6 @@ topics:
   - usb
   - uvc
   - webcam
-  - capture
 
 dependencies:
   flutter:

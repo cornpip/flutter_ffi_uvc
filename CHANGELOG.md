@@ -1,4 +1,4 @@
-## 1.0.0-wip
+## 1.0.0
 
 - **BREAKING** `stopPreview()`, `closeFd()`, `openFd()`, and `openPreview()`
   return a `Future`. Lifecycle calls on one instance run one at a time in
