@@ -45,6 +45,14 @@ FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t *session);
 FFI_PLUGIN_EXPORT int uvc_session_acquire(uvc_session_t *session);
 FFI_PLUGIN_EXPORT void uvc_session_release(uvc_session_t *session);
 
+// Registry id of a session. Unique for the life of the process and never
+// reused, so a holder can name a session that may have been destroyed since.
+// Platform plugin layers key their state by this id, not by the pointer.
+FFI_PLUGIN_EXPORT uint64_t uvc_session_id(uvc_session_t *session);
+// Pins the session with that id, as uvc_session_acquire does. Returns NULL
+// when no live session has it. Release with uvc_session_release.
+FFI_PLUGIN_EXPORT uvc_session_t *uvc_session_acquire_id(uint64_t id);
+
 // Opens a device on the session. fd is a USB device node descriptor on
 // Android and Linux and the enumeration device id on Windows. A device
 // already open on this session is closed first.
@@ -87,8 +95,7 @@ FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(uvc_session_t *session);
 // Listeners run on native threads and receive user_data unchanged. A NULL
 // listener clears the slot and returns only after a call in progress has
 // finished, so user_data may be freed afterwards. A listener must not call
-// back into this ABI. uvc_close_device keeps the frame listener and clears
-// the error listener.
+// back into this ABI. Both slots survive uvc_close_device.
 typedef void (*uvc_frame_listener_t)(void *user_data, int64_t sequence);
 FFI_PLUGIN_EXPORT void uvc_set_frame_listener(
     uvc_session_t *session,

@@ -29,15 +29,14 @@ const GUID kVideoCameraClass = {
 
 constexpr wchar_t kNotifyWindowClass[] = L"FlutterFfiUvcDeviceNotify";
 
-// Pins a session for the scope so uvc_session_destroy waits until the ABI
-// calls made here have returned. Holds nothing when the handle is not a live
-// session.
+// Pins the session with a registry id for the scope so uvc_session_destroy
+// waits until the ABI calls made here have returned. Holds nothing when the
+// id is not a live session.
 class SessionPin {
  public:
-  explicit SessionPin(uvc_session_t* session)
-      : session_(session != nullptr && uvc_session_acquire(session) != 0
-                     ? session
-                     : nullptr) {}
+  explicit SessionPin(int64_t id)
+      : session_(id > 0 ? uvc_session_acquire_id(static_cast<uint64_t>(id))
+                        : nullptr) {}
   ~SessionPin() {
     if (session_ != nullptr) uvc_session_release(session_);
   }
@@ -68,12 +67,11 @@ int64_t Int64FromArg(const flutter::EncodableMap& args, const char* key) {
   return -1;
 }
 
-// The Dart side passes uvc_session_t* as its integer address.
-uvc_session_t* SessionFromArgs(const flutter::EncodableMap* args) {
-  if (args == nullptr) return nullptr;
-  int64_t handle = Int64FromArg(*args, "sessionHandle");
-  if (handle <= 0) return nullptr;
-  return reinterpret_cast<uvc_session_t*>(static_cast<intptr_t>(handle));
+// The Dart side passes the session's registry id (uvc_session_id).
+int64_t SessionIdFromArgs(const flutter::EncodableMap* args) {
+  if (args == nullptr) return 0;
+  int64_t id = Int64FromArg(*args, "sessionHandle");
+  return id > 0 ? id : 0;
 }
 
 flutter::EncodableMap DeviceToMap(const uvc_win::DeviceInfo& info) {
@@ -181,20 +179,21 @@ FlutterFfiUvcPlugin::~FlutterFfiUvcPlugin() {
 }
 
 // static
-void FlutterFfiUvcPlugin::OnNativeFrameAvailable(void* context) {
+void FlutterFfiUvcPlugin::OnNativeFrameAvailable(void* context,
+                                                 int64_t /*sequence*/) {
   // Called from the Media Foundation delivery thread;
   // MarkTextureFrameAvailable is thread-safe. The texture outlives this call:
-  // clearing the callback in DetachTexture returns only after it has finished.
+  // clearing the listener in DetachTexture returns only after it has finished.
   auto* texture = static_cast<PreviewTexture*>(context);
   texture->plugin->textures_->MarkTextureFrameAvailable(texture->texture_id);
 }
 
 void FlutterFfiUvcPlugin::DetachTexture(PreviewTexture* texture) {
   // The Dart side may already have destroyed the session. The pin then fails
-  // and there is no callback left to clear.
-  SessionPin pin(texture->session.exchange(nullptr));
+  // and there is no listener left to clear.
+  SessionPin pin(texture->session.exchange(0));
   if (pin.get() != nullptr) {
-    uvc_win::SetFrameAvailableCallback(pin.get(), nullptr, nullptr);
+    uvc_set_frame_listener(pin.get(), nullptr, nullptr);
   }
 }
 
@@ -282,7 +281,8 @@ void FlutterFfiUvcPlugin::HandleTextureCall(
       result->Error("texture_not_found", "Unknown textureId");
       return;
     }
-    SessionPin pin(SessionFromArgs(args));
+    const int64_t session_id = SessionIdFromArgs(args);
+    SessionPin pin(session_id);
     uvc_session_t* session = pin.get();
     if (session == nullptr) {
       result->Error("invalid_session",
@@ -294,26 +294,26 @@ void FlutterFfiUvcPlugin::HandleTextureCall(
     // and unbind this texture from any other session.
     for (auto& entry : preview_textures_) {
       PreviewTexture* other = entry.second.get();
-      if (other != texture && other->session.load() == session) {
-        other->session.store(nullptr);
+      if (other != texture && other->session.load() == session_id) {
+        other->session.store(0);
       }
     }
-    if (texture->session.load() != session) DetachTexture(texture);
-    texture->session.store(session);
-    uvc_win::SetFrameAvailableCallback(
-        session, &FlutterFfiUvcPlugin::OnNativeFrameAvailable, texture);
+    if (texture->session.load() != session_id) DetachTexture(texture);
+    texture->session.store(session_id);
+    uvc_set_frame_listener(session, &FlutterFfiUvcPlugin::OnNativeFrameAvailable,
+                           texture);
     result->Success();
     return;
   }
 
   if (method == "detachPreviewSession") {
     // Called before the Dart layer destroys the session so no texture keeps
-    // a dangling session pointer.
-    uvc_session_t* session = SessionFromArgs(args);
-    if (session != nullptr) {
+    // its listener registered.
+    const int64_t session_id = SessionIdFromArgs(args);
+    if (session_id != 0) {
       for (auto& entry : preview_textures_) {
         PreviewTexture* texture = entry.second.get();
-        if (texture->session.load() == session) DetachTexture(texture);
+        if (texture->session.load() == session_id) DetachTexture(texture);
       }
     }
     result->Success();

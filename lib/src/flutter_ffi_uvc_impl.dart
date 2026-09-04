@@ -38,9 +38,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   );
 
   // Device events are process-wide. One channel subscription feeds every
-  // instance and the app-facing stream. The instance that holds a detached
-  // device is told first, so an app handler that reacts to the same event
-  // already finds the device closed.
+  // instance and the app-facing stream. The stream is synchronous so an app
+  // handler runs before the holding instance closes the detached device and
+  // still sees it in openedDeviceId.
   static StreamController<UvcDeviceEvent>? _deviceEventController;
   static StreamSubscription<dynamic>? _channelDeviceEvents;
 
@@ -49,6 +49,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
         StreamController<UvcDeviceEvent>.broadcast(
           onListen: _ensureChannelDeviceEvents,
           onCancel: _releaseChannelDeviceEvents,
+          sync: true,
         );
   }
 
@@ -60,10 +61,15 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
             final UvcDeviceEvent event = UvcDeviceEvent.fromMap(
               (raw as Map<Object?, Object?>?) ?? <Object?, Object?>{},
             );
-            if (event.type == UvcDeviceEventType.detached) {
-              _deviceHolder(event.device.deviceId)?._onOwnDeviceDetached();
+            final FfiUvcCamera? holder =
+                event.type == UvcDeviceEventType.detached
+                ? _deviceHolder(event.device.deviceId)
+                : null;
+            try {
+              _deviceEventController?.add(event);
+            } finally {
+              holder?._onOwnDeviceDetached();
             }
-            _deviceEventController?.add(event);
           },
           onError: (Object error, StackTrace stack) {
             _deviceEventController?.addError(error, stack);
@@ -144,9 +150,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   );
 
   // Releases the platform connection and texture binding of an instance
-  // that is garbage collected without dispose(). The platform close also
-  // closes the native device first, so it is safe in any order with
-  // _finalizer.
+  // that is garbage collected without dispose(). The token is the registry
+  // id, which is never reused, and the platform close also closes the
+  // native device first, so it is safe in any order with _finalizer.
   static final Finalizer<int> _platformFinalizer = Finalizer<int>((int handle) {
     final Map<String, Object?> args = <String, Object?>{
       'sessionHandle': handle,
@@ -167,12 +173,20 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       throw StateError('Native session allocation failed.');
     }
     _finalizer.attach(this, session.cast<Void>(), detach: this);
-    _platformFinalizer.attach(this, session.address, detach: this);
+    _platformFinalizer.attach(
+      this,
+      _bindings.uvc_session_id(session),
+      detach: this,
+    );
     return session;
   }
 
-  /// Native session address, passed to the platform channels.
-  int get nativeSessionHandle => _s.address;
+  /// Registry id of the native session, passed to the platform channels.
+  /// Never reused within the process, unlike the address.
+  int get nativeSessionHandle => _bindings.uvc_session_id(_s);
+
+  /// Native session address, for test-only backend entry points.
+  int get nativeSessionAddress => _s.address;
 
   UvcPreviewTransform _previewTransform = UvcPreviewTransform.identity;
 
@@ -582,6 +596,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     // another instance sees it as busy. Released again on failure.
     _openDevices[deviceId] = WeakReference<FfiUvcCamera>(this);
     final int handle = nativeSessionHandle;
+    final int address = nativeSessionAddress;
     final Map<Object?, Object?>? result;
     _openWaitingOnPlatform = true;
     try {
@@ -611,8 +626,10 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     // Opening can block for seconds while the OS finishes initialising a
     // freshly plugged camera, so it runs on a worker isolate.
     final int openResult = await Isolate.run(
-      () =>
-          _bindings.uvc_open_fd(Pointer<uvc_session_t>.fromAddress(handle), fd),
+      () => _bindings.uvc_open_fd(
+        Pointer<uvc_session_t>.fromAddress(address),
+        fd,
+      ),
     );
     if (_disposed) {
       // The dispose command queued behind this one closes the device.
@@ -681,6 +698,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   Future<void> dispose() => _disposing ??= _disposeImpl();
 
   Future<void> _disposeImpl() async {
+    final int handle = _session == null ? 0 : nativeSessionHandle;
     // Mark disposed before the first await so a re-entrant dispose() or a
     // concurrent open cannot see the session.
     _disposed = true;
@@ -701,7 +719,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     _finalizer.detach(this);
     _platformFinalizer.detach(this);
     // An open waiting on the platform is cancelled now instead of after it.
-    if (_openWaitingOnPlatform) await _platformClose(session.address);
+    if (_openWaitingOnPlatform) await _platformClose(handle);
     // Queued commands run first and skip themselves. The session goes away
     // only after them.
     await _serialized(() async {
@@ -710,10 +728,10 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
         _bindings.uvc_stop_preview(session);
         _bindings.uvc_close_device(session);
         _tearDownNativeErrorListener(session);
-        await _platformClose(session.address);
+        await _platformClose(handle);
         await _textureChannel.invokeMethod<void>(
           'detachPreviewSession',
-          <String, Object?>{'sessionHandle': session.address},
+          <String, Object?>{'sessionHandle': handle},
         );
       } finally {
         _bindings.uvc_session_destroy(session);

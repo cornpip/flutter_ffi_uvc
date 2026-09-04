@@ -148,10 +148,11 @@ struct _FfiUvcTexture {
   size_t buffer_capacity;
   uint32_t buffer_width;
   uint32_t buffer_height;
-  // Session this texture renders. Guarded by session_mutex, which the render
-  // thread holds across its copy so a detach cannot race it.
+  // Registry id of the session this texture renders, 0 when unbound. Guarded
+  // by session_mutex, which the render thread holds across its copy so a
+  // detach cannot race it.
   GMutex session_mutex;
-  uvc_session_t* session;
+  uint64_t session_id;
   // Coalesces frame marks so at most one idle callback is pending.
   gint mark_pending;
   // Bare pointer. The plugin outlives every registered texture.
@@ -171,9 +172,9 @@ gboolean ffi_uvc_texture_copy_pixels(FlPixelBufferTexture* texture,
   FfiUvcTexture* self = FFI_UVC_TEXTURE(texture);
 
   g_mutex_lock(&self->session_mutex);
-  uvc_session_t* session = self->session;
   // Pin the session so a destroy from Dart waits for this copy.
-  const gboolean pinned = session != nullptr && uvc_session_acquire(session);
+  uvc_session_t* session = uvc_session_acquire_id(self->session_id);
+  const gboolean pinned = session != nullptr;
   const int frame_w = pinned ? uvc_frame_width(session) : 0;
   const int frame_h = pinned ? uvc_frame_height(session) : 0;
   if (frame_w > 0 && frame_h > 0) {
@@ -242,7 +243,7 @@ void ffi_uvc_texture_init(FfiUvcTexture* self) {
   self->buffer_width = 0;
   self->buffer_height = 0;
   g_mutex_init(&self->session_mutex);
-  self->session = nullptr;
+  self->session_id = 0;
   self->mark_pending = 0;
   self->plugin = nullptr;
 }
@@ -295,7 +296,7 @@ namespace {
 gboolean MarkFrameIdle(gpointer user_data) {
   FfiUvcTexture* texture = FFI_UVC_TEXTURE(user_data);
   g_atomic_int_set(&texture->mark_pending, 0);
-  if (texture->session != nullptr && texture->plugin != nullptr) {
+  if (texture->session_id != 0 && texture->plugin != nullptr) {
     fl_texture_registrar_mark_texture_frame_available(
         texture->plugin->texture_registrar, FL_TEXTURE(texture));
   }
@@ -317,17 +318,18 @@ void OnNativeFrame(void* user_data, int64_t /*sequence*/) {
 // listener. Waits for an in-flight render-thread copy.
 void UnbindTexture(FfiUvcTexture* texture) {
   g_mutex_lock(&texture->session_mutex);
-  uvc_session_t* session = texture->session;
-  texture->session = nullptr;
+  const uint64_t session_id = texture->session_id;
+  texture->session_id = 0;
   g_mutex_unlock(&texture->session_mutex);
-  if (session != nullptr && uvc_session_acquire(session)) {
+  uvc_session_t* session = uvc_session_acquire_id(session_id);
+  if (session != nullptr) {
     uvc_set_frame_listener(session, nullptr, nullptr);
     uvc_session_release(session);
   }
 }
 
 // Unbinds whichever texture currently renders the session, if any.
-void UnbindSession(FlutterFfiUvcPlugin* self, uvc_session_t* session) {
+void UnbindSession(FlutterFfiUvcPlugin* self, uint64_t session_id) {
   GHashTableIter iter;
   gpointer key = nullptr;
   gpointer value = nullptr;
@@ -335,21 +337,17 @@ void UnbindSession(FlutterFfiUvcPlugin* self, uvc_session_t* session) {
   while (g_hash_table_iter_next(&iter, &key, &value)) {
     FfiUvcTexture* texture = FFI_UVC_TEXTURE(value);
     g_mutex_lock(&texture->session_mutex);
-    const gboolean match = texture->session == session;
+    const gboolean match = texture->session_id == session_id;
     g_mutex_unlock(&texture->session_mutex);
     if (match) UnbindTexture(texture);
   }
 }
 
-uvc_session_t* SessionFromArgs(FlValue* args) {
-  const int64_t handle = Int64FromArgs(args, "sessionHandle");
-  return handle > 0 ? reinterpret_cast<uvc_session_t*>(
-                          static_cast<intptr_t>(handle))
-                    : nullptr;
-}
-
-int64_t SessionKey(uvc_session_t* session) {
-  return static_cast<int64_t>(reinterpret_cast<intptr_t>(session));
+// The Dart side passes the session's registry id (uvc_session_id). 0 when
+// missing.
+int64_t SessionIdFromArgs(FlValue* args) {
+  const int64_t id = Int64FromArgs(args, "sessionHandle");
+  return id > 0 ? id : 0;
 }
 
 // Releases fds of sessions that a hot restart leaked and a finalizer has
@@ -360,9 +358,9 @@ void CloseDeadSessionFds(FlutterFfiUvcPlugin* self) {
   gpointer value = nullptr;
   g_hash_table_iter_init(&iter, self->session_fds);
   while (g_hash_table_iter_next(&iter, &key, &value)) {
-    uvc_session_t* session = reinterpret_cast<uvc_session_t*>(
-        static_cast<intptr_t>(*static_cast<int64_t*>(key)));
-    if (uvc_session_acquire(session)) {
+    uvc_session_t* session = uvc_session_acquire_id(
+        static_cast<uint64_t>(*static_cast<int64_t*>(key)));
+    if (session != nullptr) {
       uvc_session_release(session);
       continue;
     }
@@ -371,8 +369,8 @@ void CloseDeadSessionFds(FlutterFfiUvcPlugin* self) {
   }
 }
 
-void CloseSessionFd(FlutterFfiUvcPlugin* self, uvc_session_t* session) {
-  const int64_t key = SessionKey(session);
+void CloseSessionFd(FlutterFfiUvcPlugin* self, int64_t session_id) {
+  const int64_t key = session_id;
   gpointer value = g_hash_table_lookup(self->session_fds, &key);
   if (value == nullptr) return;
   close(GPOINTER_TO_INT(value) - 1);
@@ -472,10 +470,10 @@ void HandleUsbCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
     g_autoptr(FlValue) result = ListVideoDevices(self);
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(result));
   } else if (strcmp(method, "openUsbDevice") == 0) {
-    uvc_session_t* session = SessionFromArgs(args);
+    const int64_t session_id = SessionIdFromArgs(args);
     const int64_t device_id = Int64FromArgs(args, "deviceId");
     char devnode[64];
-    if (session == nullptr) {
+    if (session_id == 0) {
       response = FL_METHOD_RESPONSE(fl_method_error_response_new(
           "invalid_args", "sessionHandle is required.", nullptr));
     } else if (device_id < 0 || !DevnodeForDeviceId(device_id, devnode, sizeof(devnode))) {
@@ -495,9 +493,9 @@ void HandleUsbCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
             fl_method_error_response_new("open_failed", message, nullptr));
       } else {
         // A session holds one device. Opening another replaces it.
-        CloseSessionFd(self, session);
+        CloseSessionFd(self, session_id);
         CloseDeadSessionFds(self);
-        g_hash_table_replace(self->session_fds, Int64KeyNew(SessionKey(session)),
+        g_hash_table_replace(self->session_fds, Int64KeyNew(session_id),
                              GINT_TO_POINTER(fd + 1));
         // The Dart layer passes this value straight to uvc_open_fd, the same
         // flow as Android's UsbDeviceConnection file descriptor.
@@ -510,13 +508,15 @@ void HandleUsbCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
     // The Dart layer closes the native device before this call. The close
     // here is for an instance collected without dispose(), so libuvc never
     // runs on a released fd.
-    uvc_session_t* session = SessionFromArgs(args);
-    if (session != nullptr) {
-      if (uvc_session_acquire(session)) {
+    const int64_t session_id = SessionIdFromArgs(args);
+    if (session_id != 0) {
+      uvc_session_t* session =
+          uvc_session_acquire_id(static_cast<uint64_t>(session_id));
+      if (session != nullptr) {
         uvc_close_device(session);
         uvc_session_release(session);
       }
-      CloseSessionFd(self, session);
+      CloseSessionFd(self, session_id);
     }
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   } else {
@@ -561,25 +561,27 @@ void HandleTextureCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
     }
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   } else if (strcmp(method, "attachPreviewTexture") == 0) {
-    uvc_session_t* session = SessionFromArgs(args);
+    const int64_t session_id = SessionIdFromArgs(args);
     const int64_t texture_id = Int64FromArgs(args, "textureId");
     gpointer texture = g_hash_table_lookup(self->textures, &texture_id);
-    if (session == nullptr) {
+    uvc_session_t* session = nullptr;
+    if (session_id == 0) {
       response = FL_METHOD_RESPONSE(fl_method_error_response_new(
           "invalid_args", "sessionHandle is required.", nullptr));
     } else if (texture == nullptr) {
       response = FL_METHOD_RESPONSE(fl_method_error_response_new(
           "texture_not_found", "Unknown textureId", nullptr));
-    } else if (!uvc_session_acquire(session)) {
+    } else if ((session = uvc_session_acquire_id(
+                    static_cast<uint64_t>(session_id))) == nullptr) {
       response = FL_METHOD_RESPONSE(fl_method_error_response_new(
           "invalid_session", "sessionHandle is not a live session", nullptr));
     } else {
       // One texture per session and one session per texture.
-      UnbindSession(self, session);
+      UnbindSession(self, static_cast<uint64_t>(session_id));
       FfiUvcTexture* bound = FFI_UVC_TEXTURE(texture);
       UnbindTexture(bound);
       g_mutex_lock(&bound->session_mutex);
-      bound->session = session;
+      bound->session_id = static_cast<uint64_t>(session_id);
       g_mutex_unlock(&bound->session_mutex);
       uvc_set_frame_listener(session, OnNativeFrame, bound);
       uvc_session_release(session);
@@ -587,8 +589,8 @@ void HandleTextureCall(FlutterFfiUvcPlugin* self, FlMethodCall* method_call) {
     }
   } else if (strcmp(method, "detachPreviewSession") == 0) {
     // Dart calls this before destroying the session.
-    uvc_session_t* session = SessionFromArgs(args);
-    if (session != nullptr) UnbindSession(self, session);
+    const int64_t session_id = SessionIdFromArgs(args);
+    if (session_id != 0) UnbindSession(self, static_cast<uint64_t>(session_id));
     response = FL_METHOD_RESPONSE(fl_method_success_response_new(nullptr));
   } else {
     response = FL_METHOD_RESPONSE(fl_method_not_implemented_response_new());
@@ -905,10 +907,10 @@ static void flutter_ffi_uvc_plugin_dispose(GObject* object) {
     gpointer value = nullptr;
     g_hash_table_iter_init(&iter, self->session_fds);
     while (g_hash_table_iter_next(&iter, &key, &value)) {
-      uvc_session_t* session = reinterpret_cast<uvc_session_t*>(
-          static_cast<intptr_t>(*static_cast<int64_t*>(key)));
       // A session leaked by Dart may already be destroyed by its finalizer.
-      if (uvc_session_acquire(session)) {
+      uvc_session_t* session = uvc_session_acquire_id(
+          static_cast<uint64_t>(*static_cast<int64_t*>(key)));
+      if (session != nullptr) {
         uvc_close_device(session);
         uvc_session_release(session);
       }

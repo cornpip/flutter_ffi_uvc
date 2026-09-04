@@ -138,6 +138,7 @@ typedef struct {
 struct uvc_session {
   // Registry bookkeeping, guarded by g_registry_mutex rather than the locks below.
   struct uvc_session *registry_next;
+  uint64_t id;
   int pin_count;
   int destroying;
 
@@ -196,6 +197,7 @@ static const char k_empty_last_error[] = "";
 static pthread_mutex_t g_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t g_registry_cond = PTHREAD_COND_INITIALIZER;
 static uvc_session_t *g_registry_head = NULL;
+static uint64_t g_next_session_id = 1;
 
 static int registry_contains_locked(const uvc_session_t *s) {
   for (uvc_session_t *it = g_registry_head; it != NULL; it = it->registry_next) {
@@ -206,8 +208,18 @@ static int registry_contains_locked(const uvc_session_t *s) {
   return 0;
 }
 
+static uvc_session_t *registry_find_id_locked(uint64_t id) {
+  for (uvc_session_t *it = g_registry_head; it != NULL; it = it->registry_next) {
+    if (it->id == id) {
+      return it;
+    }
+  }
+  return NULL;
+}
+
 static void registry_add(uvc_session_t *s) {
   pthread_mutex_lock(&g_registry_mutex);
+  s->id = g_next_session_id++;
   s->registry_next = g_registry_head;
   g_registry_head = s;
   pthread_mutex_unlock(&g_registry_mutex);
@@ -261,6 +273,22 @@ FFI_PLUGIN_EXPORT void uvc_session_release(uvc_session_t *session) {
     }
   }
   pthread_mutex_unlock(&g_registry_mutex);
+}
+
+FFI_PLUGIN_EXPORT uint64_t uvc_session_id(uvc_session_t *session) {
+  return session != NULL ? session->id : 0;
+}
+
+FFI_PLUGIN_EXPORT uvc_session_t *uvc_session_acquire_id(uint64_t id) {
+  pthread_mutex_lock(&g_registry_mutex);
+  uvc_session_t *s = registry_find_id_locked(id);
+  if (s != NULL && !s->destroying) {
+    s->pin_count += 1;
+  } else {
+    s = NULL;
+  }
+  pthread_mutex_unlock(&g_registry_mutex);
+  return s;
 }
 
 #if defined(__ANDROID__)
@@ -595,13 +623,8 @@ static void close_device_resources_locked(uvc_session_t *s) {
   reset_frame_buffer_locked(s);
   s->previewing = 0;
   s->stopping_preview = 0;
-  // The frame listener survives preview stops and device closes on purpose:
-  // desktop plugin layers register it once per texture attach, independent of
-  // the preview session lifecycle. It only changes via uvc_set_frame_listener.
-  pthread_mutex_lock(&s->listener_mutex);
-  s->error_listener = NULL;
-  s->error_listener_user_data = NULL;
-  pthread_mutex_unlock(&s->listener_mutex);
+  // Listeners survive preview stops and device closes. They only change
+  // through their set functions.
 }
 
 // Listeners run under listener_mutex, so clearing a slot returns only after
@@ -1565,10 +1588,12 @@ FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t *session) {
   // Stops recording and preview, closes the device, releases the preview
   // window, and frees the frame buffers. No callback or listener runs afterwards.
   uvc_close_device(session);
-  pthread_mutex_lock(&session->mutex);
+  pthread_mutex_lock(&session->listener_mutex);
   session->frame_listener = NULL;
   session->frame_listener_user_data = NULL;
-  pthread_mutex_unlock(&session->mutex);
+  session->error_listener = NULL;
+  session->error_listener_user_data = NULL;
+  pthread_mutex_unlock(&session->listener_mutex);
   pthread_cond_destroy(&session->recording_cond);
   pthread_cond_destroy(&session->callback_cond);
   pthread_mutex_destroy(&session->listener_mutex);
@@ -2129,7 +2154,7 @@ FFI_PLUGIN_EXPORT int uvc_is_previewing(uvc_session_t *s) {
 }
 
 #if defined(__ANDROID__)
-// `session` is the uvc_session_t address as a jlong. 0 means no session.
+// `session` is the registry id (uvc_session_id) as a jlong. 0 means no session.
 JNIEXPORT jint JNICALL
 Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeAttachSurface(
     JNIEnv *env,
@@ -2137,10 +2162,10 @@ Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeAttachSurface(
     jlong session,
     jobject surface) {
   (void)thiz;
-  uvc_session_t *s = (uvc_session_t *)(intptr_t)session;
-
-  // The Kotlin layer holds the handle without owning it. Validate and pin.
-  if (surface == NULL || !uvc_session_acquire(s)) {
+  // The Kotlin layer holds the id without owning the session. Pin it.
+  uvc_session_t *s = uvc_session_acquire_id((uint64_t)session);
+  if (surface == NULL || s == NULL) {
+    if (s != NULL) uvc_session_release(s);
     return UVC_ERROR_INVALID_PARAM;
   }
 
@@ -2167,8 +2192,8 @@ Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeSessionIsLive(
     jlong session) {
   (void)env;
   (void)thiz;
-  uvc_session_t *s = (uvc_session_t *)(intptr_t)session;
-  if (!uvc_session_acquire(s)) {
+  uvc_session_t *s = uvc_session_acquire_id((uint64_t)session);
+  if (s == NULL) {
     return JNI_FALSE;
   }
   uvc_session_release(s);
@@ -2184,8 +2209,8 @@ Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeCloseDevice(
     jlong session) {
   (void)env;
   (void)thiz;
-  uvc_session_t *s = (uvc_session_t *)(intptr_t)session;
-  if (!uvc_session_acquire(s)) {
+  uvc_session_t *s = uvc_session_acquire_id((uint64_t)session);
+  if (s == NULL) {
     return;
   }
   uvc_close_device(s);
@@ -2199,9 +2224,8 @@ Java_com_cornpip_flutter_1ffi_1uvc_FlutterFfiUvcPlugin_nativeDetachSurface(
     jlong session) {
   (void)env;
   (void)thiz;
-  uvc_session_t *s = (uvc_session_t *)(intptr_t)session;
-
-  if (!uvc_session_acquire(s)) {
+  uvc_session_t *s = uvc_session_acquire_id((uint64_t)session);
+  if (s == NULL) {
     return;
   }
 

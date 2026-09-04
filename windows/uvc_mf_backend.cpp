@@ -123,6 +123,7 @@ ProcessState process;
 // so a freed pointer is never dereferenced. registry.mutex is a leaf lock
 // and is never held while taking any other lock or calling into a session.
 struct RegistryEntry {
+  uint64_t id = 0;  // never reused within the process
   int pins = 0;
   bool destroying = false;
 };
@@ -131,6 +132,7 @@ struct SessionRegistry {
   std::mutex mutex;
   std::condition_variable unpinned;  // signalled when an entry's pins hit 0
   std::map<const uvc_session*, RegistryEntry> live;
+  uint64_t next_id = 1;
 };
 
 SessionRegistry registry;
@@ -182,8 +184,6 @@ struct Session {
   std::mutex listener_mutex;
   uvc_frame_listener_t frame_listener = nullptr;
   void* frame_listener_data = nullptr;
-  void (*plugin_frame_cb)(void*) = nullptr;
-  void* plugin_frame_ctx = nullptr;
   uvc_error_listener_t error_listener = nullptr;
   void* error_listener_data = nullptr;
 
@@ -624,7 +624,6 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
       if (s.frame_listener != nullptr) {
         s.frame_listener(s.frame_listener_data, sequence);
       }
-      if (s.plugin_frame_cb != nullptr) s.plugin_frame_cb(s.plugin_frame_ctx);
     }
     // Encode before requesting the next sample so this callback stays the
     // only writer of the recording snapshot buffer.
@@ -1202,16 +1201,6 @@ void GetPreviewTransform(uvc_session_t* session, int* rotation, int* flip_h,
   if (flip_v != nullptr) *flip_v = s->flip_v;
 }
 
-void SetFrameAvailableCallback(uvc_session_t* session,
-                               void (*callback)(void* context),
-                               void* context) {
-  std::shared_ptr<Session> s = Impl(session);
-  if (!s) return;
-  std::lock_guard<std::mutex> lock(s->listener_mutex);
-  s->plugin_frame_cb = callback;
-  s->plugin_frame_ctx = context;
-}
-
 }  // namespace uvc_win
 
 // ---------------------------------------------------------------------------
@@ -1233,9 +1222,29 @@ FFI_PLUGIN_EXPORT uvc_session_t* uvc_session_create(void) {
   }
   {
     std::lock_guard<std::mutex> lock(registry.mutex);
-    registry.live[session] = RegistryEntry();
+    RegistryEntry entry;
+    entry.id = registry.next_id++;
+    registry.live[session] = entry;
   }
   return session;
+}
+
+FFI_PLUGIN_EXPORT uint64_t uvc_session_id(uvc_session_t* session) {
+  if (session == nullptr) return 0;
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  auto it = registry.live.find(session);
+  return it == registry.live.end() ? 0 : it->second.id;
+}
+
+FFI_PLUGIN_EXPORT uvc_session_t* uvc_session_acquire_id(uint64_t id) {
+  if (id == 0) return nullptr;
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  for (auto& entry : registry.live) {
+    if (entry.second.id != id || entry.second.destroying) continue;
+    entry.second.pins += 1;
+    return const_cast<uvc_session_t*>(entry.first);
+  }
+  return nullptr;
 }
 
 FFI_PLUGIN_EXPORT int uvc_session_acquire(uvc_session_t* session) {
@@ -1282,8 +1291,6 @@ FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t* session) {
     std::lock_guard<std::mutex> lock(s->listener_mutex);
     s->frame_listener = nullptr;
     s->frame_listener_data = nullptr;
-    s->plugin_frame_cb = nullptr;
-    s->plugin_frame_ctx = nullptr;
     s->error_listener = nullptr;
     s->error_listener_data = nullptr;
   }
@@ -1441,11 +1448,8 @@ FFI_PLUGIN_EXPORT void uvc_close_device(uvc_session_t* session) {
     CloseDeviceLocked(*s);
     s->symlink.clear();
   }
-  // The frame listener survives so a bound texture keeps working across a
-  // device switch. The error listener belongs to the closed stream.
-  std::lock_guard<std::mutex> lock(s->listener_mutex);
-  s->error_listener = nullptr;
-  s->error_listener_data = nullptr;
+  // Listeners survive so a bound texture keeps working across a device
+  // switch. They only change through their set functions.
 }
 
 FFI_PLUGIN_EXPORT int uvc_is_previewing(uvc_session_t* session) {

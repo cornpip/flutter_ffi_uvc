@@ -72,6 +72,33 @@ class FlutterFfiUvcBindings {
   late final _uvc_session_release = _uvc_session_releasePtr
       .asFunction<void Function(ffi.Pointer<uvc_session_t>)>();
 
+  /// Registry id of a session. Unique for the life of the process and never
+  /// reused, so a holder can name a session that may have been destroyed since.
+  /// Platform plugin layers key their state by this id, not by the pointer.
+  int uvc_session_id(ffi.Pointer<uvc_session_t> session) {
+    return _uvc_session_id(session);
+  }
+
+  late final _uvc_session_idPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Uint64 Function(ffi.Pointer<uvc_session_t>)>
+      >('uvc_session_id');
+  late final _uvc_session_id = _uvc_session_idPtr
+      .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
+
+  /// Pins the session with that id, as uvc_session_acquire does. Returns NULL
+  /// when no live session has it. Release with uvc_session_release.
+  ffi.Pointer<uvc_session_t> uvc_session_acquire_id(int id) {
+    return _uvc_session_acquire_id(id);
+  }
+
+  late final _uvc_session_acquire_idPtr =
+      _lookup<
+        ffi.NativeFunction<ffi.Pointer<uvc_session_t> Function(ffi.Uint64)>
+      >('uvc_session_acquire_id');
+  late final _uvc_session_acquire_id = _uvc_session_acquire_idPtr
+      .asFunction<ffi.Pointer<uvc_session_t> Function(int)>();
+
   /// Opens a device on the session. fd is a USB device node descriptor on
   /// Android and Linux and the enumeration device id on Windows. A device
   /// already open on this session is closed first.
@@ -1136,8 +1163,9 @@ typedef Dartuvc_frame_listener_tFunction =
     void Function(ffi.Pointer<ffi.Void> user_data, int sequence);
 
 /// Listeners run on native threads and receive user_data unchanged. A NULL
-/// listener clears the slot. uvc_close_device keeps the frame listener and
-/// clears the error listener.
+/// listener clears the slot and returns only after a call in progress has
+/// finished, so user_data may be freed afterwards. A listener must not call
+/// back into this ABI. Both slots survive uvc_close_device.
 typedef uvc_frame_listener_t =
     ffi.Pointer<ffi.NativeFunction<uvc_frame_listener_tFunction>>;
 typedef uvc_error_listener_tFunction =

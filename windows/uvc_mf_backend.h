@@ -40,12 +40,6 @@ int IdForSymbolicLink(const std::wstring& symbolic_link);
 void GetPreviewTransform(uvc_session_t* session, int* rotation, int* flip_h,
                          int* flip_v);
 
-// Called from the frame delivery thread whenever a new preview frame landed
-// in the session's RGBA buffer. Pass nullptr to clear. Setting it again
-// replaces the previous callback.
-void SetFrameAvailableCallback(uvc_session_t* session,
-                               void (*callback)(void* context), void* context);
-
 }  // namespace uvc_win
 
 #endif  // FLUTTER_FFI_UVC_WINDOWS_UVC_MF_BACKEND_H_

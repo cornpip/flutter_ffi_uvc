@@ -38,14 +38,14 @@ class FlutterFfiUvcPlugin : public flutter::Plugin {
 
  private:
   // One registered Flutter texture. A texture is bound to at most one session
-  // and a session to at most one texture. The session's frame callback
-  // carries this struct as its context.
+  // and a session to at most one texture. The session's frame listener
+  // carries this struct as its user_data.
   struct PreviewTexture {
     FlutterFfiUvcPlugin* plugin = nullptr;
     int64_t texture_id = -1;
-    // Read on the raster thread by CopyPixelBuffer, written on the platform
-    // thread.
-    std::atomic<uvc_session_t*> session{nullptr};
+    // Registry id of the bound session, 0 when unbound. Read on the raster
+    // thread by CopyPixelBuffer, written on the platform thread.
+    std::atomic<int64_t> session{0};
     std::unique_ptr<flutter::TextureVariant> variant;
     FlutterDesktopPixelBuffer pixel_buffer{};
     std::vector<uint8_t> pixels;
@@ -59,10 +59,10 @@ class FlutterFfiUvcPlugin : public flutter::Plugin {
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
   const FlutterDesktopPixelBuffer* CopyPixelBuffer(PreviewTexture* texture);
-  // Frame callback registered with the backend. The context is a
+  // Frame listener registered with the backend. user_data is a
   // PreviewTexture.
-  static void OnNativeFrameAvailable(void* context);
-  // Unbinds a texture from its session and clears the backend callback.
+  static void OnNativeFrameAvailable(void* context, int64_t sequence);
+  // Unbinds a texture from its session and clears the frame listener.
   void DetachTexture(PreviewTexture* texture);
 
   // Device attach/detach notifications via a hidden window. Created while the

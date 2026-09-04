@@ -167,7 +167,7 @@ StreamSubscription<UvcDeviceEvent>? _deviceEventSub;
 _deviceEventSub = uvcCamera.deviceEvents.listen((UvcDeviceEvent event) {
   if (event.type == UvcDeviceEventType.detached &&
       event.device.deviceId == uvcCamera.openedDeviceId) {
-    // The package has already stopped the preview and closed the device.
+    // The package closes the device right after this handler returns.
     // Update the UI.
   } else if (event.type == UvcDeviceEventType.attached) {
     // A camera was plugged in: refresh the device list, offer to open it, …

@@ -20,7 +20,7 @@
 - improve `openUsbDevice()`, `startPreview()`, and `startPreviewAuto()` to
   run the native open and stream start off the UI thread
 - change detach handling: an instance whose device is unplugged closes the
-  device itself
+  device itself, after the `deviceEvents` event is delivered
 - change `lastError` on Windows to clear once frames are delivered again,
   matching Android and Linux
 - fix `ensureCameraPermission()` never completing for a second concurrent

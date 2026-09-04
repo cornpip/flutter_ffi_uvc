@@ -1155,10 +1155,10 @@ abstract interface class UvcCamera {
   /// Stream of USB attach/detach events for UVC-capable devices.
   ///
   /// This is a broadcast stream shared by every instance. When the device
-  /// this instance opened through [openUsbDevice] is detached, the instance
-  /// stops its preview and closes the device itself, and the event is still
-  /// delivered here. A device opened through [openFd] has no device id, so
-  /// the app closes it with [closeFd].
+  /// this instance opened through [openUsbDevice] is detached, the event is
+  /// delivered here first, while [openedDeviceId] still names the device,
+  /// and the instance then closes the device itself. A device opened through
+  /// [openFd] has no device id, so the app closes it with [closeFd].
   Stream<UvcDeviceEvent> get deviceEvents;
 
   /// Device id passed to the [openUsbDevice] call that is currently open, or
