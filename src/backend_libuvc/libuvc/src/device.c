@@ -1251,6 +1251,11 @@ uvc_error_t uvc_parse_vc_header(uvc_device_t *dev,
     break;
   case 0x0110:
     break;
+  /* UVC 1.5 devices (for example action cameras exposing a USB webcam mode)
+   * report bcdUVC 0x0150. Treat them like 1.1: the control probe/commit
+   * payload layout is unchanged for the formats libuvc exposes. */
+  case 0x0150:
+    break;
   default:
     UVC_EXIT(UVC_ERROR_NOT_SUPPORTED);
     return UVC_ERROR_NOT_SUPPORTED;

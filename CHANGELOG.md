@@ -1,3 +1,10 @@
+## 1.0.1
+
+- fix opening UVC 1.5 devices that report `bcdUVC` `0x0150` (for example action
+  cameras exposing a USB webcam mode): `uvc_parse_vc_header()` no longer fails
+  with `UVC_ERROR_NOT_SUPPORTED`, so the device can be opened and its streaming
+  interfaces scanned. Navideck-maintained fork of `cornpip/flutter_ffi_uvc`.
+
 ## 1.0.0
 
 - **BREAKING** `stopPreview()`, `closeFd()`, `openFd()`, and `openPreview()`
