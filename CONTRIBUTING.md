@@ -12,18 +12,20 @@ Split mixed commits so each part keeps its prefix.
 
 ## Changelog
 
-The topmost CHANGELOG section is `## <version>-wip`; it accumulates
-bullets for the next release.
+The topmost CHANGELOG section is `## <version>-wip`. It accumulates
+bullets for the next release. Pull requests keep the `-wip` suffix, in
+both the heading and pubspec `version:`. The release commit drops it.
 
 - `feat`, `fix`, `perf`, and `change` commits add their bullet in the
   same commit. Other commits add one only when the change matters to a
-  user of the package. If the section does not exist yet, open it and set
-  pubspec `version:` to the same `-wip` value in that commit.
+  user of the package.
+- The first commit after a release opens the `-wip` section and sets
+  pubspec `version:` to match.
 - Pick the smallest bump the accumulated changes justify; rename the
   section heading and pubspec when a later change needs a bigger bump.
 - Flat `- ` bullets, details of one change as sub-bullets under it. Start
   with a lowercase verb (`add`, `change`, `fix`, ...) or a scope prefix
-  (`docs:`, `example:`). Name public symbols in backticks.
+  (`docs:`, `example:`). Name symbols in backticks.
 
 ## Engineering rules
 
