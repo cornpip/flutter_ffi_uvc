@@ -1,6 +1,10 @@
 ## 1.0.1-wip
 
 - fix opening UVC 1.5 devices, which failed with `UVC_ERROR_NOT_SUPPORTED`
+- fix opening UVC 1.5 devices that have an Encoding Unit, which failed with
+  `UVC_ERROR_INVALID_DEVICE`
+- fix starting a stream on UVC 1.5 devices that require the 48-byte
+  probe/commit block
 
 ## 1.0.0
 
