@@ -1,4 +1,4 @@
-## 1.0.1-wip
+## 1.0.1
 
 - fix opening UVC 1.5 devices, which failed with `UVC_ERROR_NOT_SUPPORTED`
 - fix opening UVC 1.5 devices that have an Encoding Unit, which failed with
