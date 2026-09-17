@@ -1,3 +1,7 @@
+## 1.0.1-wip
+
+- fix opening UVC 1.5 devices, which failed with `UVC_ERROR_NOT_SUPPORTED`
+
 ## 1.0.0
 
 - **BREAKING** `stopPreview()`, `closeFd()`, `openFd()`, and `openPreview()`
