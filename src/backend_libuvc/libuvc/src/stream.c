@@ -108,10 +108,11 @@ struct format_table_entry *_get_format_entry(enum uvc_frame_format format) {
     ABS_FMT(UVC_FRAME_FORMAT_ANY, 2,
       {UVC_FRAME_FORMAT_UNCOMPRESSED, UVC_FRAME_FORMAT_COMPRESSED})
 
-    ABS_FMT(UVC_FRAME_FORMAT_UNCOMPRESSED, 8,
+    ABS_FMT(UVC_FRAME_FORMAT_UNCOMPRESSED, 10,
       {UVC_FRAME_FORMAT_YUYV, UVC_FRAME_FORMAT_UYVY, UVC_FRAME_FORMAT_GRAY8,
        UVC_FRAME_FORMAT_GRAY16, UVC_FRAME_FORMAT_NV12, UVC_FRAME_FORMAT_P010,
-       UVC_FRAME_FORMAT_BGR, UVC_FRAME_FORMAT_RGB})
+       UVC_FRAME_FORMAT_BGR, UVC_FRAME_FORMAT_RGB,
+       UVC_FRAME_FORMAT_I420, UVC_FRAME_FORMAT_NV21})
     FMT(UVC_FRAME_FORMAT_YUYV,
       {'Y',  'U',  'Y',  '2', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
     FMT(UVC_FRAME_FORMAT_UYVY,
@@ -124,6 +125,10 @@ struct format_table_entry *_get_format_entry(enum uvc_frame_format format) {
       {'N',  'V',  '1',  '2', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
     FMT(UVC_FRAME_FORMAT_P010,
       {'P',  '0',  '1',  '0', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
+    FMT(UVC_FRAME_FORMAT_I420,
+      {'I',  '4',  '2',  '0', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
+    FMT(UVC_FRAME_FORMAT_NV21,
+      {'N',  'V',  '2',  '1', 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71})
     FMT(UVC_FRAME_FORMAT_BGR,
       {0x7d, 0xeb, 0x36, 0xe4, 0x4f, 0x52, 0xce, 0x11, 0x9f, 0x53, 0x00, 0x20, 0xaf, 0x0b, 0xa7, 0x70})
     FMT(UVC_FRAME_FORMAT_RGB,
@@ -174,7 +179,14 @@ static uint8_t _uvc_frame_format_matches_guid(enum uvc_frame_format fmt, uint8_t
   return 0;
 }
 
-static enum uvc_frame_format uvc_frame_format_for_guid(uint8_t guid[16]) {
+/** Look up the frame format matching a UVC format GUID.
+ * @ingroup streaming
+ *
+ * @param guid 16-byte format GUID, as found in a format descriptor
+ * @return The matching frame format, or UVC_FRAME_FORMAT_UNKNOWN if the GUID
+ * is not one libuvc knows about
+ */
+enum uvc_frame_format uvc_frame_format_for_guid(uint8_t guid[16]) {
   struct format_table_entry *format;
   enum uvc_frame_format fmt;
 
@@ -414,6 +426,20 @@ uvc_error_t uvc_stream_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl)
   return UVC_SUCCESS;
 }
 
+/** @brief Gets current stream control block
+ * @ingroup streaming
+ *
+ * This may be executed whether or not the stream is running.
+ *
+ * @param[in] strmh Stream handle
+ * @param[out] ctrl Current control block
+ */
+uvc_error_t uvc_stream_get_current_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl) {
+
+    *ctrl = strmh->cur_ctrl;
+    return UVC_SUCCESS;
+}
+
 /** @internal
  * @brief Find the descriptor for a specific frame configuration
  * @param stream_if Stream interface
@@ -603,8 +629,7 @@ static int _uvc_stream_params_negotiated(
   uvc_stream_ctrl_t *required,
   uvc_stream_ctrl_t *actual) {
     return required->bFormatIndex == actual->bFormatIndex &&
-    required->bFrameIndex == actual->bFrameIndex &&
-    required->dwMaxPayloadTransferSize >= actual->dwMaxPayloadTransferSize;
+    required->bFrameIndex == actual->bFrameIndex;
 }
 
 /** @internal
@@ -754,26 +779,26 @@ void _uvc_process_payload(uvc_stream_handle_t *strmh, uint8_t *payload, size_t p
 
     header_info = payload[1];
 
-    if (header_info & 0x40) {
+    if (header_info & UVC_STREAM_ERR) {
       UVC_DEBUG("bad packet: error bit set");
       return;
     }
 
-    if (strmh->fid != (header_info & 1) && strmh->got_bytes != 0) {
+    if (strmh->fid != (header_info & UVC_STREAM_FID) && strmh->got_bytes != 0) {
       /* The frame ID bit was flipped, but we have image data sitting
          around from prior transfers. This means the camera didn't send
          an EOF for the last transfer of the previous frame. */
       _uvc_swap_buffers(strmh);
     }
 
-    strmh->fid = header_info & 1;
+    strmh->fid = (uint8_t) (header_info & UVC_STREAM_FID);
 
-    if (header_info & (1 << 2)) {
+    if (header_info & UVC_STREAM_PTS) {
       strmh->pts = DW_TO_INT(payload + variable_offset);
       variable_offset += 4;
     }
 
-    if (header_info & (1 << 3)) {
+    if (header_info & UVC_STREAM_SCR) {
       /** @todo read the SOF token counter */
       strmh->last_scr = DW_TO_INT(payload + variable_offset);
       variable_offset += 6;
@@ -794,7 +819,8 @@ void _uvc_process_payload(uvc_stream_handle_t *strmh, uint8_t *payload, size_t p
       data_len = strmh->cur_ctrl.dwMaxVideoFrameSize - strmh->got_bytes; /* Avoid overflow. */
     memcpy(strmh->outbuf + strmh->got_bytes, payload + header_len, data_len);
     strmh->got_bytes += data_len;
-    if (header_info & (1 << 1) || strmh->got_bytes == strmh->cur_ctrl.dwMaxVideoFrameSize) {
+
+    if (header_info & UVC_STREAM_EOF || strmh->got_bytes == strmh->cur_ctrl.dwMaxVideoFrameSize) {
       /* The EOF bit is set, so publish the complete frame */
       _uvc_swap_buffers(strmh);
     }
@@ -828,7 +854,7 @@ void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
 
   switch (transfer->status) {
   case LIBUSB_TRANSFER_COMPLETED:
-    if (transfer->num_iso_packets == 0) {
+    if (transfer->type != LIBUSB_TRANSFER_TYPE_ISOCHRONOUS) {
       /* This is a bulk mode transfer, so it just has one payload transfer */
       _uvc_process_payload(strmh, transfer->buffer, transfer->actual_length);
     } else {
@@ -842,14 +868,13 @@ void LIBUSB_CALL _uvc_stream_callback(struct libusb_transfer *transfer) {
         pkt = transfer->iso_packet_desc + packet_id;
 
         if (pkt->status != 0) {
-          UVC_DEBUG("bad packet (isochronous transfer); status: %d", pkt->status);
+          UVC_DEBUG("bad packet (isochronous transfer); pkt_id=%d status: %s(%d), actual_length=%d", packet_id, libusb_error_name(pkt->status), pkt->status, pkt->actual_length);
           continue;
         }
 
         pktbuf = libusb_get_iso_packet_buffer_simple(transfer, packet_id);
 
         _uvc_process_payload(strmh, pktbuf, pkt->actual_length);
-
       }
     }
     break;
@@ -1182,6 +1207,7 @@ uvc_error_t uvc_stream_start(
   }
 
   if (isochronous) {
+    UVC_DEBUG("isochronous transfer mode:  num_altsetting=%d", interface->num_altsetting);
     /* For isochronous streaming, we choose an appropriate altsetting for the endpoint
      * and set up several transfers */
     const struct libusb_interface_descriptor *altsetting = 0;
@@ -1327,8 +1353,8 @@ uvc_error_t uvc_stream_start(
         packets_per_transfer,
         total_transfer_size);
 
-    /* Set up the transfers */
-    for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
+  /* Set up the transfers */
+  for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
       transfer = libusb_alloc_transfer(packets_per_transfer);
       strmh->transfers[transfer_id] = transfer;      
       strmh->transfer_bufs[transfer_id] = malloc(total_transfer_size);
@@ -1506,7 +1532,7 @@ void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
    * is going to be reopen_on_change anyway
    */
 
-  frame_desc = uvc_find_frame_desc(strmh->devh, strmh->cur_ctrl.bFormatIndex,
+  frame_desc = uvc_find_frame_desc_stream(strmh, strmh->cur_ctrl.bFormatIndex,
 				   strmh->cur_ctrl.bFrameIndex);
 
   frame->frame_format = strmh->frame_format;
@@ -1522,6 +1548,8 @@ void _uvc_populate_frame(uvc_stream_handle_t *strmh) {
     frame->step = frame->width * 2;
     break;
   case UVC_FRAME_FORMAT_NV12:
+  case UVC_FRAME_FORMAT_NV21:
+  case UVC_FRAME_FORMAT_I420:
     frame->step = frame->width;
     break;
   case UVC_FRAME_FORMAT_P010:
@@ -1719,6 +1747,9 @@ void uvc_stream_close(uvc_stream_handle_t *strmh) {
 
   if (strmh->frame.data)
     free(strmh->frame.data);
+
+  if (strmh->frame.metadata)
+    free(strmh->frame.metadata);
 
   free(strmh->outbuf);
   free(strmh->holdbuf);

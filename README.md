@@ -15,7 +15,7 @@ on Windows.
 
 - Android(arm64-v8a, x86_64, armeabi-v7a)
 - Windows(x64)
-- Linux(x64): see [Linux setup](#linux-setup) for camera access
+- Linux(x64, arm64): see [Linux setup](#linux-setup) for camera access
 - Dart SDK: `>=3.8.1 <4.0.0`
 - Android minSdk: `24`
 

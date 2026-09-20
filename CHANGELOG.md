@@ -1,3 +1,8 @@
+## 1.0.2-wip
+
+- change the bundled libuvc base to upstream v0.0.8
+  - Linux builds now need CMake 3.13 or later
+
 ## 1.0.1
 
 - fix opening UVC 1.5 devices, which failed with `UVC_ERROR_NOT_SUPPORTED`

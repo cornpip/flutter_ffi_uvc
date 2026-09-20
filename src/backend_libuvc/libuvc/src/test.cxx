@@ -32,16 +32,18 @@
 *  POSSIBILITY OF SUCH DAMAGE.
 *********************************************************************/
 #include <stdio.h>
-#include <opencv2/highgui/highgui_c.h>
+#include <unistd.h>
+#include <opencv2/highgui.hpp>
 
 #include "libuvc/libuvc.h"
+
+using namespace cv;
 
 void cb(uvc_frame_t *frame, void *ptr) {
   uvc_frame_t *bgr;
   uvc_error_t ret;
-  IplImage* cvImg;
 
-  printf("callback! length = %u, ptr = %d\n", frame->data_bytes, (int) ptr);
+  printf("callback! length = %zu, ptr = %p\n", frame->data_bytes, ptr);
 
   bgr = uvc_allocate_frame(frame->width * frame->height * 3);
   if (!bgr) {
@@ -56,18 +58,14 @@ void cb(uvc_frame_t *frame, void *ptr) {
     return;
   }
 
-  cvImg = cvCreateImageHeader(
-      cvSize(bgr->width, bgr->height),
-      IPL_DEPTH_8U,
-      3);
+  {
+    /* Wrap the frame data in a scoped cvImg, without copying it. */
+    Mat cvImg(bgr->height, bgr->width, CV_8UC3, bgr->data, bgr->step);
 
-  cvSetData(cvImg, bgr->data, bgr->width * 3); 
-
-  cvNamedWindow("Test", CV_WINDOW_AUTOSIZE);
-  cvShowImage("Test", cvImg);
-  cvWaitKey(10);
-
-  cvReleaseImageHeader(&cvImg);
+    namedWindow("Test", WINDOW_AUTOSIZE);
+    imshow("Test", cvImg);
+    waitKey(10);
+  }
 
   uvc_free_frame(bgr);
 }
@@ -115,7 +113,7 @@ int main(int argc, char **argv) {
       if (res < 0) {
         uvc_perror(res, "get_mode");
       } else {
-        res = uvc_start_streaming(devh, &ctrl, cb, 12345, 0);
+        res = uvc_start_streaming(devh, &ctrl, cb, (void*)12345, 0);
 
         if (res < 0) {
           uvc_perror(res, "start_streaming");

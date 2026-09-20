@@ -1,7 +1,6 @@
-# The Flutter tooling requires that developers have CMake 3.10 or later
-# installed. You should not increase this version, as doing so will cause
-# the plugin to fail to compile for some customers of the plugin.
-cmake_minimum_required(VERSION 3.10)
+# The bundled libuvc (v0.0.8) requires CMake 3.13, so this plugin does too.
+# Flutter itself only needs 3.10.
+cmake_minimum_required(VERSION 3.13)
 
 # Project-level configuration.
 set(PROJECT_NAME "flutter_ffi_uvc")
@@ -144,9 +143,7 @@ set_target_properties(${PLUGIN_NAME} PROPERTIES
   INSTALL_RPATH "$ORIGIN"
 )
 # Link-time only: lets the app executable's linker resolve the plugin's
-# libusb1.0.so dependency from the build tree. Nothing is embedded. Passed
-# through target_link_libraries because target_link_options needs CMake 3.13
-# while this file declares a 3.10 minimum.
+# libusb1.0.so dependency from the build tree. Nothing is embedded.
 target_link_libraries(${PLUGIN_NAME} INTERFACE
   "-Wl,-rpath-link,${CMAKE_CURRENT_BINARY_DIR}/libusb_build")
 

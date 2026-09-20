@@ -87,6 +87,10 @@ enum uvc_frame_format {
   UVC_FRAME_FORMAT_NV12,
   /** YUV: P010 */
   UVC_FRAME_FORMAT_P010,
+  /** YUV420: I420 (planar Y, U, V) */
+  UVC_FRAME_FORMAT_I420,
+  /** YUV420: NV21 */
+  UVC_FRAME_FORMAT_NV21,
   /** Number of formats understood */
   UVC_FRAME_FORMAT_COUNT,
 };
@@ -439,8 +443,10 @@ typedef struct uvc_device_descriptor {
   uint16_t idVendor;
   /** Product ID */
   uint16_t idProduct;
-  /** UVC compliance level, e.g. 0x0100 (1.0), 0x0110 */
-  uint16_t bcdUVC;
+  /** Reserved; was bcdUVC, which was never populated (always read 0).
+   * Kept to preserve the layout of the fields below.
+   * Use uvc_get_spec_version() on an open handle instead. */
+  uint16_t reserved;
   /** Serial number (null if unavailable) */
   const char *serialNumber;
   /** Device-reported manufacturer name (or null) */
@@ -588,6 +594,7 @@ const uvc_output_terminal_t *uvc_get_output_terminals(uvc_device_handle_t *devh)
 const uvc_selector_unit_t *uvc_get_selector_units(uvc_device_handle_t *devh);
 const uvc_processing_unit_t *uvc_get_processing_units(uvc_device_handle_t *devh);
 const uvc_extension_unit_t *uvc_get_extension_units(uvc_device_handle_t *devh);
+uint16_t uvc_get_spec_version(uvc_device_handle_t *devh);
 
 uvc_error_t uvc_get_stream_ctrl_format_size(
     uvc_device_handle_t *devh,
@@ -608,6 +615,8 @@ uvc_error_t uvc_trigger_still(
     uvc_still_ctrl_t *still_ctrl);
 
 const uvc_format_desc_t *uvc_get_format_descs(uvc_device_handle_t* );
+
+enum uvc_frame_format uvc_frame_format_for_guid(uint8_t guid[16]);
 
 uvc_error_t uvc_probe_stream_ctrl(
     uvc_device_handle_t *devh,
@@ -634,6 +643,7 @@ void uvc_stop_streaming(uvc_device_handle_t *devh);
 
 uvc_error_t uvc_stream_open_ctrl(uvc_device_handle_t *devh, uvc_stream_handle_t **strmh, uvc_stream_ctrl_t *ctrl);
 uvc_error_t uvc_stream_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl);
+uvc_error_t uvc_stream_get_current_ctrl(uvc_stream_handle_t *strmh, uvc_stream_ctrl_t *ctrl);
 uvc_error_t uvc_stream_start(uvc_stream_handle_t *strmh,
     uvc_frame_callback_t *cb,
     void *user_ptr,
@@ -800,6 +810,7 @@ uvc_error_t uvc_yuyv2y(uvc_frame_t *in, uvc_frame_t *out);
 uvc_error_t uvc_yuyv2uv(uvc_frame_t *in, uvc_frame_t *out);
 
 #ifdef LIBUVC_HAS_JPEG
+uvc_error_t uvc_mjpeg2bgr(uvc_frame_t *in, uvc_frame_t *out);
 uvc_error_t uvc_mjpeg2rgb(uvc_frame_t *in, uvc_frame_t *out);
 uvc_error_t uvc_mjpeg2gray(uvc_frame_t *in, uvc_frame_t *out);
 #endif

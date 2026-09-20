@@ -1,7 +1,6 @@
-# The Flutter tooling requires that developers have CMake 3.10 or later
-# installed. You should not increase this version, as doing so will cause
-# the plugin to fail to compile for some customers of the plugin.
-cmake_minimum_required(VERSION 3.10)
+# The bundled libuvc (v0.0.8) requires CMake 3.13, so this plugin does too.
+# Flutter itself only needs 3.10.
+cmake_minimum_required(VERSION 3.13)
 
 project(flutter_ffi_uvc_library VERSION 0.0.1 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)

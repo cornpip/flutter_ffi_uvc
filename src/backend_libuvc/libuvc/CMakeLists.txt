@@ -1,6 +1,6 @@
-cmake_minimum_required(VERSION 3.1)
+cmake_minimum_required(VERSION 3.13)
 project(libuvc
-  VERSION 0.0.7
+  VERSION 0.0.8
   LANGUAGES C
 )
 
@@ -24,6 +24,32 @@ endif()
 option(BUILD_EXAMPLE "Build example program" ON)
 option(BUILD_TEST "Build test program" OFF)
 option(ENABLE_UVC_DEBUGGING "Enable UVC debugging" OFF)
+option(DISABLE_JPEG "Disable JPEG support" OFF)
+option(ENABLE_WARNINGS "Build with a common set of compiler warnings enabled" ON)
+option(WARNINGS_AS_ERRORS "Turn compiler warnings into errors (used by CI)" OFF)
+option(BUILD_TESTING "Build the unit tests" OFF)
+option(ENABLE_SANITIZERS "Build with AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+
+# Applied to every target defined below, including the example and test
+# programs. Kept off for MSVC, which does not understand these flags.
+if(ENABLE_WARNINGS AND NOT MSVC)
+  add_compile_options(-Wall)
+endif()
+if(WARNINGS_AS_ERRORS)
+  if(MSVC)
+    add_compile_options(/WX)
+  else()
+    add_compile_options(-Werror)
+  endif()
+endif()
+
+# Applied to the whole build, not just the tests: an out-of-bounds read
+# inside the library is only caught if the library itself is instrumented.
+if(ENABLE_SANITIZERS)
+  set(uvc_sanitizer_flags -fsanitize=address,undefined -fno-omit-frame-pointer)
+  add_compile_options(${uvc_sanitizer_flags})
+  add_link_options(${uvc_sanitizer_flags})
+endif()
 
 set(libuvc_DESCRIPTION "A cross-platform library for USB video devices")
 set(libuvc_URL "https://github.com/libuvc/libuvc")
@@ -41,14 +67,18 @@ set(SOURCES
 
 find_package(LibUSB)
 
-# JpegPkg name to differ from shipped with CMake
-find_package(JpegPkg QUIET)
-if(JPEG_FOUND)
-  message(STATUS "Building libuvc with JPEG support.")
-  set(LIBUVC_HAS_JPEG TRUE)
-  list(APPEND SOURCES src/frame-mjpeg.c)
+if(DISABLE_JPEG)
+  message(STATUS "libuvc will not support JPEG decoding.")
 else()
-  message(WARNING "JPEG not found. libuvc will not support JPEG decoding.")
+  # JpegPkg name to differ from shipped with CMake
+  find_package(JpegPkg QUIET)
+  if(JPEG_FOUND)
+    message(STATUS "Building libuvc with JPEG support.")
+    set(LIBUVC_HAS_JPEG TRUE)
+    list(APPEND SOURCES src/frame-mjpeg.c)
+  else()
+    message(WARNING "JPEG not found. libuvc will not support JPEG decoding.")
+  endif()
 endif()
 
 if(UNIX AND NOT APPLE)
@@ -154,6 +184,10 @@ if(BUILD_EXAMPLE)
 endif()
 
 if(BUILD_TEST)
+  # Only the test program is C++; the library itself is C, so do not
+  # require a C++ compiler unless the test is actually built.
+  enable_language(CXX)
+
   # OpenCV defines targets with transitive dependencies not with namespaces but using opencv_ prefix. 
   # This targets provide necessary include directories and linked flags.
   find_package(OpenCVPkg REQUIRED
@@ -162,13 +196,20 @@ if(BUILD_TEST)
       opencv_highgui
   )
 
-  add_executable(uvc_test src/test.c)
+  add_executable(uvc_test src/test.cxx)
   target_link_libraries(uvc_test
     PRIVATE
       LibUVC::UVC
       opencv_core
       opencv_highgui
   )
+endif()
+
+if(BUILD_TESTING)
+  # enable_language(CXX) happens inside test/, so a build with
+  # BUILD_TESTING=OFF never requires a C++ compiler.
+  enable_testing()
+  add_subdirectory(test)
 endif()
 
 

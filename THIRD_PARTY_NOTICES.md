@@ -21,7 +21,7 @@ license.
 - Path: `src/backend_libuvc/libuvc`
 - Upstream: `https://github.com/libuvc/libuvc`
 - Upstream source base revision:
-  `047920bcdfb1dac42424c90de5cc77dfc9fba04d`
+  `4e9fc773914377ec0bcf2f31621f56da5a0fa09f` (v0.0.8)
 - License: BSD License
 
 `libuvc` is redistributed in source form in this repository. The full upstream
