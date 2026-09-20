@@ -1,4 +1,4 @@
-## 1.0.2-wip
+## 1.0.2
 
 - change the bundled libuvc base to upstream v0.0.8
   - Linux builds now need CMake 3.13 or later
