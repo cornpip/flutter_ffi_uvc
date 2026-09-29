@@ -3258,44 +3258,45 @@ typedef struct {
   const char *ui_type;
   // 1 = Camera Terminal (CT), 0 = Processing Unit (PU)
   int is_ct;
-  // Bit position in bmControls = (UVC selector value - 1)
+  // Bit position in the descriptor bmControls of the unit. The UVC
+  // specification orders these bits differently from the selectors.
   int bm_bit;
 } ctrl_info_t;
 
 static const ctrl_info_t k_ctrl_table[] = {
-    // PU controls — bm_bit = UVC_PU_*_CONTROL selector - 1
-    {UVC_CTRL_ID_BRIGHTNESS,                "brightness",                  "Brightness",                 CTRL_VALUE_TYPE_INT16,  "slider", 0, 1},  // PU selector 0x02
-    {UVC_CTRL_ID_CONTRAST,                  "contrast",                    "Contrast",                   CTRL_VALUE_TYPE_UINT16, "slider", 0, 2},  // PU selector 0x03
-    {UVC_CTRL_ID_HUE,                       "hue",                         "Hue",                        CTRL_VALUE_TYPE_INT16,  "slider", 0, 5},  // PU selector 0x06
-    {UVC_CTRL_ID_SATURATION,                "saturation",                  "Saturation",                 CTRL_VALUE_TYPE_UINT16, "slider", 0, 6},  // PU selector 0x07
-    {UVC_CTRL_ID_SHARPNESS,                 "sharpness",                   "Sharpness",                  CTRL_VALUE_TYPE_UINT16, "slider", 0, 7},  // PU selector 0x08
-    {UVC_CTRL_ID_GAMMA,                     "gamma",                       "Gamma",                      CTRL_VALUE_TYPE_UINT16, "slider", 0, 8},  // PU selector 0x09
-    {UVC_CTRL_ID_GAIN,                      "gain",                        "Gain",                       CTRL_VALUE_TYPE_UINT16, "slider", 0, 3},  // PU selector 0x04
-    {UVC_CTRL_ID_BACKLIGHT_COMPENSATION,    "backlight_compensation",      "Backlight Compensation",     CTRL_VALUE_TYPE_UINT16, "slider", 0, 0},  // PU selector 0x01
-    {UVC_CTRL_ID_WHITE_BALANCE_TEMPERATURE, "white_balance_temperature",   "White Balance Temperature",  CTRL_VALUE_TYPE_UINT16, "slider", 0, 9},  // PU selector 0x0a
-    {UVC_CTRL_ID_WHITE_BALANCE_TEMP_AUTO,   "white_balance_temp_auto",     "Auto White Balance",         CTRL_VALUE_TYPE_UINT8,  "bool",   0, 10}, // PU selector 0x0b
-    {UVC_CTRL_ID_POWER_LINE_FREQUENCY,      "power_line_frequency",        "Power Line Frequency",       CTRL_VALUE_TYPE_UINT8,  "enum",   0, 4},  // PU selector 0x05
+    // PU controls — bm_bit from UVC 1.5 Table 3-8 (Processing Unit Descriptor)
+    {UVC_CTRL_ID_BRIGHTNESS,                "brightness",                  "Brightness",                 CTRL_VALUE_TYPE_INT16,  "slider", 0, 0},  // PU selector 0x02
+    {UVC_CTRL_ID_CONTRAST,                  "contrast",                    "Contrast",                   CTRL_VALUE_TYPE_UINT16, "slider", 0, 1},  // PU selector 0x03
+    {UVC_CTRL_ID_HUE,                       "hue",                         "Hue",                        CTRL_VALUE_TYPE_INT16,  "slider", 0, 2},  // PU selector 0x06
+    {UVC_CTRL_ID_SATURATION,                "saturation",                  "Saturation",                 CTRL_VALUE_TYPE_UINT16, "slider", 0, 3},  // PU selector 0x07
+    {UVC_CTRL_ID_SHARPNESS,                 "sharpness",                   "Sharpness",                  CTRL_VALUE_TYPE_UINT16, "slider", 0, 4},  // PU selector 0x08
+    {UVC_CTRL_ID_GAMMA,                     "gamma",                       "Gamma",                      CTRL_VALUE_TYPE_UINT16, "slider", 0, 5},  // PU selector 0x09
+    {UVC_CTRL_ID_GAIN,                      "gain",                        "Gain",                       CTRL_VALUE_TYPE_UINT16, "slider", 0, 9},  // PU selector 0x04
+    {UVC_CTRL_ID_BACKLIGHT_COMPENSATION,    "backlight_compensation",      "Backlight Compensation",     CTRL_VALUE_TYPE_UINT16, "slider", 0, 8},  // PU selector 0x01
+    {UVC_CTRL_ID_WHITE_BALANCE_TEMPERATURE, "white_balance_temperature",   "White Balance Temperature",  CTRL_VALUE_TYPE_UINT16, "slider", 0, 6},  // PU selector 0x0a
+    {UVC_CTRL_ID_WHITE_BALANCE_TEMP_AUTO,   "white_balance_temp_auto",     "Auto White Balance",         CTRL_VALUE_TYPE_UINT8,  "bool",   0, 12}, // PU selector 0x0b
+    {UVC_CTRL_ID_POWER_LINE_FREQUENCY,      "power_line_frequency",        "Power Line Frequency",       CTRL_VALUE_TYPE_UINT8,  "enum",   0, 10}, // PU selector 0x05
     {UVC_CTRL_ID_CONTRAST_AUTO,             "contrast_auto",               "Auto Contrast",              CTRL_VALUE_TYPE_UINT8,  "bool",   0, 18}, // PU selector 0x13
-    {UVC_CTRL_ID_HUE_AUTO,                  "hue_auto",                    "Auto Hue",                   CTRL_VALUE_TYPE_UINT8,  "bool",   0, 15}, // PU selector 0x10
-    {UVC_CTRL_ID_WHITE_BALANCE_COMPONENT_AUTO, "white_balance_component_auto", "Auto White Balance Component", CTRL_VALUE_TYPE_UINT8, "bool", 0, 12}, // PU selector 0x0d
-    {UVC_CTRL_ID_DIGITAL_MULTIPLIER,        "digital_multiplier",          "Digital Multiplier",         CTRL_VALUE_TYPE_UINT16, "slider", 0, 13}, // PU selector 0x0e
-    {UVC_CTRL_ID_DIGITAL_MULTIPLIER_LIMIT,  "digital_multiplier_limit",    "Digital Multiplier Limit",   CTRL_VALUE_TYPE_UINT16, "slider", 0, 14}, // PU selector 0x0f
+    {UVC_CTRL_ID_HUE_AUTO,                  "hue_auto",                    "Auto Hue",                   CTRL_VALUE_TYPE_UINT8,  "bool",   0, 11}, // PU selector 0x10
+    {UVC_CTRL_ID_WHITE_BALANCE_COMPONENT_AUTO, "white_balance_component_auto", "Auto White Balance Component", CTRL_VALUE_TYPE_UINT8, "bool", 0, 13}, // PU selector 0x0d
+    {UVC_CTRL_ID_DIGITAL_MULTIPLIER,        "digital_multiplier",          "Digital Multiplier",         CTRL_VALUE_TYPE_UINT16, "slider", 0, 14}, // PU selector 0x0e
+    {UVC_CTRL_ID_DIGITAL_MULTIPLIER_LIMIT,  "digital_multiplier_limit",    "Digital Multiplier Limit",   CTRL_VALUE_TYPE_UINT16, "slider", 0, 15}, // PU selector 0x0f
     {UVC_CTRL_ID_ANALOG_VIDEO_STANDARD,     "analog_video_standard",       "Analog Video Standard",      CTRL_VALUE_TYPE_UINT8,  "enum",   0, 16}, // PU selector 0x11
     {UVC_CTRL_ID_ANALOG_LOCK_STATUS,        "analog_lock_status",          "Analog Lock Status",         CTRL_VALUE_TYPE_UINT8,  "enum",   0, 17}, // PU selector 0x12
-    // CT controls — bm_bit = UVC_CT_*_CONTROL selector - 1
+    // CT controls — bm_bit from UVC 1.5 Table 3-6 (Camera Terminal Descriptor)
     {UVC_CTRL_ID_SCANNING_MODE,             "scanning_mode",               "Scanning Mode",              CTRL_VALUE_TYPE_UINT8,  "bool",   1, 0},  // CT selector 0x01
     {UVC_CTRL_ID_AE_MODE,                   "ae_mode",                     "Exposure Mode",             CTRL_VALUE_TYPE_UINT8,  "enum",   1, 1},  // CT selector 0x02
     {UVC_CTRL_ID_AE_PRIORITY,               "ae_priority",                 "AE Priority",               CTRL_VALUE_TYPE_UINT8,  "bool",   1, 2},  // CT selector 0x03
     {UVC_CTRL_ID_EXPOSURE_ABS,              "exposure_abs",                "Exposure Time",             CTRL_VALUE_TYPE_UINT32, "slider", 1, 3},  // CT selector 0x04
     {UVC_CTRL_ID_EXPOSURE_REL,              "exposure_rel",                "Exposure Step",              CTRL_VALUE_TYPE_UINT8,  "slider", 1, 4},  // CT selector 0x05
     {UVC_CTRL_ID_FOCUS_ABS,                 "focus_abs",                   "Focus",                     CTRL_VALUE_TYPE_UINT16, "slider", 1, 5},  // CT selector 0x06
-    {UVC_CTRL_ID_FOCUS_AUTO,                "focus_auto",                  "Auto Focus",                CTRL_VALUE_TYPE_UINT8,  "bool",   1, 7},  // CT selector 0x08
-    {UVC_CTRL_ID_IRIS_ABS,                  "iris_abs",                    "Iris",                      CTRL_VALUE_TYPE_UINT16, "slider", 1, 8},  // CT selector 0x09
-    {UVC_CTRL_ID_IRIS_REL,                  "iris_rel",                    "Iris Step",                 CTRL_VALUE_TYPE_UINT8,  "slider", 1, 9},  // CT selector 0x0a
-    {UVC_CTRL_ID_ZOOM_ABS,                  "zoom_abs",                    "Zoom",                      CTRL_VALUE_TYPE_UINT16, "slider", 1, 10}, // CT selector 0x0b
-    {UVC_CTRL_ID_ROLL_ABS,                  "roll_abs",                    "Roll",                      CTRL_VALUE_TYPE_INT16,  "slider", 1, 14}, // CT selector 0x0f
-    {UVC_CTRL_ID_PRIVACY,                   "privacy",                     "Privacy",                   CTRL_VALUE_TYPE_UINT8,  "bool",   1, 16}, // CT selector 0x11
-    {UVC_CTRL_ID_FOCUS_SIMPLE,              "focus_simple",                "Simple Focus",              CTRL_VALUE_TYPE_UINT8,  "enum",   1, 17}, // CT selector 0x12
+    {UVC_CTRL_ID_FOCUS_AUTO,                "focus_auto",                  "Auto Focus",                CTRL_VALUE_TYPE_UINT8,  "bool",   1, 17}, // CT selector 0x08
+    {UVC_CTRL_ID_IRIS_ABS,                  "iris_abs",                    "Iris",                      CTRL_VALUE_TYPE_UINT16, "slider", 1, 7},  // CT selector 0x09
+    {UVC_CTRL_ID_IRIS_REL,                  "iris_rel",                    "Iris Step",                 CTRL_VALUE_TYPE_UINT8,  "slider", 1, 8},  // CT selector 0x0a
+    {UVC_CTRL_ID_ZOOM_ABS,                  "zoom_abs",                    "Zoom",                      CTRL_VALUE_TYPE_UINT16, "slider", 1, 9},  // CT selector 0x0b
+    {UVC_CTRL_ID_ROLL_ABS,                  "roll_abs",                    "Roll",                      CTRL_VALUE_TYPE_INT16,  "slider", 1, 13}, // CT selector 0x0f
+    {UVC_CTRL_ID_PRIVACY,                   "privacy",                     "Privacy",                   CTRL_VALUE_TYPE_UINT8,  "bool",   1, 18}, // CT selector 0x11
+    {UVC_CTRL_ID_FOCUS_SIMPLE,              "focus_simple",                "Simple Focus",              CTRL_VALUE_TYPE_UINT8,  "enum",   1, 19}, // CT selector 0x12
 };
 
 static const int k_ctrl_table_size = (int)(sizeof(k_ctrl_table) / sizeof(k_ctrl_table[0]));
@@ -3614,7 +3615,6 @@ static int ctrl_set_raw(uvc_device_handle_t *devh, int ctrl_id, int32_t value) {
 // advertised control. Caller holds usb_mutex.
 static int ctrl_get_all_json_usb_locked(uvc_device_handle_t *devh, uint8_t *buffer, int buffer_length) {
   // Read bmControls bitmaps from descriptors — no USB transfer needed.
-  // Bit position = UVC selector value - 1.
   uint64_t ct_bm = 0;
   uint64_t pu_bm = 0;
 
