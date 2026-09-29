@@ -1145,15 +1145,17 @@ abstract interface class UvcCamera {
   /// Requests the CAMERA permission.
   ///
   /// Returns true if the permission is already granted or the user grants it.
-  /// Desktop platforms have no runtime permission dialog; this returns true,
-  /// and problems surface as open/stream failures instead.
+  /// On macOS this asks for camera access and returns false when the user
+  /// refuses it. Windows and Linux have no runtime permission dialog; this
+  /// returns true, and problems surface as open/stream failures instead.
   Future<bool> ensureCameraPermission();
 
   /// Lists USB devices that expose a UVC video interface.
   ///
   /// [UvcUsbDevice.hasPermission] reports whether the device can be opened
-  /// without a permission request: always true on Windows, and on Linux it
-  /// reflects read-write access to the device node.
+  /// without a permission request: always true on Windows, on Linux it
+  /// reflects read-write access to the device node, and on macOS whether
+  /// camera access has been granted to the app.
   Future<List<UvcUsbDevice>> listUsbDevices();
 
   /// Stream of USB attach/detach events for UVC-capable devices.
@@ -1171,9 +1173,10 @@ abstract interface class UvcCamera {
 
   /// Opens a USB device by [deviceId].
   ///
-  /// On Android this acquires USB permission if needed. Desktop platforms
-  /// have no permission flow; on Linux the device node must be accessible
-  /// (usually a udev rule).
+  /// On Android this acquires USB permission if needed, and on macOS camera
+  /// access, failing with [UvcErrorCode.access] when the user refuses it.
+  /// Windows and Linux have no permission flow; on Linux the device node
+  /// must be accessible (usually a udev rule).
   ///
   /// If this instance already has a device open, its preview is stopped and
   /// the device is closed first, so calling this again is also how you switch
@@ -1199,7 +1202,7 @@ abstract interface class UvcCamera {
   Future<void> closeUsbDevice();
 
   /// Opens a UVC device using an already acquired platform file descriptor.
-  /// Android only. Use [openUsbDevice] on Windows and Linux. Throws
+  /// Android only. Use [openUsbDevice] on desktop platforms. Throws
   /// [UnsupportedError] on other platforms. A device this instance opened
   /// through [openUsbDevice] is closed first, and [openedDeviceId] becomes
   /// null. Throws [UvcException] when the native open fails.
@@ -1422,8 +1425,8 @@ abstract interface class UvcCamera {
   /// Returns controls present in descriptor bmControls without GET_* probing.
   ///
   /// Intended for debugging device quirks where descriptor exposure and
-  /// readable/writable behavior differ. Android and Linux only. The Windows
-  /// backend has no raw descriptor access and returns an empty list.
+  /// readable/writable behavior differ. Not available on Windows, which has
+  /// no raw descriptor access and returns an empty list.
   List<UvcBmControlInfo> debugBmControls();
 
   /// Returns the current value for a specific UVC control.
@@ -1461,7 +1464,7 @@ abstract interface class UvcCamera {
   /// [startPreview], decoded by the hardware decoder). On Windows H.264 is
   /// deliberately excluded from this list (an inter-frame codec breaks the
   /// per-frame validation model, see `doc/windows-backend.md`) and on Linux
-  /// as well.
+  /// and macOS as well.
   List<UvcCameraMode> supportedModes();
 
   // ---------------------------------------------------------------------------

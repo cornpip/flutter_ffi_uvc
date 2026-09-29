@@ -1553,8 +1553,10 @@ FlutterFfiUvcBindings? _cachedBindings;
 
 DynamicLibrary get _dylib {
   _ensureSupportedPlatform();
-  // On Windows and Linux the FFI symbols are exported from the plugin
-  // library, which also hosts the native backend and the platform channels.
+  if (_cachedDylib != null) return _cachedDylib!;
+  // On desktop the FFI symbols are exported from the plugin library, which
+  // also hosts the native backend and the platform channels.
+  if (Platform.isMacOS) return _cachedDylib = _openMacOSLibrary();
   final String libraryName;
   if (Platform.isWindows) {
     libraryName = '${_libName}_plugin.dll';
@@ -1563,13 +1565,27 @@ DynamicLibrary get _dylib {
   } else {
     libraryName = 'lib$_libName.so';
   }
-  return _cachedDylib ??= DynamicLibrary.open(libraryName);
+  return _cachedDylib = DynamicLibrary.open(libraryName);
+}
+
+/// The plugin is a framework of its own when the app links plugins
+/// dynamically, and part of the app binary when it links them statically.
+DynamicLibrary _openMacOSLibrary() {
+  try {
+    return DynamicLibrary.open('$_libName.framework/$_libName');
+  } on ArgumentError {
+    return DynamicLibrary.process();
+  }
 }
 
 void _ensureSupportedPlatform() {
-  if (!Platform.isAndroid && !Platform.isWindows && !Platform.isLinux) {
+  if (!Platform.isAndroid &&
+      !Platform.isWindows &&
+      !Platform.isLinux &&
+      !Platform.isMacOS) {
     throw UnsupportedError(
-      'flutter_ffi_uvc is supported only on Android, Windows, and Linux.',
+      'flutter_ffi_uvc is supported only on Android, Windows, Linux, and '
+      'macOS.',
     );
   }
 }
@@ -1581,8 +1597,8 @@ void _ensureAndroidOnlyApi(String apiName) {
   _ensureSupportedPlatform();
   if (!Platform.isAndroid) {
     throw UnsupportedError(
-      '$apiName is Android-only. Use openUsbDevice/closeUsbDevice on Windows '
-      'and Linux.',
+      '$apiName is Android-only. Use openUsbDevice/closeUsbDevice on '
+      'desktop platforms.',
     );
   }
 }

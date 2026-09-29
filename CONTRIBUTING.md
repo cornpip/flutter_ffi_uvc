@@ -32,8 +32,8 @@ both the heading and pubspec `version:`. The release commit drops it.
 - When native declarations change, regenerate bindings with
   `dart run ffigen --config ffigen.yaml`.
 - All platforms implement the same exported C ABI and emit byte-compatible
-  JSON, so a change lands in the libuvc backend (Android/Linux) and the
-  Windows backend together.
+  JSON, so a change lands in the libuvc backend (Android/Linux), the
+  Windows backend, and the macOS backend together.
 
 ## Tests
 

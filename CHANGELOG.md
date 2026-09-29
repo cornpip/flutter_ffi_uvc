@@ -1,3 +1,7 @@
+## 1.1.0-wip
+
+- add macOS support (10.15 or later)
+
 ## 1.0.2
 
 - change the bundled libuvc base to upstream v0.0.8
