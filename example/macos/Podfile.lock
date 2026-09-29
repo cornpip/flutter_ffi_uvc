@@ -1,5 +1,5 @@
 PODS:
-  - flutter_ffi_uvc (1.1.0-wip):
+  - flutter_ffi_uvc (1.1.0):
     - FlutterMacOS
   - FlutterMacOS (1.0.0)
 
@@ -14,7 +14,7 @@ EXTERNAL SOURCES:
     :path: Flutter/ephemeral
 
 SPEC CHECKSUMS:
-  flutter_ffi_uvc: 9f8b84653be5f28f11006049e67c80abf79720b2
+  flutter_ffi_uvc: 74d29823e423d3dc8b43a5141df584cab569edcb
   FlutterMacOS: 8f6f14fa908a6fb3fba0cd85dbd81ec4b251fb24
 
 PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009

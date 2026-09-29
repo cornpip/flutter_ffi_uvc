@@ -1,4 +1,4 @@
-## 1.1.0-wip
+## 1.1.0
 
 - add macOS support (10.15 or later)
 - fix `supportedControls()` and `debugBmControls()` leaving out controls the
