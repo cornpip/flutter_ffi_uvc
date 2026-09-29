@@ -1,3 +1,9 @@
+## 1.1.0-wip
+
+- add macOS support (10.15 or later)
+- fix `supportedControls()` and `debugBmControls()` leaving out controls the
+  camera supports on Android and Linux
+
 ## 1.0.2
 
 - change the bundled libuvc base to upstream v0.0.8

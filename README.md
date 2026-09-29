@@ -3,9 +3,7 @@
 UVC (USB Video Class) camera plugin. Connect one or several USB cameras and
 get live preview on a Flutter `Texture`, JPEG still capture, MP4 video
 recording, raw frame access from Dart, camera controls, and stream
-diagnostics.  
-Under the hood it uses `libuvc` on Android and Linux, and Media Foundation
-on Windows.
+diagnostics.
 
 <img src="./readme_img/260430.gif" alt="app_image_2" width="300"/>
 <img src="./readme_img/11.png" alt="app_image_1" width="300"/>
@@ -16,8 +14,9 @@ on Windows.
 - Android(arm64-v8a, x86_64, armeabi-v7a)
 - Windows(x64)
 - Linux(x64, arm64): see [Linux setup](#linux-setup) for camera access
+- macOS(arm64, x64) 10.15 or later: see [macOS setup](#macos-setup) for the
+  app's Info.plist and entitlements
 - Dart SDK: `>=3.8.1 <4.0.0`
-- Android minSdk: `24`
 
 ## Installation
 
@@ -113,7 +112,9 @@ try {
 
 A `PlatformException` means the platform layer failed, for example a denied
 USB permission. On Linux the device node must be accessible, see
-[Linux setup](#linux-setup).
+[Linux setup](#linux-setup). On macOS the open asks for camera access if the
+user has not decided yet, and fails with `UvcErrorCode.access` when it is
+refused.
 
 If a device is already open, `openUsbDevice` closes it first, so switching
 cameras is just another `openUsbDevice` call.
@@ -316,7 +317,7 @@ uvcCamera.stopVideoRecording();
   normal finish so you know the file is complete.
 - `isRecording` reports whether a recording is in progress. Audio is not
   recorded.
-- Recording is available on Android and Windows. On Linux
+- Recording is available on Android, Windows, and macOS. On Linux
   `startVideoRecording()` throws. Use `takePicture()` and `copyLatestFrame()`
   there.
 
@@ -324,8 +325,8 @@ uvcCamera.stopVideoRecording();
 
 On Android, H.264 modes are listed in `supportedModes()` and work like any
 other format, but `startPreviewAuto()` never selects them. Opt in with an
-explicit `startPreview()`. Windows and Linux do not list H.264 modes. The
-other formats cover every advertised resolution.
+explicit `startPreview()`. Windows, Linux, and macOS do not list H.264
+modes. The other formats cover every advertised resolution.
 
 ### Controls
 
@@ -355,8 +356,8 @@ if (panTilt != null) {
 ```
 
 `debugBmControls()` lists the controls a device advertises without probing
-them, for devices that advertise a control but reject reads of it. Android
-and Linux only.
+them, for devices that advertise a control but reject reads of it. Android,
+Linux, and macOS only.
 
 ### Diagnostics
 
@@ -455,8 +456,9 @@ is `UvcLogLevel.info`.
 uvcCamera.setLogLevel(UvcLogLevel.warn);
 ```
 
-Native logs go to logcat on Android and stderr on Linux. The Windows backend
-reports problems through `streamErrors` and `lastError` instead.
+Native logs go to logcat on Android and stderr on Linux. The Windows and
+macOS backends report problems through `streamErrors` and `lastError`
+instead.
 
 ## Linux setup
 
@@ -474,6 +476,43 @@ sudo udevadm control --reload-rules
 
 Optional: install `nasm` before building for faster MJPEG decode
 (libjpeg-turbo x86_64 SIMD).
+
+## macOS setup
+
+Add a camera usage description to `macos/Runner/Info.plist`. Without it the
+app is terminated when it first asks for the camera.
+
+```xml
+<key>NSCameraUsageDescription</key>
+<string>Shows the preview of the connected USB camera.</string>
+```
+
+Flutter macOS apps run sandboxed by default, so also add these entitlements
+to `macos/Runner/DebugProfile.entitlements` and
+`macos/Runner/Release.entitlements`:
+
+```xml
+<key>com.apple.security.device.camera</key>
+<true/>
+<key>com.apple.security.device.usb</key>
+<true/>
+```
+
+`device.usb` is what camera controls use. Without it the camera still
+streams, but `supportedControls()` is empty and `setControl()` throws.
+
+**On Flutter 3.44 or later, add this line to
+`macos/Runner/Configs/Release.xcconfig`. Without it, the package does not
+work in an app archived in Xcode for distribution.**
+
+```
+STRIP_STYLE = non-global
+```
+
+Flutter 3.44 builds plugins with Swift Package Manager by default, which
+puts the plugin inside the app binary. Archiving the app then removes the
+function names this package looks up at run time, and every camera call
+fails.
 
 ## Example app
 

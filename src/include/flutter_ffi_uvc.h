@@ -15,6 +15,11 @@
 
 #if _WIN32
 #define FFI_PLUGIN_EXPORT __declspec(dllexport)
+#elif __APPLE__
+// On macOS the plugin can be linked statically into the app binary, where
+// only Dart refers to these symbols. "used" keeps them through dead
+// stripping.
+#define FFI_PLUGIN_EXPORT __attribute__((visibility("default"))) __attribute__((used))
 #else
 // Explicit default visibility so the symbols stay exported when the host
 // library is built with -fvisibility=hidden (the Linux plugin build).
@@ -60,8 +65,8 @@ FFI_PLUGIN_EXPORT uvc_session_t *uvc_session_acquire_id(uint64_t id);
 // Synchronous lifecycle. These block the calling thread and bypass the
 // request queue below, which is built on them. The Dart layer uses the
 // queue. Opens a device on the session. fd is a USB device node descriptor
-// on Android and Linux and the enumeration device id on Windows. A device
-// already open on this session is closed first.
+// on Android and Linux and the enumeration device id on Windows and macOS.
+// A device already open on this session is closed first.
 FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t *session, int fd);
 
 FFI_PLUGIN_EXPORT int uvc_start_preview(
@@ -174,7 +179,7 @@ FFI_PLUGIN_EXPORT void uvc_set_request_listener(
 // opened, and the close then takes it back. A stop leaves opens alone.
 FFI_PLUGIN_EXPORT int64_t uvc_request_open(uvc_session_t *session);
 
-// Hands the fd (or Windows device id) to a queued open. fd < 0 fails the
+// Hands the fd (or Windows and macOS device id) to a queued open. fd < 0 fails the
 // open with UVC_ERROR_NO_DEVICE. Returns 0 when the request took the fd,
 // which the session then owns until it reports device_released, and
 // UVC_ERROR_INVALID_PARAM when no such open is waiting, in which case the

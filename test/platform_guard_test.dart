@@ -14,18 +14,21 @@ void main() {
         return;
       }
 
-      // On Windows and Linux the platform itself is supported, but openFd is
-      // not the supported opening path there; it must throw instead of
+      // On desktop the platform itself is supported, but openFd is not the
+      // supported opening path there; it must throw instead of
       // silently reinterpreting the value.
       expect(() => uvcCamera.openFd(3), throwsA(isA<UnsupportedError>()));
       expect(() => uvcCamera.closeFd(), throwsA(isA<UnsupportedError>()));
     });
 
     test('fails explicitly on unsupported host platforms', () {
-      // Android, Windows, and Linux are supported platforms: there the guard
-      // passes and native calls only work with the plugin library present,
-      // which a pure Dart test host does not provide.
-      if (Platform.isAndroid || Platform.isWindows || Platform.isLinux) {
+      // Android, Windows, Linux, and macOS are supported platforms: there
+      // the guard passes and native calls only work with the plugin library
+      // present, which a pure Dart test host does not provide.
+      if (Platform.isAndroid ||
+          Platform.isWindows ||
+          Platform.isLinux ||
+          Platform.isMacOS) {
         return;
       }
 

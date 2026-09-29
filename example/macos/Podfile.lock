@@ -1,0 +1,22 @@
+PODS:
+  - flutter_ffi_uvc (1.1.0-wip):
+    - FlutterMacOS
+  - FlutterMacOS (1.0.0)
+
+DEPENDENCIES:
+  - flutter_ffi_uvc (from `Flutter/ephemeral/.symlinks/plugins/flutter_ffi_uvc/macos`)
+  - FlutterMacOS (from `Flutter/ephemeral`)
+
+EXTERNAL SOURCES:
+  flutter_ffi_uvc:
+    :path: Flutter/ephemeral/.symlinks/plugins/flutter_ffi_uvc/macos
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+
+SPEC CHECKSUMS:
+  flutter_ffi_uvc: 9f8b84653be5f28f11006049e67c80abf79720b2
+  FlutterMacOS: 8f6f14fa908a6fb3fba0cd85dbd81ec4b251fb24
+
+PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009
+
+COCOAPODS: 1.17.0

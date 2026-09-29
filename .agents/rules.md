@@ -12,6 +12,7 @@ Read this first. Read other docs only when the task touches that area.
 - Version bump / release: read `.agents/docs/release-checklist.md`.
 - `LICENSE`, `NOTICES`, or a bundled third-party component changed: read `.agents/docs/license-notices.md`.
 - Windows backend behavior, H264 rationale: read `doc/windows-backend.md`.
+- macOS backend behavior, build layout, entitlements: read `doc/macos-backend.md`.
 - Frame access API shape: read `doc/frame-access-design.md`.
 
 ## Agent-Specific
