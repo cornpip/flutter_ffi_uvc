@@ -48,6 +48,7 @@
 #include <vector>
 
 #include "../src/include/flutter_ffi_uvc.h"
+#include "../src/common/uvc_guard.h"
 #include "../src/common/uvc_requests_internal.h"
 
 namespace {
@@ -515,8 +516,10 @@ bool ConvertSampleLocked(Session& s, IMFSample* sample) {
     s.stats.decode_failure_count += 1;
   } else {
     const size_t out_bytes = static_cast<size_t>(w) * h * 4;
-    if (s.rgba.size() != out_bytes) {
-      s.rgba.resize(out_bytes);
+    try {
+      if (s.rgba.size() != out_bytes) s.rgba.resize(out_bytes);
+    } catch (...) {
+      s.rgba.clear();
     }
     if (s.rgba.size() != out_bytes) {
       s.stats.buffer_allocation_failure_count += 1;
@@ -579,7 +582,7 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
   // IMFSourceReaderCallback
   STDMETHODIMP OnReadSample(HRESULT hr_status, DWORD /*stream_index*/,
                             DWORD stream_flags, LONGLONG /*timestamp*/,
-                            IMFSample* sample) override {
+                            IMFSample* sample) override try {
     std::shared_ptr<Session> owner = session_.lock();
     if (!owner) return S_OK;
     Session& s = *owner;
@@ -612,10 +615,18 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
         if (s.frame_w == s.rec_src_w && s.frame_h == s.rec_src_h) {
           const size_t bytes =
               static_cast<size_t>(s.frame_w) * s.frame_h * 4;
-          if (s.rec_rgba.size() != bytes) s.rec_rgba.resize(bytes);
-          memcpy(s.rec_rgba.data(), s.rgba.data(), bytes);
-          record_frame = true;
-          record_ts = QpcNow();
+          try {
+            if (s.rec_rgba.size() != bytes) s.rec_rgba.resize(bytes);
+          } catch (...) {
+            s.rec_rgba.clear();
+          }
+          if (s.rec_rgba.size() == bytes) {
+            memcpy(s.rec_rgba.data(), s.rgba.data(), bytes);
+            record_frame = true;
+            record_ts = QpcNow();
+          } else {
+            s.rec_frames_dropped += 1;
+          }
         } else {
           s.rec_frames_dropped += 1;
         }
@@ -650,15 +661,21 @@ class SourceReaderCallback : public IMFSourceReaderCallback {
       reader->Release();
     }
     return S_OK;
+  } catch (...) {
+    // Nothing may unwind into Media Foundation. The read chain ends here and
+    // stall detection reports it.
+    return S_OK;
   }
 
-  STDMETHODIMP OnFlush(DWORD /*stream_index*/) override {
+  STDMETHODIMP OnFlush(DWORD /*stream_index*/) override try {
     std::shared_ptr<Session> owner = session_.lock();
     if (!owner) return S_OK;
     std::lock_guard<std::mutex> lock(owner->mutex);
     if (owner->reader_generation == generation_ && owner->flush_event != nullptr) {
       SetEvent(owner->flush_event);
     }
+    return S_OK;
+  } catch (...) {
     return S_OK;
   }
 
@@ -1092,7 +1109,12 @@ void WriteRecordingFrame(Session& s, int64_t ts_qpc) {
   const uint8_t* frame = s.rec_rgba.data();
   if (s.rec_rotation != 0 || s.rec_flip_h != 0 || s.rec_flip_v != 0) {
     const size_t bytes = static_cast<size_t>(s.rec_w) * s.rec_h * 4;
-    if (s.rec_transformed.size() != bytes) s.rec_transformed.resize(bytes);
+    try {
+      if (s.rec_transformed.size() != bytes) s.rec_transformed.resize(bytes);
+    } catch (...) {
+      s.rec_frames_dropped += 1;
+      return;
+    }
     TransformRgba(s.rec_rgba.data(), s.rec_src_w, s.rec_src_h, s.rec_rotation,
                   s.rec_flip_h, s.rec_flip_v, s.rec_transformed.data(),
                   s.rec_w, s.rec_h);
@@ -1233,31 +1255,31 @@ FFI_PLUGIN_EXPORT uvc_session_t* uvc_session_create(void) {
   try {
     session = new uvc_session();
     session->impl = std::make_shared<Session>();
-  } catch (...) {
-    delete session;
-    return nullptr;
-  }
-  if (session->impl->flush_event == nullptr) {
-    delete session;
-    return nullptr;
-  }
-  {
+    if (session->impl->flush_event == nullptr) {
+      delete session;
+      return nullptr;
+    }
     std::lock_guard<std::mutex> lock(registry.mutex);
     RegistryEntry entry;
     entry.id = registry.next_id++;
     registry.live[session] = entry;
+  } catch (...) {
+    delete session;
+    return nullptr;
   }
   return session;
 }
 
-FFI_PLUGIN_EXPORT uint64_t uvc_session_id(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT uint64_t uvc_session_id(uvc_session_t* session) try {
   if (session == nullptr) return 0;
   std::lock_guard<std::mutex> lock(registry.mutex);
   auto it = registry.live.find(session);
   return it == registry.live.end() ? 0 : it->second.id;
+} catch (...) {
+  return 0;
 }
 
-FFI_PLUGIN_EXPORT uvc_session_t* uvc_session_acquire_id(uint64_t id) {
+FFI_PLUGIN_EXPORT uvc_session_t* uvc_session_acquire_id(uint64_t id) try {
   if (id == 0) return nullptr;
   std::lock_guard<std::mutex> lock(registry.mutex);
   for (auto& entry : registry.live) {
@@ -1266,31 +1288,36 @@ FFI_PLUGIN_EXPORT uvc_session_t* uvc_session_acquire_id(uint64_t id) {
     return const_cast<uvc_session_t*>(entry.first);
   }
   return nullptr;
+} catch (...) {
+  return nullptr;
 }
 
-FFI_PLUGIN_EXPORT int uvc_session_acquire(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_session_acquire(uvc_session_t* session) try {
   if (session == nullptr) return 0;
   std::lock_guard<std::mutex> lock(registry.mutex);
   auto it = registry.live.find(session);
   if (it == registry.live.end() || it->second.destroying) return 0;
   it->second.pins += 1;
   return 1;
+} catch (...) {
+  return 0;
 }
 
-FFI_PLUGIN_EXPORT void uvc_session_release(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT void uvc_session_release(uvc_session_t* session) try {
   if (session == nullptr) return;
   std::lock_guard<std::mutex> lock(registry.mutex);
   auto it = registry.live.find(session);
   if (it == registry.live.end() || it->second.pins <= 0) return;
   it->second.pins -= 1;
   if (it->second.pins == 0) registry.unpinned.notify_all();
+} catch (...) {
 }
 
 FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t* session) {
   uvc_requests_destroy(session, 0);
 }
 
-void uvc_session_finalize(uvc_session_t* session) {
+void uvc_session_finalize(uvc_session_t* session) try {
   if (session == nullptr) return;
   // Closing first leaves Session::mutex free while the retire below waits
   // for pins a plugin still holds.
@@ -1324,12 +1351,13 @@ void uvc_session_finalize(uvc_session_t* session) {
   delete session;
   // A callback still holding a promoted weak_ptr releases the Session when
   // it returns. It sees reader == nullptr and previewing == false.
+} catch (...) {
 }
 
 // On Windows there are no file descriptors: the "fd" is the stable device id
 // handed out by device enumeration (see uvc_win::ListDevices), which the
 // Dart openUsbDevice flow passes straight back in.
-FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t* session, int fd) {
+FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t* session, int fd) try {
   std::shared_ptr<Session> owner = Impl(session);
   if (!owner) return kErrorInvalidParam;
   Session& s = *owner;
@@ -1357,11 +1385,13 @@ FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t* session, int fd) {
   const int result = OpenSourceLocked(s, owner);
   if (result != 0) s.symlink.clear();
   return result;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
                                         int frame_format, int width,
-                                        int height, int fps) {
+                                        int height, int fps) try {
   std::shared_ptr<Session> owner = Impl(session);
   if (!owner) return kErrorInvalidParam;
   Session& s = *owner;
@@ -1458,15 +1488,18 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
     return kErrorIo;
   }
   return 0;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT void uvc_stop_preview(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT void uvc_stop_preview(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
   StopPreviewInternal(*s);
+} catch (...) {
 }
 
-FFI_PLUGIN_EXPORT void uvc_close_device(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT void uvc_close_device(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
   StopPreviewInternal(*s);
@@ -1477,26 +1510,33 @@ FFI_PLUGIN_EXPORT void uvc_close_device(uvc_session_t* session) {
   }
   // Listeners survive so a bound texture keeps working across a device
   // switch. They only change through their set functions.
+} catch (...) {
 }
 
-FFI_PLUGIN_EXPORT int uvc_is_previewing(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_is_previewing(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   return s->previewing.load() ? 1 : 0;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT int uvc_frame_width(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_frame_width(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   std::lock_guard<std::mutex> lock(s->mutex);
   return s->frame_w;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT int uvc_frame_height(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_frame_height(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   std::lock_guard<std::mutex> lock(s->mutex);
   return s->frame_h;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba(uvc_session_t* session,
@@ -1508,7 +1548,7 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba(uvc_session_t* session,
 
 FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_with_metadata(
     uvc_session_t* session, uint8_t* buffer, int buffer_length,
-    int* out_width, int* out_height, int64_t* out_sequence) {
+    int* out_width, int* out_height, int64_t* out_sequence) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -1524,12 +1564,14 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_with_metadata(
   if (out_height != nullptr) *out_height = s->frame_h;
   if (out_sequence != nullptr) *out_sequence = s->sequence.load();
   return static_cast<int>(needed);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_transformed(
     uvc_session_t* session, uint8_t* buffer, int buffer_length, int rotation,
     int flip_h, int flip_v, int* out_width, int* out_height,
-    int64_t* out_sequence) {
+    int64_t* out_sequence) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -1555,12 +1597,14 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_transformed(
   if (out_height != nullptr) *out_height = dst_h;
   if (out_sequence != nullptr) *out_sequence = s->sequence.load();
   return static_cast<int>(dst_bytes);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_take_picture_jpeg(
     uvc_session_t* session, uint8_t* buffer, int buffer_length, int quality,
     int rotation, int flip_h, int flip_v, int* out_width, int* out_height,
-    int64_t* out_sequence) {
+    int64_t* out_sequence) try {
   std::shared_ptr<Session> owner = Impl(session);
   if (!owner) return kErrorInvalidParam;
   Session& s = *owner;
@@ -1693,12 +1737,14 @@ FFI_PLUGIN_EXPORT int uvc_take_picture_jpeg(
   if (stream != nullptr) stream->Release();
   if (factory != nullptr) factory->Release();
   return result;
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_start_recording(uvc_session_t* session,
                                           const char* path, int bitrate_bps,
                                           int fps_hint, int rotation,
-                                          int flip_h, int flip_v) {
+                                          int flip_h, int flip_v) try {
   std::shared_ptr<Session> owner = Impl(session);
   if (!owner) return kErrorInvalidParam;
   Session& s = *owner;
@@ -1831,49 +1877,59 @@ FFI_PLUGIN_EXPORT int uvc_start_recording(uvc_session_t* session,
     s.recording.store(true);
   }
   return 0;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT int uvc_stop_recording(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_stop_recording(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   return StopRecordingInternal(*s);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT int uvc_is_recording(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_is_recording(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   return s->recording.load() ? 1 : 0;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   return s->sequence.load();
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT void uvc_set_frame_listener(uvc_session_t* session,
                                               uvc_frame_listener_t listener,
-                                              void* user_data) {
+                                              void* user_data) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
   std::lock_guard<std::mutex> lock(s->listener_mutex);
   s->frame_listener = listener;
   s->frame_listener_data = listener != nullptr ? user_data : nullptr;
+} catch (...) {
 }
 
 FFI_PLUGIN_EXPORT void uvc_set_error_listener(uvc_session_t* session,
                                               uvc_error_listener_t listener,
-                                              void* user_data) {
+                                              void* user_data) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
   std::lock_guard<std::mutex> lock(s->listener_mutex);
   s->error_listener = listener;
   s->error_listener_data = listener != nullptr ? user_data : nullptr;
+} catch (...) {
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_stream_stats_json(uvc_session_t* session,
                                                 uint8_t* buffer,
-                                                int buffer_length) {
+                                                int buffer_length) try {
   std::shared_ptr<Session> owner = Impl(session);
   if (!owner) return 0;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -1942,11 +1998,13 @@ FFI_PLUGIN_EXPORT int uvc_get_stream_stats_json(uvc_session_t* session,
     return 0;
   }
   return static_cast<int>(offset);
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uvc_session_t* session,
                                                    uint8_t* buffer,
-                                                   int buffer_length) {
+                                                   int buffer_length) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return 0;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -1971,17 +2029,21 @@ FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uvc_session_t* session,
     return 0;
   }
   return static_cast<int>(offset);
+} catch (...) {
+  return 0;
 }
 
-FFI_PLUGIN_EXPORT int64_t uvc_error_count(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int64_t uvc_error_count(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return 0;
   return s->error_count.load();
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_supported_modes(uvc_session_t* session,
                                               uvc_mode_t* out_modes,
-                                              int max_modes) {
+                                              int max_modes) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s || out_modes == nullptr || max_modes <= 0) return kErrorInvalidParam;
   std::lock_guard<std::mutex> lock(s->mutex);
@@ -1996,15 +2058,19 @@ FFI_PLUGIN_EXPORT int uvc_get_supported_modes(uvc_session_t* session,
     count += 1;
   }
   return count;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT const char* uvc_last_error(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT const char* uvc_last_error(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return "";
   std::lock_guard<std::mutex> lock(s->error_mutex);
   memcpy(s->last_error_snapshot, s->last_error, sizeof(s->last_error_snapshot));
   s->last_error_snapshot[sizeof(s->last_error_snapshot) - 1] = '\0';
   return s->last_error_snapshot;
+} catch (...) {
+  return "";
 }
 
 FFI_PLUGIN_EXPORT void uvc_set_log_level(int level) {
@@ -2013,7 +2079,7 @@ FFI_PLUGIN_EXPORT void uvc_set_log_level(int level) {
 
 FFI_PLUGIN_EXPORT void uvc_set_preview_transform(uvc_session_t* session,
                                                  int rotation, int flip_h,
-                                                 int flip_v) {
+                                                 int flip_v) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
   if (rotation != 90 && rotation != 180 && rotation != 270) rotation = 0;
@@ -2021,17 +2087,19 @@ FFI_PLUGIN_EXPORT void uvc_set_preview_transform(uvc_session_t* session,
   s->rotation = rotation;
   s->flip_h = flip_h != 0 ? 1 : 0;
   s->flip_v = flip_v != 0 ? 1 : 0;
+} catch (...) {
 }
 
 FFI_PLUGIN_EXPORT void uvc_get_preview_transform(uvc_session_t* session,
                                                  int* rotation, int* flip_h,
-                                                 int* flip_v) {
+                                                 int* flip_v) try {
   uvc_win::GetPreviewTransform(session, rotation, flip_h, flip_v);
+} catch (...) {
 }
 
 FFI_PLUGIN_EXPORT int uvc_ctrl_get_all_json(uvc_session_t* session,
                                             uint8_t* buffer,
-                                            int buffer_length) {
+                                            int buffer_length) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return 0;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -2064,6 +2132,8 @@ FFI_PLUGIN_EXPORT int uvc_ctrl_get_all_json(uvc_session_t* session,
     return 0;
   }
   return static_cast<int>(offset);
+} catch (...) {
+  return 0;
 }
 
 // Raw descriptor bmControls are not reachable through Media Foundation.
@@ -2073,7 +2143,7 @@ FFI_PLUGIN_EXPORT int uvc_ctrl_get_bm_controls_json(uvc_session_t* /*session*/,
   return 0;
 }
 
-FFI_PLUGIN_EXPORT int32_t uvc_ctrl_get(uvc_session_t* session, int ctrl_id) {
+FFI_PLUGIN_EXPORT int32_t uvc_ctrl_get(uvc_session_t* session, int ctrl_id) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return INT32_MIN;
   std::lock_guard<std::mutex> lock(s->mutex);
@@ -2085,10 +2155,12 @@ FFI_PLUGIN_EXPORT int32_t uvc_ctrl_get(uvc_session_t* session, int ctrl_id) {
     return INT32_MIN;
   }
   return static_cast<int32_t>(cur);
+} catch (...) {
+  return INT32_MIN;
 }
 
 FFI_PLUGIN_EXPORT int uvc_ctrl_set(uvc_session_t* session, int ctrl_id,
-                                   int32_t value) {
+                                   int32_t value) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   std::lock_guard<std::mutex> lock(s->mutex);
@@ -2096,6 +2168,8 @@ FFI_PLUGIN_EXPORT int uvc_ctrl_set(uvc_session_t* session, int ctrl_id,
   if (info == nullptr) return kErrorNotSupported;
   if (s->source == nullptr) return kErrorNoDevice;
   return CtrlSetLocked(*s, *info, value);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_white_balance_component_json(
@@ -2135,7 +2209,7 @@ FFI_PLUGIN_EXPORT int uvc_set_zoom_rel_values(uvc_session_t* session,
 
 FFI_PLUGIN_EXPORT int uvc_get_pantilt_abs_json(uvc_session_t* session,
                                                uint8_t* buffer,
-                                               int buffer_length) {
+                                               int buffer_length) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return 0;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -2153,10 +2227,12 @@ FFI_PLUGIN_EXPORT int uvc_get_pantilt_abs_json(uvc_session_t* session,
     return 0;
   }
   return static_cast<int>(offset);
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_set_pantilt_abs_values(uvc_session_t* session,
-                                                 int32_t pan, int32_t tilt) {
+                                                 int32_t pan, int32_t tilt) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   std::lock_guard<std::mutex> lock(s->mutex);
@@ -2166,6 +2242,8 @@ FFI_PLUGIN_EXPORT int uvc_set_pantilt_abs_values(uvc_session_t* session,
   if (result != 0) return result;
   return MapCtrlHr(
       s->camctrl->Set(CameraControl_Tilt, tilt, CameraControl_Flags_Manual));
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_pantilt_rel_json(uvc_session_t* /*session*/,

@@ -1,3 +1,8 @@
+## 1.1.1-wip
+
+- fix the app aborting when native code runs out of memory, the call fails
+  with `UvcErrorCode.noMem` or `UvcErrorCode.other` instead
+
 ## 1.1.0
 
 - add macOS support (10.15 or later)

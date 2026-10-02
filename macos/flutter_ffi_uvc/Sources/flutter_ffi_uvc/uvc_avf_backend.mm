@@ -31,6 +31,7 @@
 #include <string>
 #include <vector>
 
+#include "../../../../src/common/uvc_guard.h"
 #include "../../../../src/common/uvc_requests_internal.h"
 #include "../../../../src/include/flutter_ffi_uvc.h"
 #include "uvc_usb_controls.h"
@@ -1033,7 +1034,11 @@ int WriteJson(uint8_t* buffer, int buffer_length, const char* fmt, ...) {
            fromConnection:(AVCaptureConnection*)connection {
   std::shared_ptr<Session> owner = _session.lock();
   if (!owner) return;
-  OnFrame(*owner, _generation, sampleBuffer);
+  // Nothing may unwind into AVFoundation.
+  try {
+    OnFrame(*owner, _generation, sampleBuffer);
+  } catch (...) {
+  }
 }
 
 @end
@@ -1143,27 +1148,27 @@ FFI_PLUGIN_EXPORT uvc_session_t* uvc_session_create(void) {
   try {
     session = new uvc_session();
     session->impl = std::make_shared<Session>();
-  } catch (...) {
-    delete session;
-    return nullptr;
-  }
-  {
     std::lock_guard<std::mutex> lock(registry.mutex);
     RegistryEntry entry;
     entry.id = registry.next_id++;
     registry.live[session] = entry;
+  } catch (...) {
+    delete session;
+    return nullptr;
   }
   return session;
 }
 
-FFI_PLUGIN_EXPORT uint64_t uvc_session_id(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT uint64_t uvc_session_id(uvc_session_t* session) try {
   if (session == nullptr) return 0;
   std::lock_guard<std::mutex> lock(registry.mutex);
   auto it = registry.live.find(session);
   return it == registry.live.end() ? 0 : it->second.id;
+} catch (...) {
+  return 0;
 }
 
-FFI_PLUGIN_EXPORT uvc_session_t* uvc_session_acquire_id(uint64_t id) {
+FFI_PLUGIN_EXPORT uvc_session_t* uvc_session_acquire_id(uint64_t id) try {
   if (id == 0) return nullptr;
   std::lock_guard<std::mutex> lock(registry.mutex);
   for (auto& entry : registry.live) {
@@ -1172,31 +1177,36 @@ FFI_PLUGIN_EXPORT uvc_session_t* uvc_session_acquire_id(uint64_t id) {
     return const_cast<uvc_session_t*>(entry.first);
   }
   return nullptr;
+} catch (...) {
+  return nullptr;
 }
 
-FFI_PLUGIN_EXPORT int uvc_session_acquire(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_session_acquire(uvc_session_t* session) try {
   if (session == nullptr) return 0;
   std::lock_guard<std::mutex> lock(registry.mutex);
   auto it = registry.live.find(session);
   if (it == registry.live.end() || it->second.destroying) return 0;
   it->second.pins += 1;
   return 1;
+} catch (...) {
+  return 0;
 }
 
-FFI_PLUGIN_EXPORT void uvc_session_release(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT void uvc_session_release(uvc_session_t* session) try {
   if (session == nullptr) return;
   std::lock_guard<std::mutex> lock(registry.mutex);
   auto it = registry.live.find(session);
   if (it == registry.live.end() || it->second.pins <= 0) return;
   it->second.pins -= 1;
   if (it->second.pins == 0) registry.unpinned.notify_all();
+} catch (...) {
 }
 
 FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t* session) {
   uvc_requests_destroy(session, 0);
 }
 
-void uvc_session_finalize(uvc_session_t* session) {
+void uvc_session_finalize(uvc_session_t* session) try {
   if (session == nullptr) return;
   // Closing first leaves the session locks free while the retire below
   // waits for pins a plugin still holds.
@@ -1231,12 +1241,13 @@ void uvc_session_finalize(uvc_session_t* session) {
   delete session;
   // A callback still holding a promoted weak_ptr releases the Session when
   // it returns. It sees previewing == false.
+} catch (...) {
 }
 
 // On macOS there are no file descriptors: the "fd" is the stable device id
 // handed out by device enumeration (see uvc_mac::ListDevices), which the
 // Dart openUsbDevice flow passes straight back in.
-FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t* session, int fd) {
+FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t* session, int fd) try {
   std::shared_ptr<Session> owner = Impl(session);
   if (!owner) return kErrorInvalidParam;
   Session& s = *owner;
@@ -1285,11 +1296,13 @@ FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t* session, int fd) {
     s.usb_error = usb_error;
   }
   return 0;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
                                         int frame_format, int width,
-                                        int height, int fps) {
+                                        int height, int fps) try {
   std::shared_ptr<Session> owner = Impl(session);
   if (!owner) return kErrorInvalidParam;
   Session& s = *owner;
@@ -1437,18 +1450,21 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
                 }];
   }
   return 0;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT void uvc_stop_preview(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT void uvc_stop_preview(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
   @autoreleasepool {
     std::lock_guard<std::mutex> lock(s->lifecycle_mutex);
     StopPreviewLocked(*s);
   }
+} catch (...) {
 }
 
-FFI_PLUGIN_EXPORT void uvc_close_device(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT void uvc_close_device(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
   @autoreleasepool {
@@ -1458,26 +1474,33 @@ FFI_PLUGIN_EXPORT void uvc_close_device(uvc_session_t* session) {
   }
   // Listeners survive so a bound texture keeps working across a device
   // switch. They only change through their set functions.
+} catch (...) {
 }
 
-FFI_PLUGIN_EXPORT int uvc_is_previewing(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_is_previewing(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   return s->previewing.load() ? 1 : 0;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT int uvc_frame_width(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_frame_width(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   std::lock_guard<std::mutex> lock(s->mutex);
   return s->frame_w;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT int uvc_frame_height(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_frame_height(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   std::lock_guard<std::mutex> lock(s->mutex);
   return s->frame_h;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba(uvc_session_t* session,
@@ -1489,7 +1512,7 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba(uvc_session_t* session,
 
 FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_with_metadata(
     uvc_session_t* session, uint8_t* buffer, int buffer_length,
-    int* out_width, int* out_height, int64_t* out_sequence) {
+    int* out_width, int* out_height, int64_t* out_sequence) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -1505,12 +1528,14 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_with_metadata(
   if (out_height != nullptr) *out_height = s->frame_h;
   if (out_sequence != nullptr) *out_sequence = s->sequence.load();
   return static_cast<int>(needed);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_transformed(
     uvc_session_t* session, uint8_t* buffer, int buffer_length, int rotation,
     int flip_h, int flip_v, int* out_width, int* out_height,
-    int64_t* out_sequence) {
+    int64_t* out_sequence) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -1537,12 +1562,14 @@ FFI_PLUGIN_EXPORT int uvc_copy_latest_frame_rgba_transformed(
   if (out_height != nullptr) *out_height = dst_h;
   if (out_sequence != nullptr) *out_sequence = s->sequence.load();
   return static_cast<int>(dst_bytes);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_take_picture_jpeg(
     uvc_session_t* session, uint8_t* buffer, int buffer_length, int quality,
     int rotation, int flip_h, int flip_v, int* out_width, int* out_height,
-    int64_t* out_sequence) {
+    int64_t* out_sequence) try {
   std::shared_ptr<Session> owner = Impl(session);
   if (!owner) return kErrorInvalidParam;
   Session& s = *owner;
@@ -1623,12 +1650,14 @@ FFI_PLUGIN_EXPORT int uvc_take_picture_jpeg(
     }
   }
   return result;
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_start_recording(uvc_session_t* session,
                                           const char* path, int bitrate_bps,
                                           int fps_hint, int rotation,
-                                          int flip_h, int flip_v) {
+                                          int flip_h, int flip_v) try {
   std::shared_ptr<Session> owner = Impl(session);
   if (!owner) return kErrorInvalidParam;
   Session& s = *owner;
@@ -1764,51 +1793,61 @@ FFI_PLUGIN_EXPORT int uvc_start_recording(uvc_session_t* session,
     s.recording.store(true);
   }
   return 0;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT int uvc_stop_recording(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_stop_recording(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   @autoreleasepool {
     return StopRecordingInternal(*s);
   }
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT int uvc_is_recording(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int uvc_is_recording(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   return s->recording.load() ? 1 : 0;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int64_t uvc_latest_frame_sequence(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   return s->sequence.load();
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT void uvc_set_frame_listener(uvc_session_t* session,
                                               uvc_frame_listener_t listener,
-                                              void* user_data) {
+                                              void* user_data) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
   std::lock_guard<std::mutex> lock(s->listener_mutex);
   s->frame_listener = listener;
   s->frame_listener_data = listener != nullptr ? user_data : nullptr;
+} catch (...) {
 }
 
 FFI_PLUGIN_EXPORT void uvc_set_error_listener(uvc_session_t* session,
                                               uvc_error_listener_t listener,
-                                              void* user_data) {
+                                              void* user_data) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
   std::lock_guard<std::mutex> lock(s->listener_mutex);
   s->error_listener = listener;
   s->error_listener_data = listener != nullptr ? user_data : nullptr;
+} catch (...) {
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_stream_stats_json(uvc_session_t* session,
                                                 uint8_t* buffer,
-                                                int buffer_length) {
+                                                int buffer_length) try {
   std::shared_ptr<Session> owner = Impl(session);
   if (!owner) return 0;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -1876,11 +1915,13 @@ FFI_PLUGIN_EXPORT int uvc_get_stream_stats_json(uvc_session_t* session,
     return 0;
   }
   return static_cast<int>(offset);
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uvc_session_t* session,
                                                    uint8_t* buffer,
-                                                   int buffer_length) {
+                                                   int buffer_length) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return 0;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -1906,17 +1947,21 @@ FFI_PLUGIN_EXPORT int uvc_get_supported_modes_json(uvc_session_t* session,
     return 0;
   }
   return static_cast<int>(offset);
+} catch (...) {
+  return 0;
 }
 
-FFI_PLUGIN_EXPORT int64_t uvc_error_count(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT int64_t uvc_error_count(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return 0;
   return s->error_count.load();
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_supported_modes(uvc_session_t* session,
                                               uvc_mode_t* out_modes,
-                                              int max_modes) {
+                                              int max_modes) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s || out_modes == nullptr || max_modes <= 0) return kErrorInvalidParam;
   std::lock_guard<std::mutex> lock(s->mutex);
@@ -1931,15 +1976,19 @@ FFI_PLUGIN_EXPORT int uvc_get_supported_modes(uvc_session_t* session,
     count += 1;
   }
   return count;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
-FFI_PLUGIN_EXPORT const char* uvc_last_error(uvc_session_t* session) {
+FFI_PLUGIN_EXPORT const char* uvc_last_error(uvc_session_t* session) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return "";
   std::lock_guard<std::mutex> lock(s->error_mutex);
   memcpy(s->last_error_snapshot, s->last_error, sizeof(s->last_error_snapshot));
   s->last_error_snapshot[sizeof(s->last_error_snapshot) - 1] = '\0';
   return s->last_error_snapshot;
+} catch (...) {
+  return "";
 }
 
 FFI_PLUGIN_EXPORT void uvc_set_log_level(int level) {
@@ -1948,7 +1997,7 @@ FFI_PLUGIN_EXPORT void uvc_set_log_level(int level) {
 
 FFI_PLUGIN_EXPORT void uvc_set_preview_transform(uvc_session_t* session,
                                                  int rotation, int flip_h,
-                                                 int flip_v) {
+                                                 int flip_v) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return;
   if (rotation != 90 && rotation != 180 && rotation != 270) rotation = 0;
@@ -1956,11 +2005,12 @@ FFI_PLUGIN_EXPORT void uvc_set_preview_transform(uvc_session_t* session,
   s->rotation = rotation;
   s->flip_h = flip_h != 0 ? 1 : 0;
   s->flip_v = flip_v != 0 ? 1 : 0;
+} catch (...) {
 }
 
 FFI_PLUGIN_EXPORT void uvc_get_preview_transform(uvc_session_t* session,
                                                  int* rotation, int* flip_h,
-                                                 int* flip_v) {
+                                                 int* flip_v) try {
   if (rotation != nullptr) *rotation = 0;
   if (flip_h != nullptr) *flip_h = 0;
   if (flip_v != nullptr) *flip_v = 0;
@@ -1970,11 +2020,12 @@ FFI_PLUGIN_EXPORT void uvc_get_preview_transform(uvc_session_t* session,
   if (rotation != nullptr) *rotation = s->rotation;
   if (flip_h != nullptr) *flip_h = s->flip_h;
   if (flip_v != nullptr) *flip_v = s->flip_v;
+} catch (...) {
 }
 
 FFI_PLUGIN_EXPORT int uvc_ctrl_get_all_json(uvc_session_t* session,
                                             uint8_t* buffer,
-                                            int buffer_length) {
+                                            int buffer_length) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return 0;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -2012,11 +2063,13 @@ FFI_PLUGIN_EXPORT int uvc_ctrl_get_all_json(uvc_session_t* session,
     return 0;
   }
   return static_cast<int>(offset);
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_ctrl_get_bm_controls_json(uvc_session_t* session,
                                                     uint8_t* buffer,
-                                                    int buffer_length) {
+                                                    int buffer_length) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return 0;
   if (buffer == nullptr || buffer_length <= 0) return 0;
@@ -2044,9 +2097,11 @@ FFI_PLUGIN_EXPORT int uvc_ctrl_get_bm_controls_json(uvc_session_t* session,
     return 0;
   }
   return static_cast<int>(offset);
+} catch (...) {
+  return 0;
 }
 
-FFI_PLUGIN_EXPORT int32_t uvc_ctrl_get(uvc_session_t* session, int ctrl_id) {
+FFI_PLUGIN_EXPORT int32_t uvc_ctrl_get(uvc_session_t* session, int ctrl_id) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return INT32_MIN;
   const CtrlInfo* info = FindCtrl(ctrl_id);
@@ -2057,10 +2112,12 @@ FFI_PLUGIN_EXPORT int32_t uvc_ctrl_get(uvc_session_t* session, int ctrl_id) {
     return INT32_MIN;
   }
   return value;
+} catch (...) {
+  return INT32_MIN;
 }
 
 FFI_PLUGIN_EXPORT int uvc_ctrl_set(uvc_session_t* session, int ctrl_id,
-                                   int32_t value) {
+                                   int32_t value) try {
   std::shared_ptr<Session> s = Impl(session);
   if (!s) return kErrorInvalidParam;
   const CtrlInfo* info = FindCtrl(ctrl_id);
@@ -2085,82 +2142,100 @@ FFI_PLUGIN_EXPORT int uvc_ctrl_set(uvc_session_t* session, int ctrl_id,
                     ctrl_id, value, result);
   }
   return result;
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_white_balance_component_json(
-    uvc_session_t* session, uint8_t* buffer, int buffer_length) {
+    uvc_session_t* session, uint8_t* buffer, int buffer_length) try {
   uint8_t data[4] = {0};
   if (!CompoundGet(session, false, kPuWhiteBalanceComponent, data, 4)) {
     return 0;
   }
   return WriteJson(buffer, buffer_length, "{\"blue\":%u,\"red\":%u}",
                    ReadU16(data), ReadU16(data + 2));
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_set_white_balance_component_values(
-    uvc_session_t* session, uint16_t blue, uint16_t red) {
+    uvc_session_t* session, uint16_t blue, uint16_t red) try {
   uint8_t data[4];
   WriteU16(data, blue);
   WriteU16(data + 2, red);
   return CompoundSet(session, false, kPuWhiteBalanceComponent, data, 4);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_focus_rel_json(uvc_session_t* session,
                                              uint8_t* buffer,
-                                             int buffer_length) {
+                                             int buffer_length) try {
   uint8_t data[2] = {0};
   if (!CompoundGet(session, true, kCtFocusRelative, data, 2)) return 0;
   return WriteJson(buffer, buffer_length, "{\"focusRel\":%d,\"speed\":%u}",
                    static_cast<int>(static_cast<int8_t>(data[0])), data[1]);
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_set_focus_rel_values(uvc_session_t* session,
                                                int8_t focus_rel,
-                                               uint8_t speed) {
+                                               uint8_t speed) try {
   uint8_t data[2] = {static_cast<uint8_t>(focus_rel), speed};
   return CompoundSet(session, true, kCtFocusRelative, data, 2);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_zoom_rel_json(uvc_session_t* session,
                                             uint8_t* buffer,
-                                            int buffer_length) {
+                                            int buffer_length) try {
   uint8_t data[3] = {0};
   if (!CompoundGet(session, true, kCtZoomRelative, data, 3)) return 0;
   return WriteJson(buffer, buffer_length,
                    "{\"zoomRel\":%d,\"digitalZoom\":%u,\"speed\":%u}",
                    static_cast<int>(static_cast<int8_t>(data[0])), data[1],
                    data[2]);
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_set_zoom_rel_values(uvc_session_t* session,
                                               int8_t zoom_rel,
                                               uint8_t digital_zoom,
-                                              uint8_t speed) {
+                                              uint8_t speed) try {
   uint8_t data[3] = {static_cast<uint8_t>(zoom_rel), digital_zoom, speed};
   return CompoundSet(session, true, kCtZoomRelative, data, 3);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_pantilt_abs_json(uvc_session_t* session,
                                                uint8_t* buffer,
-                                               int buffer_length) {
+                                               int buffer_length) try {
   uint8_t data[8] = {0};
   if (!CompoundGet(session, true, kCtPanTiltAbsolute, data, 8)) return 0;
   return WriteJson(buffer, buffer_length, "{\"pan\":%d,\"tilt\":%d}",
                    static_cast<int32_t>(ReadU32(data)),
                    static_cast<int32_t>(ReadU32(data + 4)));
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_set_pantilt_abs_values(uvc_session_t* session,
-                                                 int32_t pan, int32_t tilt) {
+                                                 int32_t pan, int32_t tilt) try {
   uint8_t data[8];
   WriteU32(data, static_cast<uint32_t>(pan));
   WriteU32(data + 4, static_cast<uint32_t>(tilt));
   return CompoundSet(session, true, kCtPanTiltAbsolute, data, 8);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_pantilt_rel_json(uvc_session_t* session,
                                                uint8_t* buffer,
-                                               int buffer_length) {
+                                               int buffer_length) try {
   uint8_t data[4] = {0};
   if (!CompoundGet(session, true, kCtPanTiltRelative, data, 4)) return 0;
   return WriteJson(
@@ -2168,37 +2243,45 @@ FFI_PLUGIN_EXPORT int uvc_get_pantilt_rel_json(uvc_session_t* session,
       "{\"panRel\":%d,\"panSpeed\":%u,\"tiltRel\":%d,\"tiltSpeed\":%u}",
       static_cast<int>(static_cast<int8_t>(data[0])), data[1],
       static_cast<int>(static_cast<int8_t>(data[2])), data[3]);
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_set_pantilt_rel_values(uvc_session_t* session,
                                                  int8_t pan_rel,
                                                  uint8_t pan_speed,
                                                  int8_t tilt_rel,
-                                                 uint8_t tilt_speed) {
+                                                 uint8_t tilt_speed) try {
   uint8_t data[4] = {static_cast<uint8_t>(pan_rel), pan_speed,
                      static_cast<uint8_t>(tilt_rel), tilt_speed};
   return CompoundSet(session, true, kCtPanTiltRelative, data, 4);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_roll_rel_json(uvc_session_t* session,
                                             uint8_t* buffer,
-                                            int buffer_length) {
+                                            int buffer_length) try {
   uint8_t data[2] = {0};
   if (!CompoundGet(session, true, kCtRollRelative, data, 2)) return 0;
   return WriteJson(buffer, buffer_length, "{\"rollRel\":%d,\"speed\":%u}",
                    static_cast<int>(static_cast<int8_t>(data[0])), data[1]);
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_set_roll_rel_values(uvc_session_t* session,
                                               int8_t roll_rel,
-                                              uint8_t speed) {
+                                              uint8_t speed) try {
   uint8_t data[2] = {static_cast<uint8_t>(roll_rel), speed};
   return CompoundSet(session, true, kCtRollRelative, data, 2);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_digital_window_json(uvc_session_t* session,
                                                   uint8_t* buffer,
-                                                  int buffer_length) {
+                                                  int buffer_length) try {
   uint8_t data[12] = {0};
   if (!CompoundGet(session, true, kCtDigitalWindow, data, 12)) return 0;
   return WriteJson(buffer, buffer_length,
@@ -2206,12 +2289,14 @@ FFI_PLUGIN_EXPORT int uvc_get_digital_window_json(uvc_session_t* session,
                    "\"windowRight\":%u,\"numSteps\":%u,\"numStepsUnits\":%u}",
                    ReadU16(data), ReadU16(data + 2), ReadU16(data + 4),
                    ReadU16(data + 6), ReadU16(data + 8), ReadU16(data + 10));
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_set_digital_window_values(
     uvc_session_t* session, uint16_t window_top, uint16_t window_left,
     uint16_t window_bottom, uint16_t window_right, uint16_t num_steps,
-    uint16_t num_steps_units) {
+    uint16_t num_steps_units) try {
   uint8_t data[12];
   WriteU16(data, window_top);
   WriteU16(data + 2, window_left);
@@ -2220,11 +2305,13 @@ FFI_PLUGIN_EXPORT int uvc_set_digital_window_values(
   WriteU16(data + 8, num_steps);
   WriteU16(data + 10, num_steps_units);
   return CompoundSet(session, true, kCtDigitalWindow, data, 12);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
 
 FFI_PLUGIN_EXPORT int uvc_get_region_of_interest_json(uvc_session_t* session,
                                                       uint8_t* buffer,
-                                                      int buffer_length) {
+                                                      int buffer_length) try {
   uint8_t data[10] = {0};
   if (!CompoundGet(session, true, kCtRegionOfInterest, data, 10)) return 0;
   return WriteJson(buffer, buffer_length,
@@ -2232,11 +2319,13 @@ FFI_PLUGIN_EXPORT int uvc_get_region_of_interest_json(uvc_session_t* session,
                    "\"roiRight\":%u,\"autoControls\":%u}",
                    ReadU16(data), ReadU16(data + 2), ReadU16(data + 4),
                    ReadU16(data + 6), ReadU16(data + 8));
+} catch (...) {
+  return 0;
 }
 
 FFI_PLUGIN_EXPORT int uvc_set_region_of_interest_values(
     uvc_session_t* session, uint16_t roi_top, uint16_t roi_left,
-    uint16_t roi_bottom, uint16_t roi_right, uint16_t auto_controls) {
+    uint16_t roi_bottom, uint16_t roi_right, uint16_t auto_controls) try {
   uint8_t data[10];
   WriteU16(data, roi_top);
   WriteU16(data + 2, roi_left);
@@ -2244,4 +2333,6 @@ FFI_PLUGIN_EXPORT int uvc_set_region_of_interest_values(
   WriteU16(data + 6, roi_right);
   WriteU16(data + 8, auto_controls);
   return CompoundSet(session, true, kCtRegionOfInterest, data, 10);
+} catch (...) {
+  return uvc_guard::CurrentExceptionCode();
 }
