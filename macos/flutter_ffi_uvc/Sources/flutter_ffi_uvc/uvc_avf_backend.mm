@@ -1277,23 +1277,29 @@ FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t* session, int fd) try {
       return kErrorAccess;
     }
 
-    {
-      std::lock_guard<std::mutex> lock(s.mutex);
-      s.unique_id = unique_id;
-      s.device = device;
-      EnumerateModesLocked(s);
+    try {
+      {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        s.unique_id = unique_id;
+        s.device = device;
+        EnumerateModesLocked(s);
+      }
+      // Controls are optional. A device without them still streams. A
+      // built-in camera that is not a USB device has no ids to find it by.
+      std::string usb_error = "This camera has no UVC controls";
+      std::unique_ptr<uvc_mac::UsbControlDevice> usb;
+      const uvc_mac::UsbIds ids = UsbIdsForDevice(device);
+      if (ids.vendor_id != 0 || ids.product_id != 0) {
+        usb = uvc_mac::UsbControlDevice::Open(ids, &usb_error);
+      }
+      std::lock_guard<std::mutex> lock(s.ctrl_mutex);
+      s.usb = std::move(usb);
+      s.usb_error = usb_error;
+    } catch (...) {
+      // A failed open leaves no device behind for a later start to use.
+      CloseDeviceLocked(s);
+      throw;
     }
-    // Controls are optional. A device without them still streams. A
-    // built-in camera that is not a USB device has no ids to find it by.
-    std::string usb_error = "This camera has no UVC controls";
-    std::unique_ptr<uvc_mac::UsbControlDevice> usb;
-    const uvc_mac::UsbIds ids = UsbIdsForDevice(device);
-    if (ids.vendor_id != 0 || ids.product_id != 0) {
-      usb = uvc_mac::UsbControlDevice::Open(ids, &usb_error);
-    }
-    std::lock_guard<std::mutex> lock(s.ctrl_mutex);
-    s.usb = std::move(usb);
-    s.usb_error = usb_error;
   }
   return 0;
 } catch (...) {

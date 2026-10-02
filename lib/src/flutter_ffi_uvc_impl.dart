@@ -368,8 +368,15 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   ) {
     final Map<String, dynamic>? json = _takeResultJson(requestId);
     if (json == null) {
-      if (result == UvcErrorCode.interrupted.nativeValue ||
-          candidates == null) {
+      if (result == UvcErrorCode.interrupted.nativeValue) {
+        return const <UvcPreviewStartResult>[];
+      }
+      if (candidates == null) {
+        // No mode to report the failure on, so lastError carries it.
+        if (result == UvcErrorCode.noMem.nativeValue ||
+            result == UvcErrorCode.other.nativeValue) {
+          _dartLastError = _noResultMessage(result);
+        }
         return const <UvcPreviewStartResult>[];
       }
       return <UvcPreviewStartResult>[

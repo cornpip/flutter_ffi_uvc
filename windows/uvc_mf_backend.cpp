@@ -1381,8 +1381,16 @@ FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t* session, int fd) try {
     return kErrorNoDevice;
   }
 
-  s.symlink = symlink;
-  const int result = OpenSourceLocked(s, owner);
+  int result = 0;
+  try {
+    s.symlink = symlink;
+    result = OpenSourceLocked(s, owner);
+  } catch (...) {
+    // A failed open leaves no device behind for a later start to reopen.
+    CloseDeviceLocked(s);
+    s.symlink.clear();
+    throw;
+  }
   if (result != 0) s.symlink.clear();
   return result;
 } catch (...) {

@@ -578,10 +578,10 @@ int64_t QueueDestroy(uvc_session_t *session, bool notify) {
     state->listener = nullptr;
     state->listener_data = nullptr;
   }
-  Request r;
-  r.op = UVC_REQUEST_DESTROY;
-  r.notify = notify;
   try {
+    Request r;
+    r.op = UVC_REQUEST_DESTROY;
+    r.notify = notify;
     return Enqueue(state, std::move(r));
   } catch (...) {
     // Not queued, so a later destroy may try again. A destroy that overlapped
