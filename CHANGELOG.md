@@ -1,4 +1,4 @@
-## 1.1.1-wip
+## 1.1.1
 
 - fix the app aborting when native code runs out of memory, the call fails
   with `UvcErrorCode.noMem` or `UvcErrorCode.other` instead
