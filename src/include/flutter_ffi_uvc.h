@@ -165,7 +165,8 @@ typedef void (*uvc_request_listener_t)(
     int64_t request_id,
     int op,
     int result);
-FFI_PLUGIN_EXPORT void uvc_set_request_listener(
+// Returns 0, or a negative code when the listener could not be set.
+FFI_PLUGIN_EXPORT int uvc_set_request_listener(
     uvc_session_t *session,
     uvc_request_listener_t listener,
     void *user_data);

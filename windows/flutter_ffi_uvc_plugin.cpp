@@ -213,7 +213,13 @@ const FlutterDesktopPixelBuffer* FlutterFfiUvcPlugin::CopyPixelBuffer(
   const bool swap = rotation == 90 || rotation == 270;
   const int out_w = swap ? frame_h : frame_w;
   const int out_h = swap ? frame_w : frame_h;
-  texture->pixels.resize(static_cast<size_t>(out_w) * out_h * 4);
+  // Nothing may unwind into the engine. An allocation failure skips the
+  // frame.
+  try {
+    texture->pixels.resize(static_cast<size_t>(out_w) * out_h * 4);
+  } catch (...) {
+    return nullptr;
+  }
 
   int copied_w = 0, copied_h = 0;
   int64_t sequence = 0;

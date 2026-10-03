@@ -1131,6 +1131,10 @@ abstract interface class UvcCamera {
   /// texture, and frees the native session. The instance is unusable
   /// afterwards. Textures still need [disposePreviewTexture].
   ///
+  /// Throws [UvcException] with [UvcErrorCode.noMem] or [UvcErrorCode.other]
+  /// in the rare case the native teardown cannot be queued. The session is
+  /// then kept, and calling [dispose] again retries.
+  ///
   /// An instance that is garbage collected or lost to a hot restart still
   /// releases the camera and its platform connection without this call. Its
   /// device event subscription ends when the last listener does.

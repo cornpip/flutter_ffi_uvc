@@ -103,8 +103,8 @@ class FlutterFfiUvcBindings {
   /// Synchronous lifecycle. These block the calling thread and bypass the
   /// request queue below, which is built on them. The Dart layer uses the
   /// queue. Opens a device on the session. fd is a USB device node descriptor
-  /// on Android and Linux and the enumeration device id on Windows. A device
-  /// already open on this session is closed first.
+  /// on Android and Linux and the enumeration device id on Windows and macOS.
+  /// A device already open on this session is closed first.
   int uvc_open_fd(ffi.Pointer<uvc_session_t> session, int fd) {
     return _uvc_open_fd(session, fd);
   }
@@ -388,7 +388,8 @@ class FlutterFfiUvcBindings {
         )
       >();
 
-  void uvc_set_request_listener(
+  /// Returns 0, or a negative code when the listener could not be set.
+  int uvc_set_request_listener(
     ffi.Pointer<uvc_session_t> session,
     uvc_request_listener_t listener,
     ffi.Pointer<ffi.Void> user_data,
@@ -399,7 +400,7 @@ class FlutterFfiUvcBindings {
   late final _uvc_set_request_listenerPtr =
       _lookup<
         ffi.NativeFunction<
-          ffi.Void Function(
+          ffi.Int Function(
             ffi.Pointer<uvc_session_t>,
             uvc_request_listener_t,
             ffi.Pointer<ffi.Void>,
@@ -408,7 +409,7 @@ class FlutterFfiUvcBindings {
       >('uvc_set_request_listener');
   late final _uvc_set_request_listener = _uvc_set_request_listenerPtr
       .asFunction<
-        void Function(
+        int Function(
           ffi.Pointer<uvc_session_t>,
           uvc_request_listener_t,
           ffi.Pointer<ffi.Void>,
@@ -433,7 +434,7 @@ class FlutterFfiUvcBindings {
   late final _uvc_request_open = _uvc_request_openPtr
       .asFunction<int Function(ffi.Pointer<uvc_session_t>)>();
 
-  /// Hands the fd (or Windows device id) to a queued open. fd < 0 fails the
+  /// Hands the fd (or Windows and macOS device id) to a queued open. fd < 0 fails the
   /// open with UVC_ERROR_NO_DEVICE. Returns 0 when the request took the fd,
   /// which the session then owns until it reports device_released, and
   /// UVC_ERROR_INVALID_PARAM when no such open is waiting, in which case the

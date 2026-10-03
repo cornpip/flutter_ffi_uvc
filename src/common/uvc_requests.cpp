@@ -13,6 +13,7 @@
 // callback runs. g_states_mutex is a leaf lock for the table.
 
 #include "uvc_requests_internal.h"
+#include "uvc_guard.h"
 
 #include <algorithm>
 #include <atomic>
@@ -30,6 +31,11 @@
 #include <vector>
 
 namespace {
+
+using uvc_guard::CurrentExceptionCode;
+using uvc_guard::GuardedCode;
+using uvc_guard::GuardedOr;
+using uvc_guard::GuardedVoid;
 
 constexpr int kErrorInvalidParam = -2;  // UVC_ERROR_INVALID_PARAM
 constexpr int kErrorNoDevice = -4;      // UVC_ERROR_NO_DEVICE
@@ -77,6 +83,10 @@ struct State {
   // The fd the device currently uses, by the open request that took it.
   int64_t held_request = 0;
   std::map<int64_t, std::string> results;
+  // Worker-only. RunDestroy swaps the queue and open_fds into these, so it
+  // never constructs a container (MSVC's do allocate) and cannot throw.
+  std::deque<Request> drained;
+  std::map<int64_t, int> released_fds;
 
   std::mutex listener_mutex;
   uvc_request_listener_t listener = nullptr;
@@ -393,19 +403,20 @@ void RunDestroy(const std::shared_ptr<State> &state, const Request &r) {
   uvc_session_t *session = st.session;
   const uint64_t id = st.session_id;
 
-  std::deque<Request> leftover;
-  std::vector<int64_t> unused_fds;
+  // Swaps into containers the state already holds, so teardown allocates
+  // nothing and cannot fail halfway.
   {
     std::lock_guard<std::mutex> lock(st.mutex);
-    leftover.swap(st.queue);
-    for (const auto &entry : st.open_fds) {
-      if (entry.second >= 0) unused_fds.push_back(entry.first);
-    }
-    st.open_fds.clear();
+    st.drained.swap(st.queue);
+    st.released_fds.swap(st.open_fds);
     st.results.clear();
   }
-  for (int64_t request : unused_fds) NotifyDeviceReleased(id, request);
-  for (const Request &queued : leftover) Complete(st, queued, kErrorNoDevice);
+  for (const auto &entry : st.released_fds) {
+    if (entry.second >= 0) NotifyDeviceReleased(id, entry.first);
+  }
+  for (const Request &queued : st.drained) {
+    Complete(st, queued, kErrorNoDevice);
+  }
 
   CloseDeviceAndRelease(st);
   // The device is closed, so no callback can be in flight and clearing the
@@ -461,59 +472,80 @@ void WorkerMain(std::shared_ptr<State> state) {
       continue;
     }
     int result = 0;
-    switch (r.op) {
-      case UVC_REQUEST_OPEN:
-        result = RunOpen(st, r);
-        break;
-      case UVC_REQUEST_START: {
-        const StartOutcome o = RunStart(st, r);
-        StoreResult(st, r.id, StartJson(r.mode, o));
-        result = o.native_code;
-        break;
+    // An exception escaping a detached thread aborts the process, so it
+    // fails this request instead and the worker moves on.
+    try {
+      switch (r.op) {
+        case UVC_REQUEST_OPEN:
+          result = RunOpen(st, r);
+          break;
+        case UVC_REQUEST_START: {
+          const StartOutcome o = RunStart(st, r);
+          StoreResult(st, r.id, StartJson(r.mode, o));
+          result = o.native_code;
+          break;
+        }
+        case UVC_REQUEST_START_AUTO: {
+          std::string json = RunAuto(st, r, &result);
+          StoreResult(st, r.id, std::move(json));
+          break;
+        }
+        case UVC_REQUEST_STOP:
+          uvc_stop_preview(st.session);
+          break;
+        case UVC_REQUEST_CLOSE:
+          CloseDeviceAndRelease(st);
+          break;
+        default:
+          result = kErrorInvalidParam;
       }
-      case UVC_REQUEST_START_AUTO: {
-        std::string json = RunAuto(st, r, &result);
-        StoreResult(st, r.id, std::move(json));
-        break;
+    } catch (...) {
+      result = CurrentExceptionCode();
+      // A start reported as failed must not leave the stream running.
+      if (r.op == UVC_REQUEST_START || r.op == UVC_REQUEST_START_AUTO) {
+        GuardedVoid([&] { uvc_stop_preview(st.session); });
       }
-      case UVC_REQUEST_STOP:
-        uvc_stop_preview(st.session);
-        break;
-      case UVC_REQUEST_CLOSE:
-        CloseDeviceAndRelease(st);
-        break;
-      default:
-        result = kErrorInvalidParam;
     }
     Complete(st, r, result);
   }
 }
 
-// Queues r and returns its id. Caller does not hold State::mutex.
+// Queues r and returns its id. Caller does not hold State::mutex. Throws
+// when r cannot be queued, and then leaves the state as it was.
 int64_t Enqueue(const std::shared_ptr<State> &state, Request r) {
   State &st = *state;
   std::lock_guard<std::mutex> lock(st.mutex);
   if (st.shutting_down && r.op != UVC_REQUEST_DESTROY) return kErrorNoDevice;
-  r.id = g_next_request_id.fetch_add(1);
-  st.latest_id = r.id;
-  if (r.op == UVC_REQUEST_STOP || r.op == UVC_REQUEST_CLOSE) {
+  const int64_t id = g_next_request_id.fetch_add(1);
+  const int op = r.op;
+  r.id = id;
+  // The steps that can throw run first and are undone on failure. The
+  // worker cannot see the queued request before the lock is released.
+  st.queue.push_back(std::move(r));
+  try {
+    if (op == UVC_REQUEST_OPEN) st.open_fds[id] = -2;
+    if (!st.worker_started) {
+      std::thread(WorkerMain, state).detach();
+      st.worker_started = true;
+    }
+  } catch (...) {
+    st.open_fds.erase(id);
+    st.queue.pop_back();
+    throw;
+  }
+  st.latest_id = id;
+  if (op == UVC_REQUEST_STOP || op == UVC_REQUEST_CLOSE) {
     st.pending_interrupts += 1;
   }
-  if (r.op == UVC_REQUEST_CLOSE) st.pending_closes += 1;
-  if (r.op == UVC_REQUEST_OPEN) st.open_fds[r.id] = -2;
-  if (r.op == UVC_REQUEST_DESTROY) {
+  if (op == UVC_REQUEST_CLOSE) st.pending_closes += 1;
+  if (op == UVC_REQUEST_DESTROY) {
     // Interrupts whatever is running and refuses everything after it.
     st.shutting_down = true;
     st.pending_interrupts += 1;
     st.pending_closes += 1;
   }
-  st.queue.push_back(std::move(r));
-  if (!st.worker_started) {
-    st.worker_started = true;
-    std::thread(WorkerMain, state).detach();
-  }
   st.cv.notify_all();
-  return st.latest_id;
+  return id;
 }
 
 // Queues the one teardown a session gets. Returns its request id, or a
@@ -527,11 +559,15 @@ int64_t QueueDestroy(uvc_session_t *session, bool notify) {
   const uint64_t id = uvc_session_id(session);
   // A session that never made a request gets a worker here, so teardown
   // never runs on the caller's thread.
-  std::shared_ptr<State> state = FindState(session, true);
+  std::shared_ptr<State> state;
   bool first = false;
-  {
+  try {
+    state = FindState(session, true);
     std::lock_guard<std::mutex> lock(g_states_mutex);
     first = g_shut_down.insert(id).second;
+  } catch (...) {
+    uvc_session_release(session);
+    throw;
   }
   uvc_session_release(session);
   if (!state || !first) return kErrorNoDevice;
@@ -542,10 +578,20 @@ int64_t QueueDestroy(uvc_session_t *session, bool notify) {
     state->listener = nullptr;
     state->listener_data = nullptr;
   }
-  Request r;
-  r.op = UVC_REQUEST_DESTROY;
-  r.notify = notify;
-  return Enqueue(state, std::move(r));
+  try {
+    Request r;
+    r.op = UVC_REQUEST_DESTROY;
+    r.notify = notify;
+    return Enqueue(state, std::move(r));
+  } catch (...) {
+    // Not queued, so a later destroy may try again. A destroy that overlapped
+    // this one already returned kErrorNoDevice as if teardown were under
+    // way. No caller overlaps today: dispose() detaches the finalizer first
+    // and runs once.
+    std::lock_guard<std::mutex> lock(g_states_mutex);
+    g_shut_down.erase(id);
+    throw;
+  }
 }
 
 int64_t EnqueueStart(uvc_session_t *session, int64_t expected_latest,
@@ -574,43 +620,54 @@ int64_t EnqueueStart(uvc_session_t *session, int64_t expected_latest,
 
 extern "C" {
 
-FFI_PLUGIN_EXPORT void uvc_set_request_listener(uvc_session_t *session,
-                                                uvc_request_listener_t listener,
-                                                void *user_data) {
-  std::shared_ptr<State> state = FindState(session, listener != nullptr);
-  if (!state) return;
-  std::lock_guard<std::mutex> lock(state->listener_mutex);
-  state->listener = listener;
-  state->listener_data = listener != nullptr ? user_data : nullptr;
+FFI_PLUGIN_EXPORT int uvc_set_request_listener(uvc_session_t *session,
+                                               uvc_request_listener_t listener,
+                                               void *user_data) {
+  return GuardedCode([&]() -> int {
+    std::shared_ptr<State> state = FindState(session, listener != nullptr);
+    if (!state) return listener != nullptr ? kErrorInvalidParam : 0;
+    std::lock_guard<std::mutex> lock(state->listener_mutex);
+    state->listener = listener;
+    state->listener_data = listener != nullptr ? user_data : nullptr;
+    return 0;
+  });
 }
 
 FFI_PLUGIN_EXPORT int64_t uvc_request_open(uvc_session_t *session) {
-  std::shared_ptr<State> state = FindState(session, true);
-  if (!state) return kErrorInvalidParam;
-  Request r;
-  r.op = UVC_REQUEST_OPEN;
-  return Enqueue(state, std::move(r));
+  return GuardedCode([&]() -> int64_t {
+    std::shared_ptr<State> state = FindState(session, true);
+    if (!state) return kErrorInvalidParam;
+    Request r;
+    r.op = UVC_REQUEST_OPEN;
+    return Enqueue(state, std::move(r));
+  });
 }
 
 FFI_PLUGIN_EXPORT int uvc_supply_fd(uvc_session_t *session, int64_t request_id,
                                     int fd) {
-  std::shared_ptr<State> state = FindState(session, false);
-  if (!state) return kErrorInvalidParam;
-  std::lock_guard<std::mutex> lock(state->mutex);
-  auto it = state->open_fds.find(request_id);
-  if (it == state->open_fds.end() || it->second != -2 || state->shutting_down) {
-    return kErrorInvalidParam;
-  }
-  it->second = fd < 0 ? -1 : fd;
-  state->cv.notify_all();
-  return 0;
+  return GuardedCode([&]() -> int {
+    std::shared_ptr<State> state = FindState(session, false);
+    if (!state) return kErrorInvalidParam;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    auto it = state->open_fds.find(request_id);
+    if (it == state->open_fds.end() || it->second != -2 ||
+        state->shutting_down) {
+      return kErrorInvalidParam;
+    }
+    it->second = fd < 0 ? -1 : fd;
+    state->cv.notify_all();
+    return 0;
+  });
 }
 
 FFI_PLUGIN_EXPORT int64_t uvc_request_start(uvc_session_t *session,
                                             uvc_mode_t mode, int policy,
                                             int consecutive_frames,
                                             int timeout_ms) {
-  return EnqueueStart(session, 0, mode, policy, consecutive_frames, timeout_ms);
+  return GuardedCode([&] {
+    return EnqueueStart(session, 0, mode, policy, consecutive_frames,
+                        timeout_ms);
+  });
 }
 
 FFI_PLUGIN_EXPORT int64_t uvc_request_start_if(uvc_session_t *session,
@@ -618,93 +675,107 @@ FFI_PLUGIN_EXPORT int64_t uvc_request_start_if(uvc_session_t *session,
                                                uvc_mode_t mode, int policy,
                                                int consecutive_frames,
                                                int timeout_ms) {
-  return EnqueueStart(session, expected_latest, mode, policy,
-                      consecutive_frames, timeout_ms);
+  return GuardedCode([&] {
+    return EnqueueStart(session, expected_latest, mode, policy,
+                        consecutive_frames, timeout_ms);
+  });
 }
 
 FFI_PLUGIN_EXPORT int64_t uvc_request_start_auto(
     uvc_session_t *session, const uvc_mode_t *modes, int mode_count,
     int prefer_quality, int max_candidates, int policy, int consecutive_frames,
     int timeout_ms) {
-  std::shared_ptr<State> state = FindState(session, true);
-  if (!state) return kErrorInvalidParam;
-  if (policy < UVC_VERIFY_NONE || policy > UVC_VERIFY_SEQUENCE_ONLY ||
-      timeout_ms < 0 || (modes == nullptr && mode_count > 0) ||
-      mode_count < 0) {
-    return kErrorInvalidParam;
-  }
-  Request r;
-  r.op = UVC_REQUEST_START_AUTO;
-  r.modes_given = modes != nullptr;
-  if (modes != nullptr) r.modes.assign(modes, modes + mode_count);
-  r.prefer_quality = prefer_quality;
-  r.max_candidates = max_candidates;
-  r.policy = policy;
-  r.consecutive_frames = consecutive_frames;
-  r.timeout_ms = timeout_ms;
-  return Enqueue(state, std::move(r));
+  return GuardedCode([&]() -> int64_t {
+    std::shared_ptr<State> state = FindState(session, true);
+    if (!state) return kErrorInvalidParam;
+    if (policy < UVC_VERIFY_NONE || policy > UVC_VERIFY_SEQUENCE_ONLY ||
+        timeout_ms < 0 || (modes == nullptr && mode_count > 0) ||
+        mode_count < 0) {
+      return kErrorInvalidParam;
+    }
+    Request r;
+    r.op = UVC_REQUEST_START_AUTO;
+    r.modes_given = modes != nullptr;
+    if (modes != nullptr) r.modes.assign(modes, modes + mode_count);
+    r.prefer_quality = prefer_quality;
+    r.max_candidates = max_candidates;
+    r.policy = policy;
+    r.consecutive_frames = consecutive_frames;
+    r.timeout_ms = timeout_ms;
+    return Enqueue(state, std::move(r));
+  });
 }
 
 FFI_PLUGIN_EXPORT int64_t uvc_request_stop(uvc_session_t *session) {
-  std::shared_ptr<State> state = FindState(session, true);
-  if (!state) return kErrorInvalidParam;
-  Request r;
-  r.op = UVC_REQUEST_STOP;
-  return Enqueue(state, std::move(r));
+  return GuardedCode([&]() -> int64_t {
+    std::shared_ptr<State> state = FindState(session, true);
+    if (!state) return kErrorInvalidParam;
+    Request r;
+    r.op = UVC_REQUEST_STOP;
+    return Enqueue(state, std::move(r));
+  });
 }
 
 FFI_PLUGIN_EXPORT int64_t uvc_request_close(uvc_session_t *session) {
-  std::shared_ptr<State> state = FindState(session, true);
-  if (!state) return kErrorInvalidParam;
-  Request r;
-  r.op = UVC_REQUEST_CLOSE;
-  return Enqueue(state, std::move(r));
+  return GuardedCode([&]() -> int64_t {
+    std::shared_ptr<State> state = FindState(session, true);
+    if (!state) return kErrorInvalidParam;
+    Request r;
+    r.op = UVC_REQUEST_CLOSE;
+    return Enqueue(state, std::move(r));
+  });
 }
 
 FFI_PLUGIN_EXPORT int64_t uvc_request_destroy(uvc_session_t *session) {
-  return QueueDestroy(session, true);
+  return GuardedCode([&] { return QueueDestroy(session, true); });
 }
 
 FFI_PLUGIN_EXPORT int64_t uvc_latest_request_id(uvc_session_t *session) {
-  std::shared_ptr<State> state = FindState(session, false);
-  if (!state) return 0;
-  std::lock_guard<std::mutex> lock(state->mutex);
-  return state->latest_id;
+  return GuardedOr<int64_t>(0, [&]() -> int64_t {
+    std::shared_ptr<State> state = FindState(session, false);
+    if (!state) return 0;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return state->latest_id;
+  });
 }
 
 FFI_PLUGIN_EXPORT int uvc_take_request_result_json(uvc_session_t *session,
                                                    int64_t request_id,
                                                    uint8_t *buffer,
                                                    int buffer_length) {
-  std::shared_ptr<State> state = FindState(session, false);
-  if (!state || buffer == nullptr || buffer_length <= 0) return 0;
-  std::lock_guard<std::mutex> lock(state->mutex);
-  auto it = state->results.find(request_id);
-  if (it == state->results.end()) return 0;
-  const std::string &json = it->second;
-  // Kept when it does not fit, so a larger buffer can fetch it.
-  if (json.size() >= static_cast<size_t>(buffer_length)) return 0;
-  memcpy(buffer, json.data(), json.size());
-  buffer[json.size()] = 0;
-  const int written = static_cast<int>(json.size());
-  state->results.erase(it);
-  return written;
+  return GuardedOr(0, [&] {
+    std::shared_ptr<State> state = FindState(session, false);
+    if (!state || buffer == nullptr || buffer_length <= 0) return 0;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    auto it = state->results.find(request_id);
+    if (it == state->results.end()) return 0;
+    const std::string &json = it->second;
+    // Kept when it does not fit, so a larger buffer can fetch it.
+    if (json.size() >= static_cast<size_t>(buffer_length)) return 0;
+    memcpy(buffer, json.data(), json.size());
+    buffer[json.size()] = 0;
+    const int written = static_cast<int>(json.size());
+    state->results.erase(it);
+    return written;
+  });
 }
 
 FFI_PLUGIN_EXPORT void uvc_set_platform_listener(
     const uvc_platform_listener_t *listener, void *user_data) {
-  std::lock_guard<std::mutex> lock(g_platform.mutex);
-  if (listener == nullptr) {
-    g_platform.callbacks = uvc_platform_listener_t{};
-    g_platform.user_data = nullptr;
-  } else {
-    g_platform.callbacks = *listener;
-    g_platform.user_data = user_data;
-  }
+  GuardedVoid([&] {
+    std::lock_guard<std::mutex> lock(g_platform.mutex);
+    if (listener == nullptr) {
+      g_platform.callbacks = uvc_platform_listener_t{};
+      g_platform.user_data = nullptr;
+    } else {
+      g_platform.callbacks = *listener;
+      g_platform.user_data = user_data;
+    }
+  });
 }
 
 void uvc_requests_destroy(uvc_session_t *session, int notify) {
-  QueueDestroy(session, notify != 0);
+  GuardedVoid([&] { QueueDestroy(session, notify != 0); });
 }
 
 }  // extern "C"

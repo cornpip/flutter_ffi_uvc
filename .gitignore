@@ -37,3 +37,6 @@ migrate_working_dir/
 
 *.apk
 SECRET_AGENTS_RULE.md
+
+# FVM Version Cache
+.fvm/

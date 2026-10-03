@@ -164,7 +164,15 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       throw StateError('Native session allocation failed.');
     }
     _finalizer.attach(this, session.cast<Void>(), detach: this);
-    _setupRequestListener(session);
+    final int listening = _setupRequestListener(session);
+    if (listening != 0) {
+      // Nothing was registered, so the callable can be closed at once.
+      _finalizer.detach(this);
+      _requestCallable?.close();
+      _requestCallable = null;
+      _bindings.uvc_session_destroy(session);
+      throw StateError('Native request listener setup failed ($listening).');
+    }
     return session;
   }
 
@@ -192,7 +200,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   NativeCallable<Void Function(Pointer<Void>, Int64, Int, Int)>?
   _requestCallable;
 
-  void _setupRequestListener(Pointer<uvc_session_t> session) {
+  int _setupRequestListener(Pointer<uvc_session_t> session) {
     // Weak so an undisposed instance can still be collected and finalized.
     final WeakReference<FfiUvcCamera> weak = WeakReference<FfiUvcCamera>(this);
     _requestCallable =
@@ -200,7 +208,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
           (Pointer<Void> _, int requestId, int op, int result) =>
               weak.target?._onRequestDone(requestId, result),
         );
-    _bindings.uvc_set_request_listener(
+    return _bindings.uvc_set_request_listener(
       session,
       _requestCallable!.nativeFunction,
       nullptr,
@@ -350,11 +358,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     if (result == UvcErrorCode.interrupted.nativeValue) {
       return _interrupted(mode);
     }
-    return _noDeviceResult(
-      mode,
-      _disposed ? 'UvcCamera has been disposed' : 'Camera is not open',
-      code: result,
-    );
+    return _noDeviceResult(mode, _noResultMessage(result), code: result);
   }
 
   List<UvcPreviewStartResult> _takeAutoResult(
@@ -364,15 +368,22 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   ) {
     final Map<String, dynamic>? json = _takeResultJson(requestId);
     if (json == null) {
-      if (result == UvcErrorCode.interrupted.nativeValue ||
-          candidates == null) {
+      if (result == UvcErrorCode.interrupted.nativeValue) {
+        return const <UvcPreviewStartResult>[];
+      }
+      if (candidates == null) {
+        // No mode to report the failure on, so lastError carries it.
+        if (result == UvcErrorCode.noMem.nativeValue ||
+            result == UvcErrorCode.other.nativeValue) {
+          _dartLastError = _noResultMessage(result);
+        }
         return const <UvcPreviewStartResult>[];
       }
       return <UvcPreviewStartResult>[
         if (candidates.isNotEmpty)
           _noDeviceResult(
             candidates.first,
-            _disposed ? 'UvcCamera has been disposed' : 'Camera is not open',
+            _noResultMessage(result),
             code: result,
           ),
       ];
@@ -387,6 +398,18 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
           ),
         )
         .toList();
+  }
+
+  // Names why a start request left no result JSON.
+  String _noResultMessage(int result) {
+    if (_disposed) return 'UvcCamera has been disposed';
+    if (result == UvcErrorCode.noMem.nativeValue) {
+      return 'Preview start failed: the native layer ran out of memory';
+    }
+    if (result == UvcErrorCode.other.nativeValue) {
+      return 'Preview start failed in the native request queue';
+    }
+    return 'Camera is not open';
   }
 
   UvcPreviewStartResult _noDeviceResult(
@@ -740,7 +763,21 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     // progress, reports the requests it drains, and completes once the
     // device is closed. Waiting for it never blocks this isolate, so the
     // native threads reporting into it stay free to finish.
-    await _awaitRequest(_bindings.uvc_request_destroy(session));
+    final int destroyId = _bindings.uvc_request_destroy(session);
+    await _awaitRequest(destroyId);
+    if (destroyId == UvcErrorCode.noMem.nativeValue ||
+        destroyId == UvcErrorCode.other.nativeValue) {
+      // The teardown could not be queued, so the session lives on and may
+      // still call the callables. Keep everything, so a later dispose() or
+      // the finalizer can try again.
+      _session = session;
+      _finalizer.attach(this, session.cast<Void>(), detach: this);
+      _disposing = null;
+      throw _fail(
+        UvcErrorCode.fromNativeValue(destroyId)!,
+        'Dispose failed: the native teardown could not be queued',
+      );
+    }
     try {
       _requestCallable?.close();
       _requestCallable = null;
