@@ -39,7 +39,7 @@ if(ANDROID AND NOT TARGET LibUSB::LibUSB)
 endif()
 
 if(ANDROID AND NOT TARGET JPEG::JPEG)
-  set(JPEG_TURBO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/backend_libuvc/third_party/libjpeg-turbo")
+  set(JPEG_TURBO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/backend_libuvc/third_party/libjpeg-turbo-android")
   set(JPEG_TURBO_COMMON_INCLUDE_DIR "${JPEG_TURBO_ROOT}/include")
 
   if(ANDROID_ABI STREQUAL "arm64-v8a")

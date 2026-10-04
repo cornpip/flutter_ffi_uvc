@@ -57,18 +57,18 @@ For convenience, the standard LGPL 2.1 text is provided in:
 
 ## libjpeg-turbo
 
-- Paths: `src/backend_libuvc/third_party/libjpeg-turbo` (Android prebuilts),
-  `src/backend_libuvc/third_party/libjpeg-turbo-src` (Linux sources)
+- Paths: `src/backend_libuvc/third_party/libjpeg-turbo-android` (Android
+  prebuilts), `src/backend_libuvc/third_party/libjpeg-turbo` (sources)
 - Upstream: `https://github.com/libjpeg-turbo/libjpeg-turbo`
 - Upstream release: `3.2.0` (Android prebuilts are built from the vendored
-  Linux sources)
+  sources)
 - License summary: IJG License and Modified BSD (3-clause) License
 
 For Android this package vendors `libjpeg.a` static libraries and the
 associated public headers, linked into `libflutter_ffi_uvc.so`. For Linux it
 vendors the unmodified upstream sources reduced to what the static-library
 build needs, built as part of the plugin (see
-`src/backend_libuvc/third_party/libjpeg-turbo-src/SOURCE.md`).
+`src/backend_libuvc/third_party/libjpeg-turbo/SOURCE.md`).
 
 The upstream project documents `libjpeg-turbo` as being covered by two
 compatible BSD-style licenses: the IJG license for the libjpeg API code and the
@@ -77,10 +77,10 @@ Modified BSD license for the TurboJPEG API library and related components.
 The upstream license texts are kept in this repository as verbatim reference
 copies:
 
+- `src/backend_libuvc/third_party/libjpeg-turbo-android/LICENSE.md`
+- `src/backend_libuvc/third_party/libjpeg-turbo-android/README.ijg`
 - `src/backend_libuvc/third_party/libjpeg-turbo/LICENSE.md`
 - `src/backend_libuvc/third_party/libjpeg-turbo/README.ijg`
-- `src/backend_libuvc/third_party/libjpeg-turbo-src/LICENSE.md`
-- `src/backend_libuvc/third_party/libjpeg-turbo-src/README.ijg`
 
 When distributing binaries that include `libjpeg-turbo`, upstream requires the
 following documentation notice:

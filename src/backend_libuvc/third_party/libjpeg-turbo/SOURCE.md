@@ -11,8 +11,8 @@
   plain C paths. arm64 SIMD needs no extra tools.
 
 The Linux build compiles these sources directly. Android uses the static
-libraries in `third_party/libjpeg-turbo`, built from these sources with
-NDK 26.3.11579264 and stripped of debug info:
+libraries in `third_party/libjpeg-turbo-android`, built from these sources
+with NDK 26.3.11579264 and stripped of debug info:
 
 ```sh
 cmake -S . -B out/<abi> -G Ninja \
@@ -24,6 +24,6 @@ cmake --build out/<abi> --target jpeg-static
 llvm-strip --strip-debug out/<abi>/libjpeg.a
 ```
 
-Copy `libjpeg.a` from `out/<abi>` into `third_party/libjpeg-turbo/<abi>`,
-and `jconfig.h`, `jconfigint.h`, and `jversion.h` into its `include`
-directory. x86_64 needs `nasm` for SIMD.
+Copy `libjpeg.a` from `out/<abi>` into
+`third_party/libjpeg-turbo-android/<abi>`, and `jconfig.h`, `jconfigint.h`,
+and `jversion.h` into its `include` directory. x86_64 needs `nasm` for SIMD.
