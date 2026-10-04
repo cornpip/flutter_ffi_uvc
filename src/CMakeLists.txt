@@ -54,10 +54,12 @@ if(ANDROID AND NOT TARGET JPEG::JPEG)
      AND EXISTS "${JPEG_TURBO_COMMON_INCLUDE_DIR}/jpeglib.h"
      AND EXISTS "${JPEG_TURBO_ANDROID_BUILD_DIR}/include/jconfig.h"
      AND EXISTS "${JPEG_TURBO_ANDROID_BUILD_DIR}/include/jconfigint.h"
-     AND EXISTS "${JPEG_TURBO_ANDROID_BUILD_DIR}/libjpeg.so")
-    add_library(JPEG::JPEG SHARED IMPORTED)
+     AND EXISTS "${JPEG_TURBO_ANDROID_BUILD_DIR}/libjpeg.a")
+    # Static, so libjpeg ends up inside libflutter_ffi_uvc.so and the APK
+    # carries no libjpeg.so that could clash with another package's copy.
+    add_library(JPEG::JPEG STATIC IMPORTED)
     set_target_properties(JPEG::JPEG PROPERTIES
-      IMPORTED_LOCATION "${JPEG_TURBO_ANDROID_BUILD_DIR}/libjpeg.so"
+      IMPORTED_LOCATION "${JPEG_TURBO_ANDROID_BUILD_DIR}/libjpeg.a"
       INTERFACE_INCLUDE_DIRECTORIES
         "${JPEG_TURBO_COMMON_INCLUDE_DIR};${JPEG_TURBO_ANDROID_BUILD_DIR}/include"
     )
@@ -100,6 +102,9 @@ target_include_directories(flutter_ffi_uvc PRIVATE
 if (ANDROID)
   # Support Android 15 16k page size
   target_link_options(flutter_ffi_uvc PRIVATE "-Wl,-z,max-page-size=16384")
+  # Keep the symbols of the static archives (libuvc, libjpeg) private, so
+  # they cannot interpose on another library's copy in the same process.
+  target_link_options(flutter_ffi_uvc PRIVATE "-Wl,--exclude-libs,ALL")
   # mediandk provides AMediaCodec/AMediaMuxer for MP4 video recording.
   # LibUSB is used directly to find the UVC 1.5 Encoding Unit in the raw VC
   # descriptors (libuvc does not parse encoding units).

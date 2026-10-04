@@ -1,3 +1,8 @@
+## 1.1.2-wip
+
+- change Android to link libjpeg-turbo statically
+- update the Android libjpeg-turbo to 3.2.0
+
 ## 1.1.1
 
 - fix the app aborting when native code runs out of memory, the call fails
