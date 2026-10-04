@@ -1,6 +1,7 @@
 * text=auto eol=lf
 
 *.so binary
+*.a binary
 *.png binary
 *.jpg binary
 *.jpeg binary

@@ -587,10 +587,9 @@ That's all there is to it!
 libjpeg-turbo
 
 libjpeg-turbo. Upstream: https://github.com/libjpeg-turbo/libjpeg-turbo
-Prebuilt Android libjpeg.so shared libraries and the public headers,
-from upstream revision 96c5446cd661b1329ce5c97b297a924c2e2b5c63, are
-bundled unmodified. On Linux, unmodified sources from upstream release
-3.2.0 are bundled and built as a static library during the app build.
+Unmodified sources from upstream release 3.2.0 are bundled. On Android
+they ship prebuilt as static libraries with the public headers, and on
+Linux they are built as a static library during the app build.
 
 This software is based in part on the work of the Independent JPEG Group.
 

@@ -1,5 +1,5 @@
 /* libjpeg-turbo build number */
-#define BUILD  "20260407"
+#define BUILD  "20261004"
 
 /* How to hide global symbols. */
 #define HIDDEN  __attribute__((visibility("hidden")))
@@ -17,7 +17,7 @@
 #define PACKAGE_NAME  "libjpeg-turbo"
 
 /* Version number of package */
-#define VERSION  "3.1.91"
+#define VERSION  "3.2.0"
 
 /* The size of `size_t', as computed by sizeof. */
 #define SIZEOF_SIZE_T  8
@@ -73,7 +73,7 @@
 /* Use accelerated SIMD routines. */
 #define WITH_SIMD 1
 
-#define SIMD_ARCHITECTURE  X86_64
+#define SIMD_ARCHITECTURE  ARM64
 
 #endif
 

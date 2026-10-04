@@ -38,7 +38,7 @@ set_target_properties(LibUSB::LibUSB PROPERTIES
 # as an external project and import the static archive under the JPEG::JPEG
 # name that libuvc's FindJpegPkg.cmake honors.
 set(FFI_UVC_JPEG_SRC
-  "${CMAKE_CURRENT_SOURCE_DIR}/../src/backend_libuvc/third_party/libjpeg-turbo-src")
+  "${CMAKE_CURRENT_SOURCE_DIR}/../src/backend_libuvc/third_party/libjpeg-turbo")
 set(FFI_UVC_JPEG_BUILD "${CMAKE_CURRENT_BINARY_DIR}/libjpeg_turbo_build")
 set(FFI_UVC_JPEG_SIMD ON)
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
