@@ -1,4 +1,4 @@
-## 1.1.2-wip
+## 1.1.2
 
 - change Android to link libjpeg-turbo statically
 - update the Android libjpeg-turbo to 3.2.0
