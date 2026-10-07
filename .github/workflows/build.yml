@@ -1,0 +1,130 @@
+name: build
+
+# Analyzes the Dart code and builds the example on every platform with a
+# hosted runner. Nothing here touches a camera, so a green run means the
+# native code builds and links, not that it streams.
+
+on:
+  # Manual runs produce a Linux arm64 bundle for on-device testing without
+  # needing a code change.
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "src/**"
+      - "lib/**"
+      - "test/**"
+      - "android/**"
+      - "linux/**"
+      - "windows/**"
+      - "macos/**"
+      - "example/**"
+      - "pubspec.yaml"
+      - ".github/workflows/build.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "lib/**"
+      - "test/**"
+      - "android/**"
+      - "linux/**"
+      - "windows/**"
+      - "macos/**"
+      - "example/**"
+      - "pubspec.yaml"
+      - ".github/workflows/build.yml"
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: "3.47.4"
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter pub get
+      - run: flutter analyze lib test
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      # Gradle downloads the NDK that Flutter asks for once the licenses
+      # are accepted.
+      - name: Accept Android SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Build example (release)
+        working-directory: example
+        run: flutter build apk --release
+
+  linux-arm64:
+    runs-on: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev
+      # Official Flutter tarballs are x64-only; on arm64 hosts the SDK
+      # bootstraps itself from a git checkout.
+      - name: Install Flutter
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$HOME/flutter"
+          echo "$HOME/flutter/bin" >> "$GITHUB_PATH"
+      - name: Build example (release)
+        working-directory: example
+        run: |
+          flutter --version
+          flutter build linux --release
+      # Tar before uploading: artifact zips drop the execute bits.
+      - name: Pack bundle
+        run: tar -C example/build/linux/arm64/release -czf linux-arm64-bundle.tar.gz bundle
+      - uses: actions/upload-artifact@v4
+        with:
+          name: example-linux-arm64
+          path: linux-arm64-bundle.tar.gz
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - name: Build example (release)
+        working-directory: example
+        run: flutter build windows --release
+
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter config --enable-swift-package-manager
+      - name: Build example (release)
+        working-directory: example
+        run: flutter build macos --release
