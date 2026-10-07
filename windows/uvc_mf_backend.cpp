@@ -1954,8 +1954,11 @@ FFI_PLUGIN_EXPORT int uvc_get_stream_stats_json(uvc_session_t* session,
       elapsed_s > 0.0
           ? static_cast<double>(s.delivered_frame_count) / elapsed_s
           : 0.0;
+  // gap_count stops at the ring capacity, gap_sum_ms covers every gap.
   const double avg_gap_ms =
-      s.gap_count > 0 ? s.gap_sum_ms / static_cast<double>(s.gap_count) : 0.0;
+      s.delivered_frame_count > 1
+          ? s.gap_sum_ms / static_cast<double>(s.delivered_frame_count - 1)
+          : 0.0;
   double p95_gap_ms = 0.0;
   if (s.gap_count > 0) {
     std::vector<double> sorted(s.gaps_ms, s.gaps_ms + s.gap_count);

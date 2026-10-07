@@ -2,6 +2,8 @@
 
 - change Android to link libjpeg-turbo statically
 - update the Android libjpeg-turbo to 3.2.0
+- fix
+  - `avgInterFrameGapMs` growing with stream length on Windows and macOS
 
 ## 1.1.1
 
