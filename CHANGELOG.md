@@ -2,6 +2,12 @@
 
 - change Android to link libjpeg-turbo statically
 - update the Android libjpeg-turbo to 3.2.0
+- fix
+  - `avgInterFrameGapMs` growing with stream length on Windows and macOS
+  - `streamErrors` messages that could be overwritten before they were read
+    on Windows and macOS
+  - a pending call never completing after its `UvcCamera` was garbage
+    collected
 
 ## 1.1.1
 
