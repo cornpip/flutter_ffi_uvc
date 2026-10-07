@@ -197,6 +197,10 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   // Completers for queued requests, keyed by native request id. Completed
   // from the request listener in completion order.
   final Map<int, Completer<int>> _pending = <int, Completer<int>>{};
+  // Keeps an instance with requests in flight from being collected, since
+  // the request listener holds it only weakly. An open waiting on a
+  // permission dialog stays here until the dialog is answered.
+  static final Set<FfiUvcCamera> _awaitingReply = Set<FfiUvcCamera>.identity();
   NativeCallable<Void Function(Pointer<Void>, Int64, Int, Int)>?
   _requestCallable;
 
@@ -217,6 +221,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
 
   void _onRequestDone(int requestId, int result) {
     _pending.remove(requestId)?.complete(result);
+    if (_pending.isEmpty) _awaitingReply.remove(this);
   }
 
   // Resolves with the request's result code. A negative id is a request
@@ -225,6 +230,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
     if (requestId <= 0) return Future<int>.value(requestId);
     final Completer<int> completer = Completer<int>();
     _pending[requestId] = completer;
+    _awaitingReply.add(this);
     return completer.future;
   }
 
@@ -232,6 +238,7 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   void _failPendingRequests() {
     final List<Completer<int>> waiting = _pending.values.toList();
     _pending.clear();
+    _awaitingReply.remove(this);
     for (final Completer<int> completer in waiting) {
       completer.complete(UvcErrorCode.noDevice.nativeValue);
     }
