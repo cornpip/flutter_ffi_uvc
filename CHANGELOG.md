@@ -4,6 +4,8 @@
 - update the Android libjpeg-turbo to 3.2.0
 - fix
   - `avgInterFrameGapMs` growing with stream length on Windows and macOS
+  - `streamErrors` messages that could be overwritten before they were read
+    on Windows and macOS
 
 ## 1.1.1
 

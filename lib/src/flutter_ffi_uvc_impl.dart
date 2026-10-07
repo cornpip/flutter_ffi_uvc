@@ -497,6 +497,9 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
   }
 
   void _onNativeError(Pointer<Void> _, Pointer<Char> messagePtr) {
+    // The message lives in the session's error ring, which a dispose in
+    // progress may already have freed.
+    if (_disposed) return;
     final String message = messagePtr.cast<Utf8>().toDartString();
     if (message.isNotEmpty) {
       _streamErrorController.add(UvcStreamError(message: message));

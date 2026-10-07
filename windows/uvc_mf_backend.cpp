@@ -195,6 +195,11 @@ struct Session {
   // Guarded by error_mutex.
   std::mutex error_mutex;
   char last_error[512] = {0};
+  // Messages handed to the error listener. The listener runs later on the
+  // Dart side, so each message stays in its slot until 8 newer ones arrive.
+  static constexpr size_t kErrorRingSize = 8;
+  char error_ring[kErrorRingSize][512] = {};
+  uint32_t error_ring_next = 0;
   // Stream errors reported to the error listener since creation.
   std::atomic<int64_t> error_count{0};
   // Copy handed to uvc_last_error callers. Written only by uvc_last_error.
@@ -285,14 +290,18 @@ void ReportError(Session& s, const char* fmt, ...) {
   va_start(args, fmt);
   vsnprintf(message, sizeof(message), fmt, args);
   va_end(args);
+  const char* staged = nullptr;
   {
     std::lock_guard<std::mutex> lock(s.error_mutex);
     strncpy_s(s.last_error, message, _TRUNCATE);
+    char* slot = s.error_ring[s.error_ring_next++ % Session::kErrorRingSize];
+    memcpy(slot, s.last_error, sizeof(s.last_error));
+    staged = slot;
   }
   s.error_count.fetch_add(1);
   std::lock_guard<std::mutex> lock(s.listener_mutex);
   if (s.error_listener != nullptr) {
-    s.error_listener(s.error_listener_data, message);
+    s.error_listener(s.error_listener_data, staged);
   }
 }
 
