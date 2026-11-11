@@ -1,1 +1,4 @@
 #include "Generated.xcconfig"
+
+// Keeps the FFI symbols of the statically linked plugin through an archive.
+STRIP_STYLE = non-global
