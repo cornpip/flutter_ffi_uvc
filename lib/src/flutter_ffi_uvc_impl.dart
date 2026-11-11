@@ -1604,6 +1604,9 @@ DynamicLibrary get _dylib {
   // On desktop the FFI symbols are exported from the plugin library, which
   // also hosts the native backend and the platform channels.
   if (Platform.isMacOS) return _cachedDylib = _openMacOSLibrary();
+  // iOS and iPadOS link every plugin into the app binary; there is no library
+  // to open.
+  if (Platform.isIOS) return _cachedDylib = DynamicLibrary.process();
   final String libraryName;
   if (Platform.isWindows) {
     libraryName = '${_libName}_plugin.dll';
@@ -1629,10 +1632,11 @@ void _ensureSupportedPlatform() {
   if (!Platform.isAndroid &&
       !Platform.isWindows &&
       !Platform.isLinux &&
-      !Platform.isMacOS) {
+      !Platform.isMacOS &&
+      !Platform.isIOS) {
     throw UnsupportedError(
-      'flutter_ffi_uvc is supported only on Android, Windows, Linux, and '
-      'macOS.',
+      'flutter_ffi_uvc is supported only on Android, Windows, Linux, macOS, '
+      'and iPadOS.',
     );
   }
 }
@@ -1644,8 +1648,8 @@ void _ensureAndroidOnlyApi(String apiName) {
   _ensureSupportedPlatform();
   if (!Platform.isAndroid) {
     throw UnsupportedError(
-      '$apiName is Android-only. Use openUsbDevice/closeUsbDevice on '
-      'desktop platforms.',
+      '$apiName is Android-only. Use openUsbDevice/closeUsbDevice on the '
+      'other platforms.',
     );
   }
 }

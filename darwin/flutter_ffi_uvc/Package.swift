@@ -6,6 +6,10 @@ import PackageDescription
 let package = Package(
     name: "flutter_ffi_uvc",
     platforms: [
+        // The iOS target matches what Flutter itself generates, so adding this
+        // plugin never raises an app's deployment target. External camera
+        // support arrives with iPadOS 17 and is guarded at run time.
+        .iOS("13.0"),
         .macOS("10.15")
     ],
     products: [
@@ -25,7 +29,7 @@ let package = Package(
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),
                 .linkedFramework("ImageIO"),
-                .linkedFramework("IOKit"),
+                .linkedFramework("IOKit", .when(platforms: [.macOS])),
             ]
         )
     ],

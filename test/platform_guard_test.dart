@@ -22,13 +22,14 @@ void main() {
     });
 
     test('fails explicitly on unsupported host platforms', () {
-      // Android, Windows, Linux, and macOS are supported platforms: there
-      // the guard passes and native calls only work with the plugin library
-      // present, which a pure Dart test host does not provide.
+      // Android, Windows, Linux, macOS, and iOS are supported platforms:
+      // there the guard passes and native calls only work with the plugin
+      // library present, which a pure Dart test host does not provide.
       if (Platform.isAndroid ||
           Platform.isWindows ||
           Platform.isLinux ||
-          Platform.isMacOS) {
+          Platform.isMacOS ||
+          Platform.isIOS) {
         return;
       }
 

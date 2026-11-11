@@ -1,3 +1,15 @@
+## 1.2.0-wip
+
+- add iPadOS support (17.0 or later, USB-C iPads)
+  - `supportedControls()`, `debugBmControls()`, and the control setters are
+    unavailable there, because iOS offers no way to send UVC class requests
+  - `listUsbDevices()` reports `vendorId` and `productId` as 0, which iPadOS
+    does not expose, and lists external cameras only
+  - `supportedModes()` lists NV12 modes only, the format iPadOS converts every
+    external camera stream to
+  - one camera streams at a time; a second preview start fails with
+    `UvcErrorCode.busy`
+
 ## 1.1.2
 
 - change Android to link libjpeg-turbo statically

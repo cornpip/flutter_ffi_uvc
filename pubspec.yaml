@@ -1,6 +1,6 @@
 name: flutter_ffi_uvc
 description: Control USB(UVC) cameras. Preview, capture, record, adjust settings, and read raw frames, for one camera or several.
-version: 1.1.2
+version: 1.2.0-wip
 repository: https://github.com/cornpip/flutter_ffi_uvc
 
 environment:
@@ -35,6 +35,11 @@ flutter:
         pluginClass: FlutterFfiUvcPluginCApi
       linux:
         pluginClass: FlutterFfiUvcPlugin
+      ios:
+        pluginClass: FlutterFfiUvcPlugin
+        # iPadOS 17 and later stream external UVC cameras. iOS itself lists
+        # no devices; see the README.
+        sharedDarwinSource: true
       macos:
         pluginClass: FlutterFfiUvcPlugin
         # iOS and macOS read one implementation from darwin/.
