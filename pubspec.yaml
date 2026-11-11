@@ -37,3 +37,5 @@ flutter:
         pluginClass: FlutterFfiUvcPlugin
       macos:
         pluginClass: FlutterFfiUvcPlugin
+        # iOS and macOS read one implementation from darwin/.
+        sharedDarwinSource: true
