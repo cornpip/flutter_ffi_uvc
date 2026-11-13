@@ -27,8 +27,26 @@ both the heading and pubspec `version:`. The release commit drops it.
   with a lowercase verb (`add`, `change`, `fix`, ...) or a scope prefix
   (`docs:`, `example:`). Name symbols in backticks.
 
+## Issues and milestones
+
+Work is tracked with GitHub issues, grouped by release in milestones (e.g.
+`1.2.0`). An issue is only open or closed, there are no status columns.
+
+When a change has an issue, the branch name starts with its number (e.g.
+`9-ipados-support`), the PR description says `Closes #<n>`, and the PR goes
+in the same milestone, so merging closes the issue. Commit subjects carry no
+issue number.
+
+## Prose
+
+Avoid em dashes in anything written for this repo (docs, CHANGELOG, code
+comments, commit messages). Use a comma or a separate sentence.
+
 ## Engineering rules
 
+- What the package covers and how the public API treats platform
+  differences: `doc/scope.md`.
+- Rules every native backend follows: `doc/native-strategy.md`.
 - When native declarations change, regenerate bindings with
   `dart run ffigen --config ffigen.yaml`.
 - All platforms implement the same exported C ABI and emit byte-compatible
