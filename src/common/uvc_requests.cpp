@@ -297,6 +297,8 @@ std::vector<uvc_mode_t> DefaultCandidates(uvc_session_t *s, int prefer_quality,
   const int count = uvc_get_supported_modes(s, modes.data(),
                                             static_cast<int>(modes.size()));
   modes.resize(count > 0 ? count : 0);
+  // Modes whose format is H264 are never picked automatically, only through
+  // an explicit start (rationale: doc/windows-backend.md).
   modes.erase(std::remove_if(modes.begin(), modes.end(),
                              [](const uvc_mode_t &m) {
                                return m.frame_format == kFormatH264;

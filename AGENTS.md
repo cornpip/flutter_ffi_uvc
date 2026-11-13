@@ -10,7 +10,7 @@ milestones, prose style, engineering rules) are defined in
 
 - Public API surface, new features, platform-specific members: read
   `doc/scope.md`.
-- Native backends, preview pipeline, formats (H264), mode validation: read
+- Native backends, preview pipeline, formats, mode validation: read
   `doc/native-strategy.md`.
 - Version bump / release: read `doc/release-checklist.md`.
 - `LICENSE`, `NOTICES`, or a bundled third-party component changed: read
