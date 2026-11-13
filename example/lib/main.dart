@@ -98,7 +98,10 @@ class _UvcPreviewPageState extends State<UvcPreviewPage>
     if (profile == null) {
       return Directory.current;
     }
-    return Directory('$profile${Platform.pathSeparator}Pictures');
+    // iPadOS has no Pictures folder; the app container's Documents folder is
+    // where a capture can be written.
+    final String folder = Platform.isIOS ? 'Documents' : 'Pictures';
+    return Directory('$profile${Platform.pathSeparator}$folder');
   }
 
   List<String> get _modeFormatNames => _cameraModes

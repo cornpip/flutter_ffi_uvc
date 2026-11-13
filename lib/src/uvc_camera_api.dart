@@ -906,6 +906,9 @@ class UvcPreviewTransform {
 }
 
 /// Information about a discovered UVC-capable USB device.
+///
+/// On iPadOS the system exposes external cameras without their USB ids, so
+/// [vendorId] and [productId] are 0 there.
 class UvcUsbDevice {
   const UvcUsbDevice({
     required this.deviceId,
@@ -1149,17 +1152,21 @@ abstract interface class UvcCamera {
   /// Requests the CAMERA permission.
   ///
   /// Returns true if the permission is already granted or the user grants it.
-  /// On macOS this asks for camera access and returns false when the user
-  /// refuses it. Windows and Linux have no runtime permission dialog; this
-  /// returns true, and problems surface as open/stream failures instead.
+  /// On macOS and iPadOS this asks for camera access and returns false when
+  /// the user refuses it. Windows and Linux have no runtime permission
+  /// dialog; this returns true, and problems surface as open/stream failures
+  /// instead.
   Future<bool> ensureCameraPermission();
 
   /// Lists USB devices that expose a UVC video interface.
   ///
   /// [UvcUsbDevice.hasPermission] reports whether the device can be opened
   /// without a permission request: always true on Windows, on Linux it
-  /// reflects read-write access to the device node, and on macOS whether
-  /// camera access has been granted to the app.
+  /// reflects read-write access to the device node, and on macOS and iPadOS
+  /// whether camera access has been granted to the app.
+  ///
+  /// iPadOS lists external cameras only, and only from 17.0 on. Each
+  /// [UvcUsbDevice.vendorId] and [UvcUsbDevice.productId] is 0 there.
   Future<List<UvcUsbDevice>> listUsbDevices();
 
   /// Stream of USB attach/detach events for UVC-capable devices.
@@ -1177,10 +1184,10 @@ abstract interface class UvcCamera {
 
   /// Opens a USB device by [deviceId].
   ///
-  /// On Android this acquires USB permission if needed, and on macOS camera
-  /// access, failing with [UvcErrorCode.access] when the user refuses it.
-  /// Windows and Linux have no permission flow; on Linux the device node
-  /// must be accessible (usually a udev rule).
+  /// On Android this acquires USB permission if needed, and on macOS and
+  /// iPadOS camera access, failing with [UvcErrorCode.access] when the user
+  /// refuses it. Windows and Linux have no permission flow; on Linux the
+  /// device node must be accessible (usually a udev rule).
   ///
   /// If this instance already has a device open, its preview is stopped and
   /// the device is closed first, so calling this again is also how you switch
@@ -1206,7 +1213,7 @@ abstract interface class UvcCamera {
   Future<void> closeUsbDevice();
 
   /// Opens a UVC device using an already acquired platform file descriptor.
-  /// Android only. Use [openUsbDevice] on desktop platforms. Throws
+  /// Android only. Use [openUsbDevice] on the other platforms. Throws
   /// [UnsupportedError] on other platforms. A device this instance opened
   /// through [openUsbDevice] is closed first, and [openedDeviceId] becomes
   /// null. Throws [UvcException] when the native open fails.
@@ -1230,6 +1237,10 @@ abstract interface class UvcCamera {
   /// [closeUsbDevice], or [dispose] issued while this call verifies frames
   /// ends the verification early, and the result carries
   /// [UvcErrorCode.interrupted].
+  ///
+  /// iPadOS runs one camera at a time. Starting a second instance's preview
+  /// while another is streaming fails with [UvcErrorCode.busy] instead of
+  /// stopping the running stream.
   Future<UvcPreviewStartResult> startPreview(
     UvcCameraMode mode, {
     UvcPreviewPolicy policy = UvcPreviewPolicy.stableFrames,
@@ -1372,6 +1383,9 @@ abstract interface class UvcCamera {
   /// natively; nothing crosses into Dart per frame. The preview keeps running
   /// while recording. Not available on Linux: there this throws.
   ///
+  /// [path] must be writable by the app. On iPadOS that means a path inside
+  /// the app container, for example under its Documents directory.
+  ///
   /// [transform] defaults to [previewTransform] so the recording matches what
   /// the preview shows; it is captured once at start and stays fixed for the
   /// whole recording. [bitrateBps] `<= 0` selects a default from resolution
@@ -1424,13 +1438,17 @@ abstract interface class UvcCamera {
   Future<void> attachPreviewTexture(int textureId, {int? width, int? height});
 
   /// Returns all controls supported by the currently opened device.
+  ///
+  /// Always empty on iPadOS, which gives an app no way to send the UVC class
+  /// requests controls are made of.
   List<UvcCameraControl> supportedControls();
 
   /// Returns controls present in descriptor bmControls without GET_* probing.
   ///
   /// Intended for debugging device quirks where descriptor exposure and
   /// readable/writable behavior differ. Not available on Windows, which has
-  /// no raw descriptor access and returns an empty list.
+  /// no raw descriptor access and returns an empty list, nor on iPadOS, which
+  /// cannot read the descriptors at all.
   List<UvcBmControlInfo> debugBmControls();
 
   /// Returns the current value for a specific UVC control.
@@ -1469,6 +1487,10 @@ abstract interface class UvcCamera {
   /// deliberately excluded from this list (an inter-frame codec breaks the
   /// per-frame validation model, see `doc/windows-backend.md`) and on Linux
   /// and macOS as well.
+  ///
+  /// iPadOS converts the wire formats of an external camera before they reach
+  /// an app, so every listed mode is NV12 regardless of what the camera
+  /// sends. Resolution and frame rate are the camera's own.
   List<UvcCameraMode> supportedModes();
 
   // ---------------------------------------------------------------------------
