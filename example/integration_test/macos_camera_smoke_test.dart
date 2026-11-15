@@ -1,9 +1,10 @@
 // Manual smoke test for the macOS backend against a real camera.
 //
-// Drives the public API end to end: permission, device list, open, preview,
-// frame copies, still picture, MP4 recording, preview restart, close. It
-// needs a UVC camera attached and is not part of CI. How to run it, and why
-// `flutter test -d macos` is often not enough, is in ../README.md.
+// Drives the public API end to end: permission, device list, open, preview
+// on a texture, frame copies, still picture, MP4 recording, preview restart,
+// close. It needs a UVC camera attached and is not part of CI. How to run
+// it, also when `flutter test -d macos` is refused the camera, is in
+// ../README.md.
 //
 // ignore_for_file: avoid_print
 
@@ -141,13 +142,14 @@ void main() {
       expect(restarted.success, isTrue);
       await camera.stopPreview();
 
-      await tester.pumpWidget(const SizedBox.shrink());
       await camera.closeUsbDevice();
       expect(camera.openedDeviceId, isNull);
       expect(streamErrors, isEmpty);
     } finally {
       await subscription.cancel();
       if (textureId != null) {
+        // Take the Texture widget down before its texture goes away.
+        await tester.pumpWidget(const SizedBox.shrink());
         await camera.disposePreviewTexture(textureId);
       }
       await camera.dispose();

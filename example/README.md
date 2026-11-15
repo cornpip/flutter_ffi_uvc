@@ -17,10 +17,11 @@ flutter test -d <device-id> integration_test/native_tests_on_device.dart
 ## macOS camera smoke test
 
 `integration_test/macos_camera_smoke_test.dart` runs the public API against a
-real camera on macOS: permission, device list, open, preview, frame copies,
-still picture, MP4 recording, preview restart, close. It needs a UVC camera
-attached, uses the first one listed, and is not part of CI. Run it by hand
-after a change to the Apple backend.
+real camera on macOS: permission, device list, open, preview on a texture,
+frame copies, still picture, MP4 recording, preview restart, close. It needs
+a UVC camera attached and is not part of CI. With several cameras it takes
+the first one that reports a USB vendor id. Run it by hand after a change to
+the Apple backend.
 
 ```sh
 flutter test -d macos integration_test/macos_camera_smoke_test.dart
