@@ -93,8 +93,10 @@ with `UVC_ERROR_BUSY` instead of silently killing the stream that is running.
   an error on the stream that replaced it nor frees its slot.
 - A disconnect or runtime error posted before the observers are added
   reaches nobody. The start checks the device and the capture session once
-  more after adding them and fails with `UVC_ERROR_IO` if the stream is
-  already gone, on macOS as well.
+  more after adding them, on macOS as well. A missing device fails it with
+  `UVC_ERROR_NO_DEVICE`, which ends an automatic mode search. A session that
+  stopped fails it with `UVC_ERROR_IO`. An interrupted session is left
+  alone, because it resumes by itself.
 - `UVC_ERROR_BUSY` is the code an open of a claimed device already returns, so
   a caller handles it the same way.
 - `UVC_ERROR_NOT_SUPPORTED` would be the wrong report here: the backend can

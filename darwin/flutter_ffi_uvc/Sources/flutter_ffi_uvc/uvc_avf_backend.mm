@@ -164,7 +164,9 @@ void ClearPreviewSlotLocked() {
 // lifecycle_mutex, so a lifecycle call may wait for the frame queue to drain
 // while holding it. Never wait for the frame queue with mutex or rec_mutex
 // held. Never invoke a listener with a session lock held. registry.mutex is
-// taken last and never while holding another lock.
+// a leaf: it may be taken under lifecycle_mutex, and nothing else is locked
+// while it is held. The capture notification blocks hold no lock when they
+// run; they take mutex and then registry.mutex one after the other.
 struct Session {
   // Serializes open, start, stop, and close, and guards the capture
   // objects below.
@@ -1694,8 +1696,17 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
 
     // A disconnect or runtime error posted before the observers above were
     // added reached nobody. Fail the start instead of keeping a stream, and
-    // on iPadOS the preview slot, that is already dead.
-    if (!device.connected || !capture.isRunning) {
+    // on iPadOS the preview slot, that is already dead. The codes match the
+    // checks above: a missing device ends an automatic mode search, a failed
+    // stream lets it go on.
+    if (!device.isConnected) {
+      StopPreviewLocked(s);
+      SetErrorMessage(s, "Video capture device disappeared");
+      return kErrorNoDevice;
+    }
+    // An interrupted session is not running either, but it resumes by
+    // itself and the interruption observer has reported it.
+    if (!capture.isRunning && !capture.isInterrupted) {
       StopPreviewLocked(s);
       SetErrorMessage(s, "The stream ended while it was starting");
       return kErrorIo;
