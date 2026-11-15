@@ -51,7 +51,7 @@ comments, commit messages). Use a comma or a separate sentence.
   `dart run ffigen --config ffigen.yaml`.
 - All platforms implement the same exported C ABI and emit byte-compatible
   JSON, so a change lands in the libuvc backend (Android/Linux), the
-  Windows backend, and the macOS backend together.
+  Windows backend, and the Apple backend (macOS/iPadOS) together.
 
 ## Tests
 

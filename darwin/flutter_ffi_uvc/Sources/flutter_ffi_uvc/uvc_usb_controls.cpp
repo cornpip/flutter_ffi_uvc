@@ -1,5 +1,11 @@
 #include "uvc_usb_controls.h"
 
+#include <TargetConditionals.h>
+
+// IOKit exists on macOS only. The iOS build compiles the stub at the end of
+// this file instead.
+#if TARGET_OS_OSX
+
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/IOCFPlugIn.h>
 #include <IOKit/IOKitLib.h>
@@ -231,3 +237,33 @@ int UsbControlDevice::Request(bool is_ct, uint8_t selector, uint8_t request,
 }
 
 }  // namespace uvc_mac
+
+#else  // TARGET_OS_OSX
+
+namespace uvc_mac {
+
+namespace {
+
+// libuvc uvc_error_t code, as in the macOS implementation above.
+constexpr int kErrorNotSupported = -12;
+
+}  // namespace
+
+// iPadOS streams through AVFoundation and offers no way to send the UVC class
+// requests controls are made of. Open always fails, so a session streams with
+// an empty control list and setters report the reason in usb_error.
+std::unique_ptr<UsbControlDevice> UsbControlDevice::Open(const UsbIds&,
+                                                         std::string* error) {
+  if (error != nullptr) *error = "iPadOS does not expose UVC controls";
+  return std::unique_ptr<UsbControlDevice>();
+}
+
+UsbControlDevice::~UsbControlDevice() = default;
+
+int UsbControlDevice::Request(bool, uint8_t, uint8_t, uint8_t*, uint16_t) {
+  return kErrorNotSupported;
+}
+
+}  // namespace uvc_mac
+
+#endif  // TARGET_OS_OSX

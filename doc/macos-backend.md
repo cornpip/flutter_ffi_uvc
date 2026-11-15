@@ -1,7 +1,7 @@
 # macOS backend notes
 
 The macOS backend
-(`macos/flutter_ffi_uvc/Sources/flutter_ffi_uvc/uvc_avf_backend.mm`)
+(`darwin/flutter_ffi_uvc/Sources/flutter_ffi_uvc/uvc_avf_backend.mm`)
 implements the same native contract as the other backends: same exported C
 ABI (`src/include/flutter_ffi_uvc.h`), same JSON shapes for modes / controls
 / stream stats, same libuvc-style error codes. Streaming runs on
@@ -9,7 +9,8 @@ AVFoundation and the system UVC driver. Controls go to the camera as UVC
 class requests over IOKit.
 
 This document records the macOS-specific behavior and the reasoning behind
-the deliberate differences.
+the deliberate differences. iPadOS reuses this implementation; where it
+behaves differently is in `doc/ipados-backend.md`.
 
 ## Why not libuvc
 
@@ -25,9 +26,11 @@ ImageIO, and IOKit. Nothing is vendored. The deployment target is macOS
 
 ## Build layout
 
-The plugin builds with both CocoaPods (`macos/flutter_ffi_uvc.podspec`) and
-Swift Package Manager (`macos/flutter_ffi_uvc/Package.swift`) from one set
-of sources.
+The plugin builds with both CocoaPods (`darwin/flutter_ffi_uvc.podspec`) and
+Swift Package Manager (`darwin/flutter_ffi_uvc/Package.swift`) from one set
+of sources. iOS reads the same directory through `sharedDarwinSource: true`
+in `pubspec.yaml`, so the two platforms build from one implementation and
+the podspec and package carry both platforms.
 
 - Everything is Objective-C++ or C++. A Swift package target cannot mix
   Swift with C++, and the backend shares `src/common/uvc_requests.cpp` with

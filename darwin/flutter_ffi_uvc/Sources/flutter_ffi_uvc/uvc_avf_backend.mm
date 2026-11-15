@@ -7,8 +7,10 @@
 // error-code conventions (libuvc-style negative codes). The Dart layer
 // treats every backend identically.
 //
-// Streaming goes through AVFoundation and the system UVC driver. Controls go
-// to the device as UVC class requests over IOKit (uvc_usb_controls.cpp).
+// Streaming goes through AVFoundation and the system UVC driver. On macOS,
+// controls go to the device as UVC class requests over IOKit
+// (uvc_usb_controls.cpp); on iPadOS that file is a stub and controls are
+// unavailable, because iOS has no IOKit.
 
 #import "uvc_avf_backend.h"
 
@@ -16,6 +18,8 @@
 #import <CoreMedia/CoreMedia.h>
 #import <Foundation/Foundation.h>
 #import <ImageIO/ImageIO.h>
+
+#include <TargetConditionals.h>
 
 #include <algorithm>
 #include <atomic>
@@ -66,8 +70,11 @@ constexpr int kErrorBusy = -6;          // UVC_ERROR_BUSY
 constexpr int kErrorNotSupported = -12; // UVC_ERROR_NOT_SUPPORTED
 constexpr int kErrorInvalidMode = -51;  // UVC_ERROR_INVALID_MODE
 
-// 'usb ', the AVCaptureDevice.transportType of a USB camera.
+// 'usb ', the AVCaptureDevice.transportType of a USB camera. iOS has no
+// transportType property, so the filter that uses this is macOS-only.
+#if TARGET_OS_OSX
 constexpr int32_t kTransportTypeUsb = 0x75736220;
+#endif
 
 struct ModeInfo {
   int format = 0;
@@ -126,6 +133,12 @@ struct SessionRegistry {
   std::condition_variable unpinned;  // signalled when an entry's pins hit 0
   std::map<const uvc_session*, RegistryEntry> live;
   uint64_t next_id = 1;
+  // iPadOS runs one AVCaptureSession at a time, which makes the running
+  // stream a process-wide slot. The registry owns it because process-wide
+  // session state belongs there, next to the ids and pins. Session pointer,
+  // compared but never dereferenced; null while no preview runs, and never
+  // set on macOS, which allows several streams.
+  const Session* preview_owner = nullptr;
 };
 
 SessionRegistry registry;
@@ -136,10 +149,12 @@ SessionRegistry registry;
 // Lock order, outer to inner:
 //   lifecycle_mutex -> mutex -> rec_mutex -> error_mutex
 //   lifecycle_mutex -> ctrl_mutex -> error_mutex
+//   lifecycle_mutex -> registry.mutex (leaf)
 // The sample buffer delegate takes mutex and rec_mutex but never
 // lifecycle_mutex, so a lifecycle call may wait for the frame queue to drain
 // while holding it. Never wait for the frame queue with mutex or rec_mutex
-// held. Never invoke a listener with a session lock held.
+// held. Never invoke a listener with a session lock held. registry.mutex is
+// taken last and never while holding another lock.
 struct Session {
   // Serializes open, start, stop, and close, and guards the capture
   // objects below.
@@ -149,6 +164,7 @@ struct Session {
   UvcFrameDelegate* delegate = nil;
   id runtime_error_observer = nil;
   id disconnect_observer = nil;
+  id interruption_observer = nil;
   // Serial queue the sample buffer delegate runs on.
   dispatch_queue_t frame_queue = nil;
 
@@ -312,6 +328,7 @@ int AssignId(const std::string& unique_id) {
   return id;
 }
 
+#if TARGET_OS_OSX
 // Parses the decimal number that follows needle, 0 when absent.
 int ParseDecimalAfter(NSString* haystack, NSString* needle) {
   if (haystack == nil) return 0;
@@ -319,9 +336,11 @@ int ParseDecimalAfter(NSString* haystack, NSString* needle) {
   if (range.location == NSNotFound) return 0;
   return [[haystack substringFromIndex:NSMaxRange(range)] intValue];
 }
+#endif
 
 // The uniqueID of a UVC camera is "0x" + location id + vendor id + product
 // id in hex, the last two padded to four digits.
+#if TARGET_OS_OSX
 uvc_mac::UsbIds UsbIdsForDevice(AVCaptureDevice* device) {
   uvc_mac::UsbIds ids;
   ids.vendor_id =
@@ -350,16 +369,30 @@ uvc_mac::UsbIds UsbIdsForDevice(AVCaptureDevice* device) {
   }
   return ids;
 }
+#else
+// iPadOS has no modelID and no transportType, and the uniqueID layout is
+// undocumented, so an external camera there reports no USB ids at all. The
+// cost is controls, which iOS cannot reach anyway; streaming is unaffected.
+uvc_mac::UsbIds UsbIdsForDevice(AVCaptureDevice*) {
+  return uvc_mac::UsbIds();
+}
+#endif
 
-// The device type of an external camera, which was renamed in macOS 14.
+// The device type of an external camera: AVCaptureDeviceTypeExternal on macOS
+// 14 and iPadOS 17, which replaced the macOS-only ExternalUnknown.
 AVCaptureDeviceType ExternalType() {
-  if (@available(macOS 14.0, *)) {
+  if (@available(macOS 14.0, iOS 17.0, *)) {
     return AVCaptureDeviceTypeExternal;
   }
+#if TARGET_OS_OSX
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
   return AVCaptureDeviceTypeExternalUnknown;
 #pragma clang diagnostic pop
+#else
+  // iPadOS before 17 has no external camera support at all.
+  return nil;
+#endif
 }
 
 bool IsExternalType(AVCaptureDeviceType type) {
@@ -745,6 +778,45 @@ void OnFrame(Session& s, uint64_t generation, CMSampleBufferRef sample) {
   if (record_frame) WriteRecordingFrame(s, pixels, NowNs());
 }
 
+#if TARGET_OS_IOS
+// iPadOS runs one AVCaptureSession at a time: starting a second one stops the
+// first. Preview starts claim the registry's process-wide slot so a second
+// camera fails with UVC_ERROR_BUSY instead of silently killing the stream that
+// is already running. UVC_ERROR_BUSY is what an open of a claimed device
+// reports, so it is the code a caller already handles.
+bool ClaimPreview(Session& s) {
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  if (registry.preview_owner != nullptr && registry.preview_owner != &s) {
+    return false;
+  }
+  registry.preview_owner = &s;
+  return true;
+}
+
+void ReleasePreview(Session& s) {
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  if (registry.preview_owner == &s) registry.preview_owner = nullptr;
+}
+
+// Holds the claim for the duration of a start, which only keeps it on success.
+class PreviewClaim {
+ public:
+  explicit PreviewClaim(Session& session)
+      : session_(session), held_(ClaimPreview(session)) {}
+  ~PreviewClaim() {
+    if (held_) ReleasePreview(session_);
+  }
+  PreviewClaim(const PreviewClaim&) = delete;
+  PreviewClaim& operator=(const PreviewClaim&) = delete;
+  bool held() const { return held_; }
+  void keep() { held_ = false; }
+
+ private:
+  Session& session_;
+  bool held_;
+};
+#endif
+
 // Stops the stream and waits for a frame callback in progress. Caller holds
 // s.lifecycle_mutex and neither s.mutex nor s.rec_mutex.
 void StopPreviewLocked(Session& s) {
@@ -763,6 +835,10 @@ void StopPreviewLocked(Session& s) {
     [center removeObserver:s.disconnect_observer];
     s.disconnect_observer = nil;
   }
+  if (s.interruption_observer != nil) {
+    [center removeObserver:s.interruption_observer];
+    s.interruption_observer = nil;
+  }
   if (s.capture != nil) {
     @try {
       [s.capture stopRunning];
@@ -776,6 +852,9 @@ void StopPreviewLocked(Session& s) {
   s.capture = nil;
   s.output = nil;
   s.delegate = nil;
+#if TARGET_OS_IOS
+  ReleasePreview(s);
+#endif
 }
 
 // Caller holds s.lifecycle_mutex with the preview stopped.
@@ -1058,17 +1137,46 @@ int WriteJson(uint8_t* buffer, int buffer_length, const char* fmt, ...) {
 
 namespace uvc_mac {
 
+namespace {
+
+// Adds the device types this platform can list. Passing a type the system
+// does not know raises an exception, so each platform names only what its own
+// release supports.
+void AppendAvailableDeviceTypes(NSMutableArray<AVCaptureDeviceType>* types) {
+#if TARGET_OS_OSX
+  if (@available(macOS 14.0, *)) {
+    [types addObject:AVCaptureDeviceTypeExternal];
+  } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    [types addObject:AVCaptureDeviceTypeExternalUnknown];
+#pragma clang diagnostic pop
+  }
+  // macOS lists the built-in camera as Windows does.
+  [types addObject:AVCaptureDeviceTypeBuiltInWideAngleCamera];
+#else
+  // iPadOS lists external cameras only, and only from 17.0 on.
+  if (@available(iOS 17.0, *)) {
+    [types addObject:AVCaptureDeviceTypeExternal];
+  }
+#endif
+}
+
+}  // namespace
+
 AVCaptureDeviceDiscoverySession* CreateDiscoverySession() {
+  NSMutableArray<AVCaptureDeviceType>* types = [NSMutableArray array];
+  AppendAvailableDeviceTypes(types);
+  if (types.count == 0) return nil;
   return [AVCaptureDeviceDiscoverySession
-      discoverySessionWithDeviceTypes:@[
-        ExternalType(), AVCaptureDeviceTypeBuiltInWideAngleCamera
-      ]
+      discoverySessionWithDeviceTypes:types
                             mediaType:AVMediaTypeVideo
                              position:AVCaptureDevicePositionUnspecified];
 }
 
 bool IsListedDevice(AVCaptureDevice* device) {
   if (device == nil || ![device hasMediaType:AVMediaTypeVideo]) return false;
+#if TARGET_OS_OSX
   if ([device.deviceType
           isEqualToString:AVCaptureDeviceTypeBuiltInWideAngleCamera]) {
     // A Continuity Camera reports the built-in type unless the app opts in
@@ -1082,6 +1190,11 @@ bool IsListedDevice(AVCaptureDevice* device) {
   if (device.transportType != kTransportTypeUsb) return false;
   const UsbIds ids = UsbIdsForDevice(device);
   return ids.vendor_id != 0 || ids.product_id != 0;
+#else
+  // iPadOS lists external UVC cameras only. The built-in cameras are not
+  // what this package is for, and there is no transportType to check.
+  return IsExternalType(device.deviceType);
+#endif
 }
 
 DeviceInfo InfoForDevice(AVCaptureDevice* device) {
@@ -1090,7 +1203,10 @@ DeviceInfo InfoForDevice(AVCaptureDevice* device) {
   const UsbIds ids = UsbIdsForDevice(device);
   info.unique_id = Utf8(device.uniqueID);
   info.name = Utf8(device.localizedName);
-  info.manufacturer = Utf8(device.manufacturer);
+  // manufacturer arrived in iOS 14.
+  if (@available(iOS 14.0, *)) {
+    info.manufacturer = Utf8(device.manufacturer);
+  }
   info.vendor_id = ids.vendor_id;
   info.product_id = ids.product_id;
   info.device_id = AssignId(info.unique_id);
@@ -1100,7 +1216,9 @@ DeviceInfo InfoForDevice(AVCaptureDevice* device) {
 std::vector<DeviceInfo> ListDevices() {
   std::vector<DeviceInfo> result;
   @autoreleasepool {
-    for (AVCaptureDevice* device in CreateDiscoverySession().devices) {
+    AVCaptureDeviceDiscoverySession* discovery = CreateDiscoverySession();
+    if (discovery == nil) return result;
+    for (AVCaptureDevice* device in discovery.devices) {
       if (!IsListedDevice(device)) continue;
       result.push_back(InfoForDevice(device));
     }
@@ -1217,16 +1335,14 @@ FFI_PLUGIN_EXPORT void uvc_session_destroy(uvc_session_t* session) {
 
 void uvc_session_finalize(uvc_session_t* session) try {
   if (session == nullptr) return;
+  std::shared_ptr<Session> s = Impl(session);
   // Closing first leaves the session locks free while the retire below
   // waits for pins a plugin still holds.
-  {
-    std::shared_ptr<Session> s = Impl(session);
-    if (s) {
-      @autoreleasepool {
-        std::lock_guard<std::mutex> lock(s->lifecycle_mutex);
-        StopPreviewLocked(*s);
-        CloseDeviceLocked(*s);
-      }
+  if (s) {
+    @autoreleasepool {
+      std::lock_guard<std::mutex> lock(s->lifecycle_mutex);
+      StopPreviewLocked(*s);
+      CloseDeviceLocked(*s);
     }
   }
   // Refuse new pins, wait for existing ones, then unlink. Only after this
@@ -1237,9 +1353,12 @@ void uvc_session_finalize(uvc_session_t* session) try {
     if (it == registry.live.end() || it->second.destroying) return;
     it->second.destroying = true;
     registry.unpinned.wait(lock, [&] { return it->second.pins == 0; });
+    // A session that was streaming when it was destroyed must not keep the
+    // process-wide preview slot. StopPreviewLocked already handed it back;
+    // this covers a teardown that skipped it.
+    if (registry.preview_owner == s.get()) registry.preview_owner = nullptr;
     registry.live.erase(it);
   }
-  std::shared_ptr<Session> s = Impl(session);
   if (s) {
     std::lock_guard<std::mutex> lock(s->listener_mutex);
     s->frame_listener = nullptr;
@@ -1295,7 +1414,13 @@ FFI_PLUGIN_EXPORT int uvc_open_fd(uvc_session_t* session, int fd) try {
       }
       // Controls are optional. A device without them still streams. A
       // built-in camera that is not a USB device has no ids to find it by.
+#if TARGET_OS_OSX
       std::string usb_error = "This camera has no UVC controls";
+#else
+      // There is no IOKit on iPadOS, so the ids above are always 0 and the
+      // open below never runs.
+      std::string usb_error = "iPadOS does not expose UVC controls";
+#endif
       std::unique_ptr<uvc_mac::UsbControlDevice> usb;
       const uvc_mac::UsbIds ids = UsbIdsForDevice(device);
       if (ids.vendor_id != 0 || ids.product_id != 0) {
@@ -1324,6 +1449,14 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
   @autoreleasepool {
     std::lock_guard<std::mutex> lifecycle(s.lifecycle_mutex);
     StopPreviewLocked(s);
+#if TARGET_OS_IOS
+    PreviewClaim claim(s);
+    if (!claim.held()) {
+      SetErrorMessage(
+          s, "Another camera is already streaming. iPadOS runs one at a time");
+      return kErrorBusy;
+    }
+#endif
 
     AVCaptureDevice* device = nil;
     ModeInfo mode;
@@ -1423,6 +1556,20 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
         device.activeFormat = mode.native;
         device.activeVideoMinFrameDuration = mode.frame_duration;
         device.activeVideoMaxFrameDuration = mode.frame_duration;
+#if TARGET_OS_IOS
+        // iPadOS may pre-rotate delivered buffers (some iPad generations
+        // default to 180). The frame pipeline and the preview transform
+        // assume sensor orientation, so ask for none. Must be set before
+        // startRunning.
+        AVCaptureConnection* connection =
+            [output connectionWithMediaType:AVMediaTypeVideo];
+        if (@available(iOS 17.0, *)) {
+          if (connection != nil &&
+              [connection isVideoRotationAngleSupported:0]) {
+            connection.videoRotationAngle = 0;
+          }
+        }
+#endif
         [capture startRunning];
       } @catch (NSException* exception) {
         failure = exception.reason ?: @"exception";
@@ -1439,6 +1586,10 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
       SetErrorMessage(s, "Failed to start the stream: %s", failure.UTF8String);
       return kErrorIo;
     }
+#if TARGET_OS_IOS
+    // The stream owns the process-wide slot until it stops.
+    claim.keep();
+#endif
 
     std::weak_ptr<Session> weak(owner);
     NSNotificationCenter* center = NSNotificationCenter.defaultCenter;
@@ -1453,6 +1604,10 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
                   ReportError(*target, "Capture session error: %s",
                               runtime.localizedDescription.UTF8String
                                   ?: "unknown");
+#if TARGET_OS_IOS
+                  // The stream is over even when the app never stops it.
+                  ReleasePreview(*target);
+#endif
                 }];
     s.disconnect_observer = [center
         addObserverForName:AVCaptureDeviceWasDisconnectedNotification
@@ -1462,6 +1617,36 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
                   std::shared_ptr<Session> target = weak.lock();
                   if (!target) return;
                   ReportError(*target, "Video capture device disconnected");
+#if TARGET_OS_IOS
+                  // Nothing is streaming any more, so the slot is free for the
+                  // next camera even if this session is not stopped yet.
+                  ReleasePreview(*target);
+#endif
+                }];
+    // An interruption stops frame delivery without a runtime error. The
+    // session resumes by itself when the interruption ends, so the preview
+    // slot stays claimed.
+    s.interruption_observer = [center
+        addObserverForName:AVCaptureSessionWasInterruptedNotification
+                    object:capture
+                     queue:nil
+                usingBlock:^(NSNotification* note) {
+                  std::shared_ptr<Session> target = weak.lock();
+                  if (!target) return;
+#if TARGET_OS_IOS
+                  NSNumber* reason =
+                      note.userInfo[AVCaptureSessionInterruptionReasonKey];
+                  ReportError(*target,
+                              "Capture session interrupted (reason %d); frames "
+                              "stop until the interruption ends",
+                              reason != nil ? reason.intValue : 0);
+#else
+                  // The reason key is iOS-only, though the notification is
+                  // posted on macOS as well.
+                  ReportError(*target,
+                              "Capture session interrupted; frames stop until "
+                              "the interruption ends");
+#endif
                 }];
   }
   return 0;

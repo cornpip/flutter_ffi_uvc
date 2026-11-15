@@ -16,7 +16,7 @@ on:
       - "android/**"
       - "linux/**"
       - "windows/**"
-      - "macos/**"
+      - "darwin/**"
       - "example/**"
       - "pubspec.yaml"
       - ".github/workflows/build.yml"
@@ -29,7 +29,7 @@ on:
       - "android/**"
       - "linux/**"
       - "windows/**"
-      - "macos/**"
+      - "darwin/**"
       - "example/**"
       - "pubspec.yaml"
       - ".github/workflows/build.yml"
@@ -128,3 +128,19 @@ jobs:
       - name: Build example (release)
         working-directory: example
         run: flutter build macos --release
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          cache: true
+      - run: flutter config --enable-swift-package-manager
+      # No device or camera in CI: this proves the backend compiles and links
+      # for iOS, not that iPadOS streams.
+      - name: Build example (release)
+        working-directory: example
+        run: flutter build ios --release --no-codesign

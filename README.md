@@ -16,6 +16,8 @@ diagnostics.
 - Linux(x64, arm64): see [Linux setup](#linux-setup) for camera access
 - macOS(arm64, x64) 10.15 or later: see [macOS setup](#macos-setup) for the
   app's Info.plist and entitlements
+- iPadOS 17 or later on USB-C iPads: see [iPadOS setup](#ipados-setup) for
+  what the platform does and does not offer
 - Dart SDK: `>=3.8.1 <4.0.0`
 
 ## Installation
@@ -30,7 +32,8 @@ flutter pub add flutter_ffi_uvc
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 
 // 1. Open the first attached UVC camera
-//    (requests USB permission on Android, opens directly elsewhere).
+//    (requests USB permission on Android, camera access on Apple platforms,
+//    and needs nothing extra on Windows or Linux).
 final devices = await uvcCamera.listUsbDevices();
 await uvcCamera.openUsbDevice(devices.first.deviceId);
 
@@ -94,7 +97,8 @@ progress, which then reports `UvcErrorCode.interrupted`.
 Two cameras behind one USB 2.0 hub, or on a phone's single port, share one
 bus. The second stream may then only start in a lower mode or fail, and
 `startPreviewAuto()` falls back to smaller modes. On a desktop, separate
-root ports give each camera its own bus.
+root ports give each camera its own bus. iPadOS runs one camera at a time: a
+second preview start fails with `UvcErrorCode.busy`.
 
 ### USB Device discovery and opening
 
@@ -114,7 +118,7 @@ A `PlatformException` means the platform layer failed, for example a denied
 USB permission. On Linux the device node must be accessible, see
 [Linux setup](#linux-setup). On macOS the open asks for camera access if the
 user has not decided yet, and fails with `UvcErrorCode.access` when it is
-refused.
+refused. iPadOS behaves the same way; see [iPadOS setup](#ipados-setup).
 
 If a device is already open, `openUsbDevice` closes it first, so switching
 cameras is just another `openUsbDevice` call.
@@ -317,7 +321,7 @@ uvcCamera.stopVideoRecording();
   normal finish so you know the file is complete.
 - `isRecording` reports whether a recording is in progress. Audio is not
   recorded.
-- Recording is available on Android, Windows, and macOS. On Linux
+- Recording is available on Android, Windows, macOS, and iPadOS. On Linux
   `startVideoRecording()` throws. Use `takePicture()` and `copyLatestFrame()`
   there.
 
@@ -325,8 +329,8 @@ uvcCamera.stopVideoRecording();
 
 On Android, H.264 modes are listed in `supportedModes()` and work like any
 other format, but `startPreviewAuto()` never selects them. Opt in with an
-explicit `startPreview()`. Windows, Linux, and macOS do not list H.264
-modes. The other formats cover every advertised resolution.
+explicit `startPreview()`. Windows, Linux, macOS, and iPadOS do not list
+H.264 modes. The other formats cover every advertised resolution.
 
 ### Controls
 
@@ -358,6 +362,10 @@ if (panTilt != null) {
 `debugBmControls()` lists the controls a device advertises without probing
 them, for devices that advertise a control but reject reads of it. Android,
 Linux, and macOS only.
+
+iPadOS has no controls at all: `supportedControls()` and `debugBmControls()`
+are empty and setters throw `UvcErrorCode.notSupported`. See
+[iPadOS setup](#ipados-setup).
 
 ### Diagnostics
 
@@ -456,8 +464,8 @@ is `UvcLogLevel.info`.
 uvcCamera.setLogLevel(UvcLogLevel.warn);
 ```
 
-Native logs go to logcat on Android and stderr on Linux. The Windows and
-macOS backends report problems through `streamErrors` and `lastError`
+Native logs go to logcat on Android and stderr on Linux. The Apple and
+Windows backends report problems through `streamErrors` and `lastError`
 instead.
 
 ## Linux setup
@@ -513,6 +521,58 @@ Flutter 3.44 builds plugins with Swift Package Manager by default, which
 puts the plugin inside the app binary. Archiving the app then removes the
 function names this package looks up at run time, and every camera call
 fails.
+
+## iPadOS setup
+
+External cameras need iPadOS 17 or later on an iPad with a USB-C connector,
+and a camera that follows the UVC specification. The iPad's own cameras are
+not listed. iPhones report no devices whatever their iOS version; the package
+links and loads there, but `listUsbDevices()` stays empty and no permission is
+requested.
+
+Add the camera usage description to `ios/Runner/Info.plist`. Without it the
+app is terminated when it first asks for the camera.
+
+```xml
+<key>NSCameraUsageDescription</key>
+<string>Shows the preview of the connected USB camera.</string>
+```
+
+No entitlement is needed, and the package does not raise the app's iOS
+deployment target.
+
+**On Flutter 3.44 or later, add this line to
+`ios/Flutter/Release.xcconfig`. Without it, the package does not work in an
+app archived in Xcode for distribution or uploaded to TestFlight.**
+
+```
+STRIP_STYLE = non-global
+```
+
+iOS links plugins into the app binary and an archive strips its symbols,
+which removes the function names this package looks up at run time. The same
+applies to macOS.
+
+What iPadOS does not offer, and what the package does instead:
+
+- **One camera at a time.** Starting a second preview while one is running
+  fails with `UvcErrorCode.busy`; the running stream is left alone.
+  Several cameras at once would need `AVCaptureMultiCamSession`.
+- **No camera controls.** `supportedControls()` and `debugBmControls()` are
+  empty and the setters throw `UvcErrorCode.notSupported`. AVFoundation
+  exposes zoom, exposure, and focus, but those are not UVC values.
+- **NV12 only.** iPadOS converts every external camera stream to one of its
+  own formats before the app sees it, so `supportedModes()` lists NV12 modes
+  at the camera's resolutions and frame rates, even for an MJPEG camera.
+- **No USB ids.** `UvcUsbDevice.vendorId` and `productId` are 0.
+- **Manual rotation.** An external camera moves independently of the iPad,
+  so nothing rotates the preview for you. Use `setPreviewTransform()`.
+- **Backgrounding stops the stream.** On iPadOS 26 the app received no
+  interruption notification while it was suspended, so the preview stays
+  frozen when you come back. Enable `enableStallDetection` with
+  `autoRestart: true` and the watchdog restarts the stream once frames stop.
+- **Paths in the app container.** Recording writes where the app may write,
+  for example under its Documents directory.
 
 ## Example app
 

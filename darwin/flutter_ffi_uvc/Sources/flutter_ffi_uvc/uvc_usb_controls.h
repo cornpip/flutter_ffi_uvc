@@ -8,6 +8,11 @@
 //
 // A sandboxed app needs the com.apple.security.device.usb entitlement.
 // Without it Open fails and the session streams with no controls.
+//
+// On iPadOS this header stays the same but the implementation is a stub:
+// iOS has no IOKit, so Open always fails and controls are unavailable.
+
+#include <TargetConditionals.h>
 
 #include <cstdint>
 #include <memory>
@@ -56,11 +61,18 @@ class UsbControlDevice {
  private:
   UsbControlDevice() = default;
 
+#if TARGET_OS_OSX
+  // The transport. Only macOS has IOKit to fill these in; the iOS stub fails
+  // inside Open, before a device exists.
   // IOUSBDeviceInterface**, kept opaque so this header stays free of IOKit.
   void* device_ = nullptr;
   int interface_number_ = -1;
   int camera_terminal_id_ = -1;
   int processing_unit_id_ = -1;
+#endif
+  // Descriptor bmControls, filled in by the macOS implementation and read by
+  // the getters above. Zero in the iOS stub, which never constructs an
+  // object.
   uint64_t ct_controls_ = 0;
   uint64_t pu_controls_ = 0;
 };

@@ -6,6 +6,8 @@
   instance that is garbage collected without `dispose()`.
 - Windows zero-copy preview path. Render NV12/YUY2 to a DXGI shared texture
   instead of the CPU RGBA pixel-buffer path.
+- Several cameras on iPadOS. `AVCaptureMultiCamSession` is the only way to
+  run more than one stream there.
 
 ## Considered and rejected
 
