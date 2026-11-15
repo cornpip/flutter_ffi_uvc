@@ -95,8 +95,10 @@ with `UVC_ERROR_BUSY` instead of silently killing the stream that is running.
   reaches nobody. The start checks the device and the capture session once
   more after adding them, on macOS as well. A missing device fails it with
   `UVC_ERROR_NO_DEVICE`, which ends an automatic mode search. A session that
-  stopped fails it with `UVC_ERROR_IO`. An interrupted session is left
-  alone, because it resumes by itself.
+  stopped fails it with `UVC_ERROR_IO`. On iPadOS an interrupted session is
+  left alone, because it resumes by itself. macOS cannot ask a session
+  whether it is interrupted, so there a session that is not running always
+  fails the start.
 - `UVC_ERROR_BUSY` is the code an open of a claimed device already returns, so
   a caller handles it the same way.
 - `UVC_ERROR_NOT_SUPPORTED` would be the wrong report here: the backend can

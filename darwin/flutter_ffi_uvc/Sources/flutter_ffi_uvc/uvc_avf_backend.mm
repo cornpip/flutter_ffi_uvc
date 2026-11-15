@@ -1704,9 +1704,14 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
       SetErrorMessage(s, "Video capture device disappeared");
       return kErrorNoDevice;
     }
+    bool stopped = !capture.isRunning;
+#if TARGET_OS_IOS
     // An interrupted session is not running either, but it resumes by
-    // itself and the interruption observer has reported it.
-    if (!capture.isRunning && !capture.isInterrupted) {
+    // itself and the interruption observer has reported it. macOS has no
+    // way to ask a session whether it is interrupted.
+    if (capture.isInterrupted) stopped = false;
+#endif
+    if (stopped) {
       StopPreviewLocked(s);
       SetErrorMessage(s, "The stream ended while it was starting");
       return kErrorIo;
