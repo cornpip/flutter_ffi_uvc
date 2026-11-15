@@ -1,13 +1,13 @@
-## 1.2.0-wip
+## 1.2.0
 
 - add iPadOS support (17.0 or later, USB-C iPads)
   - `supportedControls()`, `debugBmControls()`, and the control setters are
     unavailable there, because iOS offers no way to send UVC class requests
   - `listUsbDevices()` reports `vendorId` and `productId` as 0, which iPadOS
     does not expose, and lists external cameras only
-  - `supportedModes()` lists NV12 modes only, the format iPadOS converts every
-    external camera stream to
-  - one camera streams at a time; a second preview start fails with
+  - `supportedModes()` is expected to list NV12 modes, because iPadOS
+    converts an external camera's stream before the app sees it
+  - one camera streams at a time, and a second preview start fails with
     `UvcErrorCode.busy`
 - fix
   - a `streamErrors` message about an earlier preview arriving on the
