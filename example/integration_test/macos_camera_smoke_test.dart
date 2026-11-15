@@ -45,14 +45,7 @@ void main() {
       }
       expect(devices, isNotEmpty, reason: 'no UVC camera attached');
 
-      // macOS lists the built-in camera too. A device with a USB vendor id
-      // is taken first, so an attached camera wins over it.
-      final UvcUsbDevice device = devices.firstWhere(
-        (UvcUsbDevice d) => d.vendorId != 0,
-        orElse: () => devices.first,
-      );
-      log('using device ${device.deviceId}');
-      await camera.openUsbDevice(device.deviceId);
+      await camera.openUsbDevice(devices.first.deviceId);
       final List<UvcCameraMode> modes = camera.supportedModes();
       log('${modes.length} modes, '
           '${camera.supportedControls().length} controls');
