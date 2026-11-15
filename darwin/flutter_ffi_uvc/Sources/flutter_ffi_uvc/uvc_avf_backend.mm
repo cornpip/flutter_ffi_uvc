@@ -147,6 +147,12 @@ struct SessionRegistry {
 
 SessionRegistry registry;
 
+// Frees the preview slot. Caller holds registry.mutex.
+void ClearPreviewSlotLocked() {
+  registry.preview_owner = nullptr;
+  registry.preview_generation = 0;
+}
+
 // One camera session. Everything a Dart UvcCamera instance touches lives
 // here.
 //
@@ -782,6 +788,14 @@ void OnFrame(Session& s, uint64_t generation, CMSampleBufferRef sample) {
   if (record_frame) WriteRecordingFrame(s, pixels, NowNs());
 }
 
+// Whether generation is the stream s is running now. A notification block
+// that was already running when its observer was removed can arrive after the
+// stream stopped or was replaced, and must not act on the session then.
+bool IsCurrentStream(Session& s, uint64_t generation) {
+  std::lock_guard<std::mutex> lock(s.mutex);
+  return s.previewing.load() && s.generation == generation;
+}
+
 #if TARGET_OS_IOS
 // iPadOS runs one AVCaptureSession at a time: starting a second one stops the
 // first. Preview starts claim the registry's process-wide slot so a second
@@ -800,10 +814,7 @@ bool ClaimPreview(Session& s) {
 
 void ReleasePreview(Session& s) {
   std::lock_guard<std::mutex> lock(registry.mutex);
-  if (registry.preview_owner == &s) {
-    registry.preview_owner = nullptr;
-    registry.preview_generation = 0;
-  }
+  if (registry.preview_owner == &s) ClearPreviewSlotLocked();
 }
 
 // Records which stream of s holds the slot once its start has succeeded.
@@ -819,8 +830,7 @@ void ReleaseLostPreview(Session& s, uint64_t generation) {
   std::lock_guard<std::mutex> lock(registry.mutex);
   if (registry.preview_owner == &s &&
       registry.preview_generation == generation) {
-    registry.preview_owner = nullptr;
-    registry.preview_generation = 0;
+    ClearPreviewSlotLocked();
   }
 }
 
@@ -835,8 +845,9 @@ class PreviewClaim {
   PreviewClaim(const PreviewClaim&) = delete;
   PreviewClaim& operator=(const PreviewClaim&) = delete;
   bool held() const { return held_; }
+  // Only called on a held claim.
   void keep(uint64_t generation) {
-    if (held_) KeepPreview(session_, generation);
+    KeepPreview(session_, generation);
     held_ = false;
   }
 
@@ -1385,10 +1396,7 @@ void uvc_session_finalize(uvc_session_t* session) try {
     // A session that was streaming when it was destroyed must not keep the
     // process-wide preview slot. StopPreviewLocked already handed it back;
     // this covers a teardown that skipped it.
-    if (registry.preview_owner == s.get()) {
-      registry.preview_owner = nullptr;
-      registry.preview_generation = 0;
-    }
+    if (registry.preview_owner == s.get()) ClearPreviewSlotLocked();
     registry.live.erase(it);
   }
   if (s) {
@@ -1632,6 +1640,7 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
                 usingBlock:^(NSNotification* note) {
                   std::shared_ptr<Session> target = weak.lock();
                   if (!target) return;
+                  if (!IsCurrentStream(*target, generation)) return;
                   NSError* runtime = note.userInfo[AVCaptureSessionErrorKey];
                   ReportError(*target, "Capture session error: %s",
                               runtime.localizedDescription.UTF8String
@@ -1648,6 +1657,7 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
                 usingBlock:^(NSNotification* note) {
                   std::shared_ptr<Session> target = weak.lock();
                   if (!target) return;
+                  if (!IsCurrentStream(*target, generation)) return;
                   ReportError(*target, "Video capture device disconnected");
 #if TARGET_OS_IOS
                   // Nothing is streaming any more, so the slot is free for the
@@ -1665,6 +1675,7 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
                 usingBlock:^(NSNotification* note) {
                   std::shared_ptr<Session> target = weak.lock();
                   if (!target) return;
+                  if (!IsCurrentStream(*target, generation)) return;
 #if TARGET_OS_IOS
                   NSNumber* reason =
                       note.userInfo[AVCaptureSessionInterruptionReasonKey];
@@ -1680,6 +1691,15 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
                               "the interruption ends");
 #endif
                 }];
+
+    // A disconnect or runtime error posted before the observers above were
+    // added reached nobody. Fail the start instead of keeping a stream, and
+    // on iPadOS the preview slot, that is already dead.
+    if (!device.connected || !capture.isRunning) {
+      StopPreviewLocked(s);
+      SetErrorMessage(s, "The stream ended while it was starting");
+      return kErrorIo;
+    }
   }
   return 0;
 } catch (...) {
