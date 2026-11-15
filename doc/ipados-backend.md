@@ -88,9 +88,13 @@ with `UVC_ERROR_BUSY` instead of silently killing the stream that is running.
   released by `StopPreviewLocked` on every teardown path and by
   `uvc_session_finalize` when it retires an entry.
 - The slot also records the generation of the stream that holds it. The
-  observers below release it only for that generation, so a notification
-  about an earlier stream of the same session cannot free the slot of the
-  stream that replaced it.
+  observers below act only for the stream they were added for, so a
+  notification about an earlier stream of the same session neither reports
+  an error on the stream that replaced it nor frees its slot.
+- A disconnect or runtime error posted before the observers are added
+  reaches nobody. The start checks the device and the capture session once
+  more after adding them and fails with `UVC_ERROR_IO` if the stream is
+  already gone, on macOS as well.
 - `UVC_ERROR_BUSY` is the code an open of a claimed device already returns, so
   a caller handles it the same way.
 - `UVC_ERROR_NOT_SUPPORTED` would be the wrong report here: the backend can
@@ -191,13 +195,27 @@ The build, the symbols in both packaging modes, and the compile at iOS 13.0
 are verified. Streaming, unplug and replug, and backgrounding were run on an
 iPad Pro; see "Measured on hardware" above.
 
-Three behaviors have no recorded result and are still assumptions taken from
-Apple's documentation and the WWDC23 session on external cameras:
+Three platform behaviors have no recorded result and are still assumptions
+taken from Apple's documentation and the WWDC23 session on external cameras.
+The backend does not depend on any of them:
 
-- the NV12-only mode list
-- the identity of a `deviceId` across an unplug and replug
-- the default orientation of delivered buffers
+- The NV12-only mode list. `EnumerateModesLocked` lists whatever formats the
+  device reports and maps YUYV, UYVY, NV12, and MJPEG, as on macOS. If iPadOS
+  reports another of these, the mode shows up under its own name and streams
+  the same way, because the capture output asks for BGRA either way. Only the
+  "NV12 only" statement in the README, the CHANGELOG, and the API comments
+  would be inaccurate.
+- The identity of a `deviceId` across an unplug and replug. The id is keyed
+  by `uniqueID`. If iPadOS gives a replugged camera a new `uniqueID`, it gets
+  a new `deviceId`, and an app that lists devices again or follows
+  `deviceEvents` opens it as usual.
+- The default orientation of delivered buffers. The connection is pinned to
+  `videoRotationAngle = 0` before the stream starts, so the default is not
+  used and frames arrive in sensor orientation, as on macOS. The default
+  only matters if a connection does not support angle 0. Even then the frame
+  size is read from each buffer, not taken from the mode, so frames are
+  delivered intact and `setPreviewTransform()` corrects the rotation.
 
-The generation check on the preview slot is also read from the code only. The
-case it guards against, a notification that arrives after a restart, was not
-reproduced.
+The generation checks and the check after the observers are added are also
+read from the code only. The cases they guard against, a notification that
+arrives after a restart or before the observers exist, were not reproduced.
