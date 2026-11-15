@@ -139,6 +139,10 @@ struct SessionRegistry {
   // compared but never dereferenced; null while no preview runs, and never
   // set on macOS, which allows several streams.
   const Session* preview_owner = nullptr;
+  // Session::generation of the stream that holds the slot, 0 while a start
+  // is still in progress. It tells the running stream from an earlier one of
+  // the same session.
+  uint64_t preview_generation = 0;
 };
 
 SessionRegistry registry;
@@ -790,12 +794,34 @@ bool ClaimPreview(Session& s) {
     return false;
   }
   registry.preview_owner = &s;
+  registry.preview_generation = 0;
   return true;
 }
 
 void ReleasePreview(Session& s) {
   std::lock_guard<std::mutex> lock(registry.mutex);
-  if (registry.preview_owner == &s) registry.preview_owner = nullptr;
+  if (registry.preview_owner == &s) {
+    registry.preview_owner = nullptr;
+    registry.preview_generation = 0;
+  }
+}
+
+// Records which stream of s holds the slot once its start has succeeded.
+void KeepPreview(Session& s, uint64_t generation) {
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  if (registry.preview_owner == &s) registry.preview_generation = generation;
+}
+
+// Releases the slot from a notification about one stream. A block that was
+// already running when its observer was removed can arrive after the session
+// has restarted; the generation keeps it from freeing the new stream's slot.
+void ReleaseLostPreview(Session& s, uint64_t generation) {
+  std::lock_guard<std::mutex> lock(registry.mutex);
+  if (registry.preview_owner == &s &&
+      registry.preview_generation == generation) {
+    registry.preview_owner = nullptr;
+    registry.preview_generation = 0;
+  }
 }
 
 // Holds the claim for the duration of a start, which only keeps it on success.
@@ -809,7 +835,10 @@ class PreviewClaim {
   PreviewClaim(const PreviewClaim&) = delete;
   PreviewClaim& operator=(const PreviewClaim&) = delete;
   bool held() const { return held_; }
-  void keep() { held_ = false; }
+  void keep(uint64_t generation) {
+    if (held_) KeepPreview(session_, generation);
+    held_ = false;
+  }
 
  private:
   Session& session_;
@@ -1356,7 +1385,10 @@ void uvc_session_finalize(uvc_session_t* session) try {
     // A session that was streaming when it was destroyed must not keep the
     // process-wide preview slot. StopPreviewLocked already handed it back;
     // this covers a teardown that skipped it.
-    if (registry.preview_owner == s.get()) registry.preview_owner = nullptr;
+    if (registry.preview_owner == s.get()) {
+      registry.preview_owner = nullptr;
+      registry.preview_generation = 0;
+    }
     registry.live.erase(it);
   }
   if (s) {
@@ -1588,7 +1620,7 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
     }
 #if TARGET_OS_IOS
     // The stream owns the process-wide slot until it stops.
-    claim.keep();
+    claim.keep(generation);
 #endif
 
     std::weak_ptr<Session> weak(owner);
@@ -1606,7 +1638,7 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
                                   ?: "unknown");
 #if TARGET_OS_IOS
                   // The stream is over even when the app never stops it.
-                  ReleasePreview(*target);
+                  ReleaseLostPreview(*target, generation);
 #endif
                 }];
     s.disconnect_observer = [center
@@ -1620,7 +1652,7 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(uvc_session_t* session,
 #if TARGET_OS_IOS
                   // Nothing is streaming any more, so the slot is free for the
                   // next camera even if this session is not stopped yet.
-                  ReleasePreview(*target);
+                  ReleaseLostPreview(*target, generation);
 #endif
                 }];
     // An interruption stops frame delivery without a runtime error. The
