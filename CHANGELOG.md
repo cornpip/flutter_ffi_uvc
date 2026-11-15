@@ -9,6 +9,11 @@
     external camera stream to
   - one camera streams at a time; a second preview start fails with
     `UvcErrorCode.busy`
+- fix
+  - a `streamErrors` message about an earlier preview arriving on the
+    preview that replaced it on macOS
+  - `startPreview()` reporting success on macOS when the camera was
+    unplugged or the stream failed while it was starting
 
 ## 1.1.2
 
