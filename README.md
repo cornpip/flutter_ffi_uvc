@@ -524,11 +524,12 @@ fails.
 
 ## iPadOS setup
 
-External cameras need iPadOS 17 or later on an iPad with a USB-C connector,
+External cameras need iPadOS 17 or later, an iPad with a USB-C connector,
 and a camera that follows the UVC specification. The iPad's own cameras are
-not listed. iPhones report no devices whatever their iOS version; the package
-links and loads there, but `listUsbDevices()` stays empty and no permission is
-requested.
+not listed.
+
+On an iPhone the package builds and loads, but `listUsbDevices()` is always
+empty and no permission is requested.
 
 Add the camera usage description to `ios/Runner/Info.plist`. Without it the
 app is terminated when it first asks for the camera.
@@ -538,7 +539,7 @@ app is terminated when it first asks for the camera.
 <string>Shows the preview of the connected USB camera.</string>
 ```
 
-No entitlement is needed, and the package does not raise the app's iOS
+No entitlement is needed. The package does not raise the app's iOS
 deployment target.
 
 **On Flutter 3.44 or later, add this line to
@@ -549,30 +550,29 @@ app archived in Xcode for distribution or uploaded to TestFlight.**
 STRIP_STYLE = non-global
 ```
 
-iOS links plugins into the app binary and an archive strips its symbols,
-which removes the function names this package looks up at run time. The same
-applies to macOS.
+The reason is the same as on macOS. Flutter 3.44 builds plugins with Swift
+Package Manager by default, which puts the plugin inside the app binary.
+Archiving the app then removes the function names this package looks up at
+run time, and every camera call fails.
 
-What iPadOS does not offer, and what the package does instead:
+### Limitations
 
 - **One camera at a time.** Starting a second preview while one is running
-  fails with `UvcErrorCode.busy`; the running stream is left alone.
-  Several cameras at once would need `AVCaptureMultiCamSession`.
+  fails with `UvcErrorCode.busy`. The running stream is left alone.
 - **No camera controls.** `supportedControls()` and `debugBmControls()` are
-  empty and the setters throw `UvcErrorCode.notSupported`. AVFoundation
-  exposes zoom, exposure, and focus, but those are not UVC values.
-- **NV12 only.** iPadOS converts every external camera stream to one of its
-  own formats before the app sees it, so `supportedModes()` lists NV12 modes
-  at the camera's resolutions and frame rates, even for an MJPEG camera.
+  empty, and the setters throw `UvcErrorCode.notSupported`.
+- **NV12 modes.** iPadOS converts an external camera's stream to its own
+  format before the app sees it. Expect `supportedModes()` to list NV12
+  modes at the camera's resolutions and frame rates, also for an MJPEG
+  camera.
 - **No USB ids.** `UvcUsbDevice.vendorId` and `productId` are 0.
 - **Manual rotation.** An external camera moves independently of the iPad,
   so nothing rotates the preview for you. Use `setPreviewTransform()`.
-- **Backgrounding stops the stream.** On iPadOS 26 the app received no
-  interruption notification while it was suspended, so the preview stays
-  frozen when you come back. Enable `enableStallDetection` with
-  `autoRestart: true` and the watchdog restarts the stream once frames stop.
-- **Paths in the app container.** Recording writes where the app may write,
-  for example under its Documents directory.
+- **Backgrounding stops the stream.** The preview stays frozen when the app
+  comes back. Call `enableStallDetection()` with `autoRestart: true`, and the
+  preview restarts once frames stop.
+- **Paths in the app container.** Recording can only write inside the app
+  container, for example under its Documents directory.
 
 ## Example app
 
