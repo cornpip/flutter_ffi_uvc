@@ -87,6 +87,10 @@ with `UVC_ERROR_BUSY` instead of silently killing the stream that is running.
 - The slot lives in the session registry, next to the ids and pins, and is
   released by `StopPreviewLocked` on every teardown path and by
   `uvc_session_finalize` when it retires an entry.
+- The slot also records the generation of the stream that holds it. The
+  observers below release it only for that generation, so a notification
+  about an earlier stream of the same session cannot free the slot of the
+  stream that replaced it.
 - `UVC_ERROR_BUSY` is the code an open of a claimed device already returns, so
   a caller handles it the same way.
 - `UVC_ERROR_NOT_SUPPORTED` would be the wrong report here: the backend can
@@ -181,11 +185,19 @@ and macOS, and nothing has to be released after it. `openFd` and `closeFd`
 stay Android-only in Dart, which throws `UnsupportedError` there; that guard
 is in the Dart layer and does not touch the ABI.
 
-## Not verified on hardware yet
+## Not recorded from hardware yet
 
 The build, the symbols in both packaging modes, and the compile at iOS 13.0
-are verified. Three behaviors are still assumptions taken from Apple's
-documentation and the WWDC23 session on external cameras: the NV12-only mode
-list, the identity of a `deviceId` across an unplug and replug, and the default
-orientation of delivered buffers. Each is checked by hand on an iPad Pro and
-the results belong here once they are in.
+are verified. Streaming, unplug and replug, and backgrounding were run on an
+iPad Pro; see "Measured on hardware" above.
+
+Three behaviors have no recorded result and are still assumptions taken from
+Apple's documentation and the WWDC23 session on external cameras:
+
+- the NV12-only mode list
+- the identity of a `deviceId` across an unplug and replug
+- the default orientation of delivered buffers
+
+The generation check on the preview slot is also read from the code only. The
+case it guards against, a notification that arrives after a restart, was not
+reproduced.
