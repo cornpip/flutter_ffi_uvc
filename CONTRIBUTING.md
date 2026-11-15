@@ -56,3 +56,4 @@ comments, commit messages). Use a comma or a separate sentence.
 ## Tests
 
 - Package tests: `flutter test` at the repo root.
+- Tests that need a device or a camera: `example/README.md`.
