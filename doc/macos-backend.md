@@ -92,6 +92,13 @@ them either way.
   device carries them.
 - `deviceEvents` come from `AVCaptureDeviceWasConnectedNotification` and
   `AVCaptureDeviceWasDisconnectedNotification`.
+- A capture runtime error, a disconnect, and an interruption reach
+  `streamErrors`, each only for the stream that is running when it arrives.
+  A notification about an earlier stream of the same session is ignored.
+- A start checks the device and the capture session again after it adds
+  those observers. A device that disappeared while the stream started fails
+  the start with `UVC_ERROR_NO_DEVICE`, and a session that stopped fails it
+  with `UVC_ERROR_IO`.
 
 ## Mode enumeration
 
