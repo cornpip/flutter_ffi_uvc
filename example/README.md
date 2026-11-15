@@ -27,9 +27,9 @@ flutter test -d macos integration_test/macos_camera_smoke_test.dart
 ```
 
 Started this way the example is a child process of the terminal, and macOS
-decides camera access by the terminal app instead of the example. If the
-test fails at the permission step, build the test into the app and start
-the app on its own, so that it asks for camera access itself:
+can refuse it camera access without showing a prompt. If the test fails at
+the permission step, build the test into the app and start the app on its
+own, so that it asks for camera access itself:
 
 ```sh
 flutter build macos --debug -t integration_test/macos_camera_smoke_test.dart

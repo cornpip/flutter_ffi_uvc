@@ -9,6 +9,7 @@
 
 import 'dart:io';
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_ffi_uvc/flutter_ffi_uvc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -22,8 +23,12 @@ void main() {
         print('[smoke ${clock.elapsedMilliseconds}ms] $message');
 
     final UvcCamera camera = UvcCamera();
+    // Logged on arrival, so they show up even when an earlier step fails.
     final List<UvcStreamError> streamErrors = <UvcStreamError>[];
-    final subscription = camera.streamErrors.listen(streamErrors.add);
+    final subscription = camera.streamErrors.listen((UvcStreamError error) {
+      log('stream error: ${error.message}');
+      streamErrors.add(error);
+    });
     int? textureId;
     File? recording;
     try {
@@ -39,7 +44,14 @@ void main() {
       }
       expect(devices, isNotEmpty, reason: 'no UVC camera attached');
 
-      await camera.openUsbDevice(devices.first.deviceId);
+      // macOS lists the built-in camera too. A device with a USB vendor id
+      // is taken first, so an attached camera wins over it.
+      final UvcUsbDevice device = devices.firstWhere(
+        (UvcUsbDevice d) => d.vendorId != 0,
+        orElse: () => devices.first,
+      );
+      log('using device ${device.deviceId}');
+      await camera.openUsbDevice(device.deviceId);
       final List<UvcCameraMode> modes = camera.supportedModes();
       log('${modes.length} modes, '
           '${camera.supportedControls().length} controls');
@@ -56,11 +68,19 @@ void main() {
       expect(camera.isPreviewing, isTrue);
       final UvcCameraMode mode = started.mode!;
 
+      // Render the preview the way the example app does.
       textureId = await camera.createPreviewTexture();
+      await camera.attachPreviewTexture(
+        textureId,
+        width: mode.width,
+        height: mode.height,
+      );
+      await tester.pumpWidget(Texture(textureId: textureId));
 
       // Frames keep arriving.
       final int sequenceBefore = camera.latestFrameSequence();
       await Future<void>.delayed(const Duration(seconds: 2));
+      await tester.pump();
       final int arrived = camera.latestFrameSequence() - sequenceBefore;
       log('$arrived frames in 2s');
       expect(arrived, greaterThan(0));
@@ -100,8 +120,11 @@ void main() {
       camera.stopVideoRecording();
       expect(camera.isRecording, isFalse);
       expect(recording.existsSync(), isTrue);
-      log('recording ${recording.lengthSync()} bytes');
-      expect(recording.lengthSync(), greaterThan(0));
+      final List<int> recorded = recording.readAsBytesSync();
+      log('recording ${recorded.length} bytes');
+      // An MP4 opens with a box whose type, at offset 4, is "ftyp".
+      expect(recorded.length, greaterThan(8));
+      expect(String.fromCharCodes(recorded.sublist(4, 8)), 'ftyp');
 
       final UvcStreamStats stats = camera.getStreamStats();
       log('stats: delivered=${stats.deliveredFrameCount} '
@@ -118,6 +141,7 @@ void main() {
       expect(restarted.success, isTrue);
       await camera.stopPreview();
 
+      await tester.pumpWidget(const SizedBox.shrink());
       await camera.closeUsbDevice();
       expect(camera.openedDeviceId, isNull);
       expect(streamErrors, isEmpty);
