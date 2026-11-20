@@ -11,7 +11,9 @@
 - [ ] `pubspec.yaml` `version:` (drop the `-wip` suffix)
 - [ ] `CHANGELOG.md` `## <version>` section (rename from `-wip`; bullets
       only)
-- [ ] `flutter pub get` in `example/` (refresh the tracked lock)
+- [ ] `flutter pub get` in `example/` (refresh the tracked lock), on the
+      Flutter that CI's `FLUTTER_VERSION` names, since the lock differs
+      between SDKs
 
 ## After the release commit
 
