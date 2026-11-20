@@ -186,6 +186,9 @@ struct uvc_session {
   ffi_uvc_recording_t rec;
 #endif
   int preview_rotation;  // 0, 90, 180, 270 (clockwise)
+  // uvc_set_max_queued_iso_packets; 0 is no limit. Guarded by
+  // mutex, handed to the device handle when a stream starts.
+  int max_queued_iso_packets;
   int preview_flip_h;    // mirror left-right
   int preview_flip_v;    // mirror top-bottom
   ffi_uvc_stream_stats_t stats;
@@ -1802,6 +1805,7 @@ FFI_PLUGIN_EXPORT int uvc_start_preview(
     return result;
   }
 
+  uvc_set_iso_queue_limit(s->devh, (uint32_t)s->max_queued_iso_packets);
   result = uvc_start_streaming(s->devh, &ctrl, frame_callback, s, 0);
   if (result != UVC_SUCCESS) {
     UVC_LOGE("UVC_NATIVE", "uvc_start_streaming failed err=%s", uvc_strerror(result));
@@ -2729,6 +2733,18 @@ FFI_PLUGIN_EXPORT void uvc_set_preview_transform(
   s->preview_flip_h = flip_h ? 1 : 0;
   s->preview_flip_v = flip_v ? 1 : 0;
   pthread_mutex_unlock(&s->mutex);
+}
+
+FFI_PLUGIN_EXPORT int uvc_set_max_queued_iso_packets(
+    uvc_session_t *s,
+    int packets) {
+  if (s == NULL) {
+    return 0;
+  }
+  pthread_mutex_lock(&s->mutex);
+  s->max_queued_iso_packets = packets > 0 ? packets : 0;
+  pthread_mutex_unlock(&s->mutex);
+  return 1;
 }
 
 FFI_PLUGIN_EXPORT void uvc_get_preview_transform(

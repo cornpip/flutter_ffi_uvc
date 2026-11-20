@@ -626,6 +626,10 @@ uvc_error_t uvc_probe_still_ctrl(
     uvc_device_handle_t *devh,
     uvc_still_ctrl_t *still_ctrl);
 
+/* Most isochronous packets to queue across all transfers of a stream, or 0
+ * for no limit. Read when a stream starts. */
+void uvc_set_iso_queue_limit(uvc_device_handle_t *devh, uint32_t packets);
+
 uvc_error_t uvc_start_streaming(
     uvc_device_handle_t *devh,
     uvc_stream_ctrl_t *ctrl,

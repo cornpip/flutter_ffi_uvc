@@ -429,6 +429,31 @@ A stall is reported once per episode when no frame arrives for
 with the last `startPreview` parameters, up to `maxRestartAttempts` per
 episode. Detection stays enabled until `disableStallDetection()`.
 
+#### USB queue depth
+
+On Android and Linux the package queues the camera's USB transfers itself,
+100 of them by default, which is 1600 to 3200 packets for most high-speed
+cameras. Some USB hosts corrupt every frame of an isochronous camera when
+that queue is too deep: the stream starts, MJPEG frames fail to decode, and
+YUYV frames show a band of dark green, with no error from the host. One
+tablet (MediaTek MT8781, kernel 5.10) does this from 512 queued packets up
+and works with 320.
+
+```dart
+// Before startPreview. Returns false where the setting has no effect
+// (Windows, macOS, iPadOS).
+uvcCamera.setMaxQueuedIsoPackets(320);
+
+// Remove the limit again.
+uvcCamera.setMaxQueuedIsoPackets(null);
+```
+
+A high-speed camera sends 8000 packets a second, so 320 packets cover 40 ms
+of a delayed transfer thread before a frame drops. Lower the limit if a
+device still corrupts frames, and raise it if frames drop under load. The
+value applies from the next preview start, and only to cameras that stream
+over an isochronous endpoint.
+
 #### Errors
 
 Calls that fail throw `UvcException`, which carries a `UvcErrorCode` and the

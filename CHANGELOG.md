@@ -1,3 +1,11 @@
+## 1.3.0-wip
+
+- add `setMaxQueuedIsoPackets()` and `maxQueuedIsoPackets` to limit how many
+  isochronous USB packets a camera keeps queued on Android and Linux
+  - for devices whose USB host corrupts every frame when the queue is deep
+    (README, "USB queue depth")
+  - without a limit the queue is as deep as before
+
 ## 1.2.0
 
 - add iPadOS support (17.0 or later, USB-C iPads)

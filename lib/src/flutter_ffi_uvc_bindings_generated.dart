@@ -874,6 +874,29 @@ class FlutterFfiUvcBindings {
         )
       >();
 
+  /// Limits how many isochronous packets the session keeps queued to the USB
+  /// host, across all transfers of its stream. 0, the initial state, sets no
+  /// limit. Applies from the next stream start, to isochronous streams only,
+  /// and never reduces a stream below two transfers.
+  /// Returns 1 when the backend queues USB transfers itself, 0 when the
+  /// operating system does and the value is unused.
+  int uvc_set_max_queued_iso_packets(
+    ffi.Pointer<uvc_session_t> session,
+    int packets,
+  ) {
+    return _uvc_set_max_queued_iso_packets(session, packets);
+  }
+
+  late final _uvc_set_max_queued_iso_packetsPtr =
+      _lookup<
+        ffi.NativeFunction<
+          ffi.Int Function(ffi.Pointer<uvc_session_t>, ffi.Int)
+        >
+      >('uvc_set_max_queued_iso_packets');
+  late final _uvc_set_max_queued_iso_packets =
+      _uvc_set_max_queued_iso_packetsPtr
+          .asFunction<int Function(ffi.Pointer<uvc_session_t>, int)>();
+
   /// Encodes the latest preview frame to JPEG.
   /// rotation/flip semantics match uvc_copy_latest_frame_rgba_transformed and are
   /// applied before encoding; quality is clamped to 1-100. Returns the number of
