@@ -320,9 +320,11 @@ FFI_PLUGIN_EXPORT void uvc_get_preview_transform(
 // and keeps the full queue. Applies from the next stream start, automatic
 // restarts included. Some USB hosts corrupt a stream that is queued too
 // deep, and a queue that is too shallow drops frames when the transfer
-// thread is delayed.
+// thread is delayed. Bulk streams ignore the value, and a stream never
+// queues fewer than two transfers, whatever the limit.
 // Returns 1 when the backend queues USB transfers itself and applies the
 // value, 0 when the operating system owns the transfers and nothing changes.
+// 1 says nothing about whether the open camera is isochronous.
 FFI_PLUGIN_EXPORT int uvc_set_max_queued_iso_packets(
     uvc_session_t *session,
     int packets);

@@ -451,7 +451,8 @@ uvcCamera.setMaxQueuedIsoPackets(null);
 A high-speed camera sends 8000 packets a second, so 320 packets cover 40 ms
 of a delayed transfer thread before a frame drops. Go lower if a device
 still corrupts frames, and higher if frames drop under load. The value
-applies from the next preview start.
+applies from the next preview start, and only to cameras that stream over an
+isochronous endpoint.
 
 #### Errors
 
