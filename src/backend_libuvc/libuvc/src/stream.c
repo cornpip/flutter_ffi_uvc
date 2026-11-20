@@ -43,6 +43,10 @@
 #if defined(__linux__)
 #define LIBUVC_MAX_ISO_TRANSFER_SIZE 49152u
 #endif
+/* Fewest transfers a queued-packet limit (uvc_set_iso_queue_limit) can
+ * reduce a stream to. Fewer leave gaps between one completing and the next
+ * being resubmitted. */
+#define LIBUVC_MIN_ISO_TRANSFERS 2u
 #include "errno.h"
 
 #ifdef _MSC_VER
@@ -1108,6 +1112,37 @@ fail:
   return ret;
 }
 
+void uvc_set_iso_queue_limit(uvc_device_handle_t *devh, uint32_t packets) {
+  devh->max_queued_iso_packets = packets;
+}
+
+/** @internal
+ * @brief Number of transfers to keep queued for an isochronous stream
+ *
+ * LIBUVC_NUM_TRANSFER_BUFS unless the device handle carries a queued-packet
+ * limit. The limit exists because some USB hosts misreport a deep queue: a
+ * MediaTek MT8781 tablet (kernel 5.10) completes every transfer without
+ * error once 512 or more packets are queued, but reports each packet's
+ * length against the wrong buffer, so every frame arrives corrupted. 504
+ * and fewer are fine there, and 128 is shallow enough to drop frames at
+ * high bandwidth.
+ */
+static int _uvc_iso_transfer_count(
+    const uvc_device_handle_t *devh,
+    size_t packets_per_transfer) {
+  const size_t max_packets = devh->max_queued_iso_packets;
+  if (max_packets > 0 && packets_per_transfer > 0) {
+    size_t count = max_packets / packets_per_transfer;
+    if (count < LIBUVC_MIN_ISO_TRANSFERS) {
+      count = LIBUVC_MIN_ISO_TRANSFERS;
+    }
+    if (count < LIBUVC_NUM_TRANSFER_BUFS) {
+      return (int)count;
+    }
+  }
+  return LIBUVC_NUM_TRANSFER_BUFS;
+}
+
 /** Begin streaming video from the stream into the callback function.
  * @ingroup streaming
  *
@@ -1134,6 +1169,8 @@ uvc_error_t uvc_stream_start(
   size_t total_transfer_size = 0;
   struct libusb_transfer *transfer;
   int transfer_id;
+  /* Transfers this stream queues; the rest of the array stays empty. */
+  int transfer_count = LIBUVC_NUM_TRANSFER_BUFS;
   int submitted_transfer_count = 0;
   int iso_retry_attempted = 0;
   size_t iso_packets_per_transfer = 0;
@@ -1353,8 +1390,16 @@ uvc_error_t uvc_stream_start(
         packets_per_transfer,
         total_transfer_size);
 
+    transfer_count = _uvc_iso_transfer_count(strmh->devh, packets_per_transfer);
+    UVC_LOGI(
+        "UVC_STREAM",
+        "queueing iso transfers=%d packets_per_transfer=%zu queued_packets=%zu",
+        transfer_count,
+        (size_t)packets_per_transfer,
+        (size_t)transfer_count * packets_per_transfer);
+
   /* Set up the transfers */
-  for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
+  for (transfer_id = 0; transfer_id < transfer_count; ++transfer_id) {
       transfer = libusb_alloc_transfer(packets_per_transfer);
       strmh->transfers[transfer_id] = transfer;      
       strmh->transfer_bufs[transfer_id] = malloc(total_transfer_size);
@@ -1389,7 +1434,7 @@ uvc_error_t uvc_stream_start(
 
 submit_transfers:
   submitted_transfer_count = 0;
-  for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS;
+  for (transfer_id = 0; transfer_id < transfer_count;
       transfer_id++) {
     ret = libusb_submit_transfer(strmh->transfers[transfer_id]);
     if (ret != UVC_SUCCESS) {
@@ -1402,7 +1447,7 @@ submit_transfers:
   }
 
   if ( ret != UVC_SUCCESS && transfer_id >= 0 ) {
-    for ( ; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; transfer_id++) {
+    for ( ; transfer_id < transfer_count; transfer_id++) {
       free ( strmh->transfers[transfer_id]->buffer );
       libusb_free_transfer ( strmh->transfers[transfer_id]);
       strmh->transfers[transfer_id] = 0;
@@ -1426,7 +1471,9 @@ submit_transfers:
           iso_packets_per_transfer,
           total_transfer_size);
 
-      for (transfer_id = 0; transfer_id < LIBUVC_NUM_TRANSFER_BUFS; ++transfer_id) {
+      transfer_count =
+          _uvc_iso_transfer_count(strmh->devh, iso_packets_per_transfer);
+      for (transfer_id = 0; transfer_id < transfer_count; ++transfer_id) {
         transfer = libusb_alloc_transfer(iso_packets_per_transfer);
         strmh->transfers[transfer_id] = transfer;
         strmh->transfer_bufs[transfer_id] = malloc(total_transfer_size);

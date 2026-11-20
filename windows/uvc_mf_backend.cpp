@@ -2110,6 +2110,13 @@ FFI_PLUGIN_EXPORT void uvc_set_preview_transform(uvc_session_t* session,
 } catch (...) {
 }
 
+// The operating system queues the camera's USB transfers here, so there is
+// nothing to bound.
+FFI_PLUGIN_EXPORT int uvc_set_max_queued_iso_packets(uvc_session_t* /*session*/,
+                                                     int /*packets*/) {
+  return 0;
+}
+
 FFI_PLUGIN_EXPORT void uvc_get_preview_transform(uvc_session_t* session,
                                                  int* rotation, int* flip_h,
                                                  int* flip_v) try {

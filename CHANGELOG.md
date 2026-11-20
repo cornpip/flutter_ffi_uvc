@@ -1,3 +1,11 @@
+## 1.3.0-wip
+
+- add `setMaxQueuedIsoPackets()` and `maxQueuedIsoPackets` to bound how many
+  isochronous USB packets a camera keeps queued on Android and Linux
+  - for devices whose USB host corrupts every frame once the queue is too
+    deep. A MediaTek MT8781 tablet does so from 512 packets up and works
+    with 320. The default depth is unchanged
+
 ## 1.2.0
 
 - add iPadOS support (17.0 or later, USB-C iPads)

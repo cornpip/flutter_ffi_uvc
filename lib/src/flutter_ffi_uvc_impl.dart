@@ -185,6 +185,8 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
 
   UvcPreviewTransform _previewTransform = UvcPreviewTransform.identity;
 
+  int? _maxQueuedIsoPackets;
+
   final StreamController<UvcStreamError> _streamErrorController =
       StreamController<UvcStreamError>.broadcast();
   NativeCallable<Void Function(Pointer<Void>, Pointer<Char>)>? _errorCallable;
@@ -1510,6 +1512,24 @@ class FfiUvcCamera implements UvcCamera, Finalizable {
       value.autoControls,
     ),
   );
+
+  @override
+  int? get maxQueuedIsoPackets => _maxQueuedIsoPackets;
+
+  @override
+  bool setMaxQueuedIsoPackets(int? packets) {
+    if (packets != null && packets <= 0) {
+      throw ArgumentError.value(
+        packets,
+        'packets',
+        'must be positive, or null for no limit',
+      );
+    }
+    _maxQueuedIsoPackets = packets;
+    // The native side takes a C int, and 0 for no limit.
+    final int native = packets == null ? 0 : packets.clamp(1, 0x7fffffff);
+    return _bindings.uvc_set_max_queued_iso_packets(_s, native) != 0;
+  }
 
   @override
   UvcPreviewTransform get previewTransform => _previewTransform;

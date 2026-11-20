@@ -65,6 +65,12 @@ class _FakeCamera implements UvcCamera {
   Stream<UvcDeviceEvent> get deviceEvents => const Stream.empty();
   @override
   Stream<UvcStallEvent> get stallEvents => const Stream.empty();
+
+  @override
+  int? get maxQueuedIsoPackets => null;
+
+  @override
+  bool setMaxQueuedIsoPackets(int? packets) => false;
   @override
   void enableStallDetection([
     UvcStallDetectionConfig config = const UvcStallDetectionConfig(),

@@ -1346,6 +1346,32 @@ abstract interface class UvcCamera {
   /// [enableStallDetection]. This is a broadcast stream.
   Stream<UvcStallEvent> get stallEvents;
 
+  /// The limit last passed to [setMaxQueuedIsoPackets], or null when there
+  /// is none.
+  int? get maxQueuedIsoPackets;
+
+  /// Limits how many isochronous USB packets this instance keeps queued to
+  /// the USB host while it streams. Pass null to remove the limit.
+  ///
+  /// Applies from the next preview start, automatic restarts from stall
+  /// detection included. A running preview keeps the depth it started with.
+  ///
+  /// Without a limit, 100 transfers are queued, which is 1600 to 3200
+  /// packets for most high-speed cameras. Set a limit when a device corrupts
+  /// every frame of a camera that works elsewhere: some USB hosts report
+  /// packet lengths against the wrong buffer once too many packets are
+  /// queued. One tablet does so from 512 packets up, and 320 works there.
+  ///
+  /// The queue is what the stream lives on while the transfer thread is
+  /// delayed, so a limit that is too low drops frames under load. A
+  /// high-speed camera sends 8000 packets a second, so 320 packets last
+  /// 40 ms. The limit is rounded down to whole transfers and kept between 2
+  /// and 100 of them.
+  ///
+  /// Returns false on Windows, macOS, and iPadOS, where the value has no
+  /// effect. Throws [ArgumentError] if [packets] is not positive.
+  bool setMaxQueuedIsoPackets(int? packets);
+
   /// Copies the latest RGBA frame from this instance's native preview buffer.
   ///
   /// Use this (or [copyLatestFrameTransformed]) when raw pixels are the goal,
