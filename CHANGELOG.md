@@ -1,10 +1,10 @@
 ## 1.3.0-wip
 
-- add `setMaxQueuedIsoPackets()` and `maxQueuedIsoPackets` to bound how many
+- add `setMaxQueuedIsoPackets()` and `maxQueuedIsoPackets` to limit how many
   isochronous USB packets a camera keeps queued on Android and Linux
-  - for devices whose USB host corrupts every frame once the queue is too
-    deep. A MediaTek MT8781 tablet does so from 512 packets up and works
-    with 320. The default depth is unchanged
+  - for devices whose USB host corrupts every frame when the queue is deep
+    (README, "USB queue depth")
+  - without a limit the queue is as deep as before
 
 ## 1.2.0
 

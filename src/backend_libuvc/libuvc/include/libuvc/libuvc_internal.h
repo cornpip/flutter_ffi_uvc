@@ -292,7 +292,7 @@ struct uvc_device_handle {
   /** Whether the camera is an iSight that sends one header per frame */
   uint8_t is_isight;
   uint32_t claimed;
-  /** Isochronous packets to keep queued across all transfers of a stream,
+  /** Most isochronous packets to queue across all transfers of a stream,
    * or 0 for no limit. Read when a stream starts. */
   uint32_t max_queued_iso_packets;
 };

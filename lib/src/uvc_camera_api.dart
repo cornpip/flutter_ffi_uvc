@@ -1347,38 +1347,22 @@ abstract interface class UvcCamera {
   Stream<UvcStallEvent> get stallEvents;
 
   /// The limit last passed to [setMaxQueuedIsoPackets], or null when there
-  /// is none. This is the requested value, not the depth a stream ended up
-  /// with.
+  /// is none.
   int? get maxQueuedIsoPackets;
 
   /// Limits how many isochronous USB packets this instance keeps queued to
   /// the USB host while it streams. Pass null to remove the limit.
   ///
-  /// Applies from the next preview start, automatic restarts from stall
-  /// detection included. A running preview keeps the depth it started with.
-  /// Only cameras that stream over an isochronous endpoint use the limit. A
-  /// camera that streams over a bulk endpoint ignores it.
+  /// Without a limit, 100 transfers are queued. Some USB hosts corrupt every
+  /// frame when the queue is that deep, and a limit avoids it. A limit that
+  /// is too low drops frames when the transfer thread is delayed.
   ///
-  /// Without a limit, 100 transfers are queued, which is 1600 to 3200
-  /// packets for most high-speed cameras. Set a limit when a device corrupts
-  /// every frame of a camera that works elsewhere: some USB hosts report
-  /// packet lengths against the wrong buffer once too many packets are
-  /// queued. One tablet does so from 512 packets up, and 320 works there.
-  ///
-  /// The queue is what the stream lives on while the transfer thread is
-  /// delayed, so a limit that is too low drops frames under load. A
-  /// high-speed camera sends 8000 packets a second, so 320 packets last
-  /// 40 ms.
-  ///
-  /// The limit is rounded down to whole transfers, and a stream always
-  /// queues at least 2 and at most 100 of them. A limit smaller than two
-  /// transfers therefore queues more packets than it asks for: 32 when a
-  /// transfer holds 16 packets, 64 when it holds 32.
+  /// Applies from the next preview start, to cameras that stream over an
+  /// isochronous endpoint. The limit is rounded down to whole transfers, and
+  /// at least 2 transfers are always queued.
   ///
   /// Returns false on Windows, macOS, and iPadOS, where the value has no
-  /// effect. True means the platform uses the setting, not that the camera
-  /// in use is isochronous. Throws [ArgumentError] if [packets] is not
-  /// positive.
+  /// effect. Throws [ArgumentError] if [packets] is not positive.
   bool setMaxQueuedIsoPackets(int? packets);
 
   /// Copies the latest RGBA frame from this instance's native preview buffer.

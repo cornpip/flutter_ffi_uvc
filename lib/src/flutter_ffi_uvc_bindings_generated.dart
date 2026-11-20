@@ -874,16 +874,12 @@ class FlutterFfiUvcBindings {
         )
       >();
 
-  /// Upper bound on isochronous packets queued to the USB host at once, across
-  /// all transfers of the session's stream. 0, the initial state, sets no limit
-  /// and keeps the full queue. Applies from the next stream start, automatic
-  /// restarts included. Some USB hosts corrupt a stream that is queued too
-  /// deep, and a queue that is too shallow drops frames when the transfer
-  /// thread is delayed. Bulk streams ignore the value, and a stream never
-  /// queues fewer than two transfers, whatever the limit.
-  /// Returns 1 when the backend queues USB transfers itself and applies the
-  /// value, 0 when the operating system owns the transfers and nothing changes.
-  /// 1 says nothing about whether the open camera is isochronous.
+  /// Limits how many isochronous packets the session keeps queued to the USB
+  /// host, across all transfers of its stream. 0, the initial state, sets no
+  /// limit. Applies from the next stream start, to isochronous streams only,
+  /// and never reduces a stream below two transfers.
+  /// Returns 1 when the backend queues USB transfers itself, 0 when the
+  /// operating system does and the value is unused.
   int uvc_set_max_queued_iso_packets(
     ffi.Pointer<uvc_session_t> session,
     int packets,
