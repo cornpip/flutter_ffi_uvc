@@ -55,5 +55,8 @@ comments, commit messages). Use a comma or a separate sentence.
 
 ## Tests
 
-- Package tests: `flutter test` at the repo root.
+- Package tests: `flutter test` at the repo root. The example needs a
+  newer Flutter than the package floor (see `FLUTTER_VERSION` and
+  `FLUTTER_MIN_VERSION` in `.github/workflows/build.yml`); on an older SDK,
+  run `flutter pub get --no-example` first.
 - Tests that need a device or a camera: `example/README.md`.
