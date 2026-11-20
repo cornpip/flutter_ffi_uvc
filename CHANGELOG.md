@@ -1,4 +1,4 @@
-## 1.3.0-wip
+## 1.3.0
 
 - add `setMaxQueuedIsoPackets()` and `maxQueuedIsoPackets` to limit how many
   isochronous USB packets a camera keeps queued on Android and Linux
