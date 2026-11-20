@@ -39,7 +39,11 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  FLUTTER_VERSION: "3.47.4"
+  # The oldest Flutter the package supports (pubspec.yaml `flutter:`).
+  # The package itself is analyzed and tested on this version.
+  FLUTTER_MIN_VERSION: "3.32.7"
+  # The Flutter the example app tracks. Every example build uses it.
+  FLUTTER_VERSION: "3.50.0"
 
 jobs:
   analyze:
@@ -49,10 +53,13 @@ jobs:
       - uses: subosito/flutter-action@v2
         with:
           channel: stable
-          flutter-version: ${{ env.FLUTTER_VERSION }}
+          flutter-version: ${{ env.FLUTTER_MIN_VERSION }}
           cache: true
-      - run: flutter pub get
+      # The example needs a newer SDK than the package floor, so leave it
+      # out of resolution here.
+      - run: flutter pub get --no-example
       - run: flutter analyze lib test
+      - run: flutter test
 
   android:
     runs-on: ubuntu-latest
